@@ -24,26 +24,3 @@ DEBCONF_NONINTERACTIVE_SEEN=true
 SKIP_FIRST_BOOT_CONFIG=1
 
 DECKSMITHOS_PROFILE="${DECKSMITHOS_PROFILE:-dev}"
-
-# DecksmithOS display profile
-DECKSMITHOS_PRIMARY_DISPLAY='spi35'
-
-# Select the SPI display overlay according to the actual hardware.
-# Examples:
-#   waveshare35a
-#   waveshare35b-v2
-#   mhs35
-DECKSMITHOS_SPI_DTO='waveshare35b-v2'
-
-# Typical values:
-#   0   = landscape
-#   90  = portrait
-#   180 = reverse landscape
-#   270 = reverse portrait
-DECKSMITHOS_SPI_ROTATION='90'
-
-# Touchscreen device name expected by Xorg calibration
-DECKSMITHOS_SPI_TOUCH_PRODUCT='ADS7846 Touchscreen'
-
-# SPI displays commonly expose fb1 as the target framebuffer
-DECKSMITHOS_SPI_FB='/dev/fb1'

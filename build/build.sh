@@ -75,8 +75,16 @@ sync_decksmithos_files() {
   else
     rsync -a --delete "${BUILD_DIR}/config" "${PI_GEN_DIR}/config"
   fi
+
   FIRST_USER_PASS="$(generate_password)"
   echo "FIRST_USER_PASS=\"${FIRST_USER_PASS}\"" >> "${PI_GEN_DIR}/config"
+  echo >> "${PI_GEN_DIR}/config"
+  echo "DECKSMITHOS_PRIMARY_DISPLAY=\"${DECKSMITHOS_PRIMARY_DISPLAY}\"" >> "${PI_GEN_DIR}/config"
+  echo "DECKSMITHOS_SPI_DTO=\"${DECKSMITHOS_SPI_DTO}\"" >> "${PI_GEN_DIR}/config"
+  echo "DECKSMITHOS_SPI_FB=\"${DECKSMITHOS_SPI_FB}\"" >> "${PI_GEN_DIR}/config"
+  echo "DECKSMITHOS_SPI_ROTATION=\"${DECKSMITHOS_SPI_ROTATION}\"" >> "${PI_GEN_DIR}/config"
+
+
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos" "${PI_GEN_DIR}/"
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos-dev" "${PI_GEN_DIR}/"
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos-release" "${PI_GEN_DIR}/"
