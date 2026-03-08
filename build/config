@@ -1,0 +1,49 @@
+IMG_NAME='DecksmithOS'
+RELEASE='trixie'
+TARGET_HOSTNAME='decksmithos'
+FIRST_USER_NAME='dj'
+DISABLE_FIRST_BOOT_USER_RENAME=1
+
+ENABLE_SSH=0
+STAGE_LIST='stage0 stage1 stage2 stage-decksmithos stage-decksmithos-release'
+
+# Build as Raspberry Pi OS Lite 64-bit
+DEPLOY_ZIP=0
+#DEPLOY_COMPRESSION='xz'
+DEPLOY_COMPRESSION='none'
+
+# Keep image generation deterministic enough for now
+LOCALE_DEFAULT='en_US.UTF-8'
+KEYBOARD_KEYMAP='us'
+TIMEZONE_DEFAULT='UTC'
+DEBIAN_FRONTEND=noninteractive
+APT_LISTCHANGES_FRONTEND=none
+DEBCONF_NONINTERACTIVE_SEEN=true
+
+# We do not want interactive first-boot setup
+SKIP_FIRST_BOOT_CONFIG=1
+
+DECKSMITHOS_PROFILE="${DECKSMITHOS_PROFILE:-release}"
+
+# DecksmithOS display profile
+DECKSMITHOS_PRIMARY_DISPLAY='spi35'
+
+# Select the SPI display overlay according to the actual hardware.
+# Examples:
+#   waveshare35a
+#   waveshare35b-v2
+#   mhs35
+DECKSMITHOS_SPI_DTO='waveshare35b-v2'
+
+# Typical values:
+#   0   = landscape
+#   90  = portrait
+#   180 = reverse landscape
+#   270 = reverse portrait
+DECKSMITHOS_SPI_ROTATION='90'
+
+# Touchscreen device name expected by Xorg calibration
+DECKSMITHOS_SPI_TOUCH_PRODUCT='ADS7846 Touchscreen'
+
+# SPI displays commonly expose fb1 as the target framebuffer
+DECKSMITHOS_SPI_FB='/dev/fb1'

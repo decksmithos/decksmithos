@@ -1,0 +1,13 @@
+# DecksmithOS hardware profile
+
+# disable onboard wifi
+dtoverlay=disable-wifi
+
+# disable onboard bluetooth
+dtoverlay=disable-bt
+
+# disable onboard audio
+dtparam=audio=off
+
+# enable SPI for 3.5 display
+dtparam=spi=on

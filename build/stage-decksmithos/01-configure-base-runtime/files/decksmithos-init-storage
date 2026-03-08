@@ -1,0 +1,122 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+log() {
+  printf '[decksmithos-storage-init] %s\n' "$*"
+}
+
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+ROOT_DEV="$(findmnt -n -o SOURCE /)"
+ROOT_DISK=""
+ROOT_PART=""
+PART4=""
+DISK_SIZE_BYTES=0
+DISK_SIZE_MIB=0
+TARGET_END_MIB=0
+P3_END_MIB=0
+P4_START_MIB=0
+P4_END_MIB=0
+
+detect_root_disk() {
+  case "${ROOT_DEV}" in
+    /dev/mmcblk*p[0-9]|/dev/nvme*n*p[0-9])
+      ROOT_DISK="${ROOT_DEV%p[0-9]}"
+      ROOT_PART="${ROOT_DEV##*p}"
+      PART4="${ROOT_DISK}p4"
+      ;;
+    /dev/sd[a-z][0-9])
+      ROOT_DISK="${ROOT_DEV%[0-9]}"
+      ROOT_PART="${ROOT_DEV##*[!0-9]}"
+      PART4="${ROOT_DISK}4"
+      ;;
+    *)
+      die "Unsupported root device format: ${ROOT_DEV}"
+      ;;
+  esac
+}
+
+partition4_exists() {
+  [[ -b "${PART4}" ]]
+}
+
+create_partition4() {
+  DISK_SIZE_BYTES="$(blockdev --getsize64 "${ROOT_DISK}")"
+  DISK_SIZE_MIB=$((DISK_SIZE_BYTES / 1024 / 1024))
+
+  TARGET_END_MIB=$(( DISK_SIZE_MIB * 85 / 100 ))
+
+  # Read end of partition 3 in MiB
+  P3_END_MIB="$(
+    parted -sm "${ROOT_DISK}" unit MiB print \
+      | awk -F: '$1=="3" {gsub("MiB","",$3); print int($3)}'
+  )"
+
+  [[ -n "${P3_END_MIB}" ]] || die "Could not determine end of partition 3"
+
+  P4_START_MIB="${P3_END_MIB}"
+  P4_END_MIB="${TARGET_END_MIB}"
+
+  if (( P4_END_MIB <= P4_START_MIB + 32 )); then
+    die "Not enough free space to create storage partition"
+  fi
+
+  log "Creating partition 4 on ${ROOT_DISK}: ${P4_START_MIB}MiB -> ${P4_END_MIB}MiB"
+
+  parted -s "${ROOT_DISK}" unit MiB mkpart primary ext4 "${P4_START_MIB}" "${P4_END_MIB}"
+
+  partprobe "${ROOT_DISK}" || true
+  udevadm settle
+  sleep 2
+
+  [[ -b "${PART4}" ]] || die "Partition 4 was not detected after creation"
+}
+
+format_and_mount_storage() {
+  log "Formatting ${PART4} as ext4"
+  mkfs.ext4 -F -L storage "${PART4}"
+  tune2fs -m 0 "${PART4}" || true
+
+  mkdir -p /storage
+  mount LABEL=storage /storage
+
+  mkdir -p \
+    /storage/library \
+    /storage/recordings \
+    /storage/logs \
+    /storage/config \
+    /storage/exports \
+    /storage/cache \
+    /storage/crates
+
+  chmod 777 /storage
+  chmod 777 /storage/library
+  chmod 777 /storage/recordings
+  chmod 777 /storage/exports
+  chmod 777 /storage/crates
+  chmod 777 /storage/cache
+
+  chmod 777 /storage/config
+  chmod 777 /storage/logs
+}
+
+main() {
+  detect_root_disk
+
+  if partition4_exists; then
+    log "Partition 4 already exists: ${PART4}"
+    exit 0
+  fi
+
+  create_partition4
+  format_and_mount_storage
+
+  log "Storage initialization completed. Rebooting..."
+  sync
+  reboot -f
+}
+
+main "$@"

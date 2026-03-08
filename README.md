@@ -176,7 +176,7 @@ Filesystem:
 ext4
 
 Typical size per partition:
-2 GB
+3 GB
 
 The root filesystem contains:
 
@@ -198,12 +198,13 @@ ext4
 
 Typical contents:
 /storage
-/library
-/recordings
-/logs
-/config
-/exports
-/cache
+  /library
+  /recordings
+  /logs
+  /config
+  /exports
+  /cache
+  /crates
 
 ### Directory purposes
 /library
@@ -235,8 +236,8 @@ Recommended configuration:
 
 Typical layout example:
 - boot: 256 MB
-- rootfs_A: 2 GB
-- rootfs_B: 2 GB
+- rootfs_A: 3 GB
+- rootfs_B: 3 GB
 - storage: remaining space
 
 This leaves tens of gigabytes available for music storage.

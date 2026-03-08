@@ -1,0 +1,25 @@
+# Local pi-gen checkout
+pi-gen/
+
+# Build artifacts
+output/
+work/
+deploy/
+
+# Image artifacts
+*.img
+*.img.xz
+*.zip
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+.DS_Store
