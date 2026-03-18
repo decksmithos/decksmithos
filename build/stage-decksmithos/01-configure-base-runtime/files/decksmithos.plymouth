@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=DecksmithOS
+Description=DecksmithOS boot splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/decksmithos
+ScriptFile=/usr/share/plymouth/themes/decksmithos/decksmithos.script

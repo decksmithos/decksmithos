@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #set -Eeuo pipefail
 
-DECKSMITHOS_PRIMARY_DISPLAY=spi35
-DECKSMITHOS_SPI_DTO=waveshare35b-v2
-DECKSMITHOS_SPI_FB=/dev/fb0
-DECKSMITHOS_SPI_ROTATION=90
+export DECKSMITHOS_PRIMARY_DISPLAY=spi35
+export DECKSMITHOS_SPI_DTO=waveshare35a
+export DECKSMITHOS_SPI_FB=/dev/fb1
+export DECKSMITHOS_SPI_ROTATION=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}"
@@ -12,10 +12,10 @@ PI_GEN_DIR="${BUILD_DIR}/pi-gen"
 PI_GEN_REPO="https://github.com/RPi-Distro/pi-gen.git"
 PI_GEN_BRANCH="${PI_GEN_BRANCH:-arm64}"
 
-POSTPROCESS_SCRIPT="${BUILD_DIR}/postprocess-ab.sh"
+POSTPROCESS_SCRIPT="${BUILD_DIR}/postprocess.sh"
 COMPRESS_OUTPUT="${COMPRESS_OUTPUT:-0}"
 
-DECKSMITHOS_PROFILE="${DECKSMITHOS_PROFILE:-release}"
+export DECKSMITHOS_PROFILE="${DECKSMITHOS_PROFILE:-release}"
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"
@@ -79,15 +79,17 @@ sync_decksmithos_files() {
   FIRST_USER_PASS="$(generate_password)"
   echo "FIRST_USER_PASS=\"${FIRST_USER_PASS}\"" >> "${PI_GEN_DIR}/config"
   echo >> "${PI_GEN_DIR}/config"
-  echo "DECKSMITHOS_PRIMARY_DISPLAY=\"${DECKSMITHOS_PRIMARY_DISPLAY}\"" >> "${PI_GEN_DIR}/config"
-  echo "DECKSMITHOS_SPI_DTO=\"${DECKSMITHOS_SPI_DTO}\"" >> "${PI_GEN_DIR}/config"
-  echo "DECKSMITHOS_SPI_FB=\"${DECKSMITHOS_SPI_FB}\"" >> "${PI_GEN_DIR}/config"
-  echo "DECKSMITHOS_SPI_ROTATION=\"${DECKSMITHOS_SPI_ROTATION}\"" >> "${PI_GEN_DIR}/config"
+  echo "export DECKSMITHOS_PRIMARY_DISPLAY=\"${DECKSMITHOS_PRIMARY_DISPLAY}\"" >> "${PI_GEN_DIR}/config"
+  echo "export DECKSMITHOS_SPI_DTO=\"${DECKSMITHOS_SPI_DTO}\"" >> "${PI_GEN_DIR}/config"
+  echo "export DECKSMITHOS_SPI_FB=\"${DECKSMITHOS_SPI_FB}\"" >> "${PI_GEN_DIR}/config"
+  echo "export DECKSMITHOS_SPI_ROTATION=\"${DECKSMITHOS_SPI_ROTATION}\"" >> "${PI_GEN_DIR}/config"
 
 
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos" "${PI_GEN_DIR}/"
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos-dev" "${PI_GEN_DIR}/"
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos-release" "${PI_GEN_DIR}/"
+
+  rm -f "${PI_GEN_DIR}/stage2/EXPORT_IMAGE"
 }
 
 run_pi_gen() {
@@ -104,14 +106,14 @@ find_latest_pi_gen_image() {
 run_postprocess() {
   local input_image="$1"
 
-  [[ -x "${POSTPROCESS_SCRIPT}" ]] || chmod +x "${POSTPROCESS_SCRIPT}"
+  [ -x "${POSTPROCESS_SCRIPT}" ] || chmod +x "${POSTPROCESS_SCRIPT}"
 
   log "Running A/B post-processing on: ${input_image}"
-  sudo "${POSTPROCESS_SCRIPT}" "${input_image}"
+  sudo DECKSMITHOS_PROFILE=${DECKSMITHOS_PROFILE} "${POSTPROCESS_SCRIPT}" "${input_image}"
 }
 
 compress_final_image() {
-  local final_image="${BUILD_DIR}/output/decksmithos-ab.img"
+  local final_image="${BUILD_DIR}/output/decksmithos-${DECKSMITHOS_PROFILE}.img"
 
   if [[ ! -f "${final_image}" ]]; then
     die "Final image not found: ${final_image}"

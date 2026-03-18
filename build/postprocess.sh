@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+#set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -11,7 +11,8 @@ MNT_DIR="${WORK_DIR}/mnt"
 
 BOOT_SIZE_MIB="${BOOT_SIZE_MIB:-256}"
 ROOTFS_SIZE_MIB="${ROOTFS_SIZE_MIB:-3072}"
-IMAGE_SIZE_MIB="${IMAGE_SIZE_MIB:-6401}"
+SWAP_SIZE_MIB="${SWAP_SIZE_MIB:-1024}"
+IMAGE_SIZE_MIB="${IMAGE_SIZE_MIB:-7427}"
 
 mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}" "${MNT_DIR}"
 
@@ -51,7 +52,7 @@ DST_ROOTFS_B="${MNT_DIR}/dst-rootfs-b"
 
 mkdir -p "$SRC_BOOT" "$SRC_ROOT" "$DST_BOOT" "$DST_ROOTFS_A" "$DST_ROOTFS_B"
 
-OUTPUT_IMAGE="${OUTPUT_DIR}/decksmithos-ab.img"
+OUTPUT_IMAGE="${OUTPUT_DIR}/decksmithos-${DECKSMITHOS_PROFILE}.img"
 
 echo "[1/7] Preparing source image"
 BASE_LOOP="$(losetup --find --show --partscan "${INPUT_IMAGE}")"
@@ -62,16 +63,32 @@ echo "[2/7] Creating target A/B image"
 truncate -s "${IMAGE_SIZE_MIB}M" "${OUTPUT_IMAGE}"
 parted -s "${OUTPUT_IMAGE}" mklabel msdos
 
+#partition 1
 boot_start=1
 boot_end=$((BOOT_SIZE_MIB))
+
+# partition 2
 rootfs_a_start=$((boot_end))
 rootfs_a_end=$((rootfs_a_start + ROOTFS_SIZE_MIB))
+
+# partition 3
 rootfs_b_start=$((rootfs_a_end))
 rootfs_b_end=$((rootfs_b_start + ROOTFS_SIZE_MIB))
+
+# partition 4
+EXTENDED_SIZE_MIB=$((SWAP_SIZE_MIB + 2))
+extended_start=$((rootfs_b_end))
+extended_end=$((extended_start + EXTENDED_SIZE_MIB))
+
+# partition 5
+swap_start=$((extended_start + 1))
+swap_end=$((swap_start + SWAP_SIZE_MIB))
 
 parted -s "${OUTPUT_IMAGE}" unit MiB mkpart primary fat32 "${boot_start}" "${boot_end}"
 parted -s "${OUTPUT_IMAGE}" unit MiB mkpart primary ext4 "${rootfs_a_start}" "${rootfs_a_end}"
 parted -s "${OUTPUT_IMAGE}" unit MiB mkpart primary ext4 "${rootfs_b_start}" "${rootfs_b_end}"
+parted -s "${OUTPUT_IMAGE}" unit MiB mkpart extended "${extended_start}" "${extended_end}"
+parted -s "${OUTPUT_IMAGE}" unit MiB mkpart logical linux-swap "${swap_start}" "${swap_end}"
 parted -s "${OUTPUT_IMAGE}" set 1 boot on
 
 OUT_LOOP="$(losetup --find --show --partscan "${OUTPUT_IMAGE}")"
@@ -80,6 +97,7 @@ echo "[3/7] Formatting target partitions"
 mkfs.vfat -F 32 -n BOOT "${OUT_LOOP}p1"
 mkfs.ext4 -F -L rootfs_A "${OUT_LOOP}p2"
 mkfs.ext4 -F -L rootfs_B "${OUT_LOOP}p3"
+mkswap -L swap "${OUT_LOOP}p5"
 
 echo "[4/7] Mounting target partitions"
 mount "${OUT_LOOP}p1" "${DST_BOOT}"
@@ -98,21 +116,23 @@ ROOTFS_B_UUID="$(blkid -s UUID -o value "${OUT_LOOP}p3")"
 ROOTFS_A_PARTUUID="$(blkid -s PARTUUID -o value "${OUT_LOOP}p2")"
 
 cat > "${DST_ROOTFS_A}/etc/fstab" <<EOF
-UUID=${ROOTFS_A_UUID}  /                ext4  defaults,noatime  0 1
-UUID=${BOOT_UUID}      /boot/firmware   vfat  defaults,noatime  0 2
-LABEL=storage  /storage  ext4  defaults,noatime,nofail,x-systemd.device-timeout=1s  0  2
-tmpfs                  /tmp             tmpfs nosuid,nodev,mode=1777,size=256M 0 0
-tmpfs                  /var/tmp         tmpfs nosuid,nodev,mode=1777,size=128M 0 0
-/storage/logs          /var/log         bind  bind  0 0
+UUID=${ROOTFS_A_UUID}   /               ext4    defaults,noatime                    0 1
+UUID=${BOOT_UUID}       /boot/firmware  vfat    defaults,noatime                    0 2
+LABEL=storage           /storage        ext4    defaults,noatime,nofail             0 2
+LABEL=swap              none            swap    sw                                  0 0
+tmpfs                   /tmp            tmpfs   nosuid,nodev,mode=1777,size=256M    0 0
+tmpfs                   /var/tmp        tmpfs   nosuid,nodev,mode=1777,size=128M    0 0
+/storage/logs           /var/log        bind    bind,nofail  0 0
 EOF
 
 cat > "${DST_ROOTFS_B}/etc/fstab" <<EOF
-UUID=${ROOTFS_B_UUID}  /                ext4  defaults,noatime  0 1
-UUID=${BOOT_UUID}      /boot/firmware   vfat  defaults,noatime  0 2
-LABEL=storage  /storage  ext4  defaults,noatime,nofail,x-systemd.device-timeout=1s  0  2
-tmpfs                  /tmp             tmpfs nosuid,nodev,mode=1777,size=256M 0 0
-tmpfs                  /var/tmp         tmpfs nosuid,nodev,mode=1777,size=128M 0 0
-/storage/logs          /var/log         bind  bind  0 0
+UUID=${ROOTFS_B_UUID}   /               ext4    defaults,noatime                    0 1
+UUID=${BOOT_UUID}       /boot/firmware  vfat    defaults,noatime                    0 2
+LABEL=storage           /storage        ext4    defaults,noatime,nofail             0 2
+LABEL=swap              none            swap    sw                                  0 0
+tmpfs                   /tmp            tmpfs   nosuid,nodev,mode=1777,size=256M    0 0
+tmpfs                   /var/tmp        tmpfs   nosuid,nodev,mode=1777,size=128M    0 0
+/storage/logs           /var/log        bind    bind,nofail                         0 0
 EOF
 
 CMDLINE_FILE=""
@@ -132,8 +152,20 @@ CURRENT_CMDLINE="$(echo "${CURRENT_CMDLINE}" | sed -E 's#root=[^ ]+##g')"
 CURRENT_CMDLINE="$(echo "${CURRENT_CMDLINE}" | sed -E 's#rootfstype=[^ ]+##g')"
 CURRENT_CMDLINE="$(echo "${CURRENT_CMDLINE}" | sed -E 's#[[:space:]]+# #g' | sed -E 's#^ ##; s# $##')"
 
+if [ "${DECKSMITHOS_PROFILE}" == "dev" ]; then
+  QUIET=""
+else
+  QUIET="quiet splash vt.global_cursor_default=0"
+fi
+
+if [ "${DECKSMITHOS_PRIMARY_DISPLAY}" == "spi35" ]; then
+  FB="fbcon=map:10 fbcon=font:ProFont6x11"
+else
+  FB=""
+fi
+
 cat > "${CMDLINE_FILE}" <<EOF
-${CURRENT_CMDLINE} root=PARTUUID=${ROOTFS_A_PARTUUID} rootfstype=ext4 rootwait quiet splash plymouth.ignore-serial-consoles usbcore.autosuspend=-1 vt.global_cursor_default=0
+${CURRENT_CMDLINE} root=PARTUUID=${ROOTFS_A_PARTUUID} rootfstype=ext4 rootwait panic=1 ${QUIET} ${FB} plymouth.ignore-serial-consoles usbcore.autosuspend=-1
 EOF
 
 echo "[8/8] Done"

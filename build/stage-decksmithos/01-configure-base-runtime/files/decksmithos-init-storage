@@ -1,5 +1,5 @@
 #!/bin/bash
-set -Eeuo pipefail
+#set -Eeuo pipefail
 
 log() {
   printf '[decksmithos-storage-init] %s\n' "$*"
@@ -13,75 +13,79 @@ die() {
 ROOT_DEV="$(findmnt -n -o SOURCE /)"
 ROOT_DISK=""
 ROOT_PART=""
-PART4=""
+PART_STORAGE=""
 DISK_SIZE_BYTES=0
 DISK_SIZE_MIB=0
 TARGET_END_MIB=0
-P3_END_MIB=0
-P4_START_MIB=0
-P4_END_MIB=0
+SWAP_END_MIB=0
+STORAGE_START_MIB=0
+STORAGE_END_MIB=0
 
 detect_root_disk() {
   case "${ROOT_DEV}" in
     /dev/mmcblk*p[0-9]|/dev/nvme*n*p[0-9])
       ROOT_DISK="${ROOT_DEV%p[0-9]}"
       ROOT_PART="${ROOT_DEV##*p}"
-      PART4="${ROOT_DISK}p4"
+      PART_STORAGE="${ROOT_DISK}p6"
       ;;
     /dev/sd[a-z][0-9])
       ROOT_DISK="${ROOT_DEV%[0-9]}"
       ROOT_PART="${ROOT_DEV##*[!0-9]}"
-      PART4="${ROOT_DISK}4"
+      PART_STORAGE="${ROOT_DISK}6"
       ;;
     *)
-      die "Unsupported root device format: ${ROOT_DEV}"
+      die "ERROR: Unsupported root device format: ${ROOT_DEV}"
       ;;
   esac
 }
 
-partition4_exists() {
-  [[ -b "${PART4}" ]]
+partition_storage_exists() {
+  [[ -b "${PART_STORAGE}" ]]
 }
 
-create_partition4() {
+create_partition_storage() {
   DISK_SIZE_BYTES="$(blockdev --getsize64 "${ROOT_DISK}")"
   DISK_SIZE_MIB=$((DISK_SIZE_BYTES / 1024 / 1024))
 
   TARGET_END_MIB=$(( DISK_SIZE_MIB * 85 / 100 ))
 
-  # Read end of partition 3 in MiB
-  P3_END_MIB="$(
+  # Read end of swap / partition 5 in MiB
+  SWAP_END_MIB="$(
     parted -sm "${ROOT_DISK}" unit MiB print \
-      | awk -F: '$1=="3" {gsub("MiB","",$3); print int($3)}'
+      | awk -F: '$1=="5" {gsub("MiB","",$3); print int($3)}'
   )"
 
-  [[ -n "${P3_END_MIB}" ]] || die "Could not determine end of partition 3"
+  [[ -n "${SWAP_END_MIB}" ]] || die "ERROR: Could not determine end of swap / partition 5"
 
-  P4_START_MIB="${P3_END_MIB}"
-  P4_END_MIB="${TARGET_END_MIB}"
+  STORAGE_START_MIB="$((SWAP_END_MIB + 1))"
+  STORAGE_END_MIB="${TARGET_END_MIB}"
 
-  if (( P4_END_MIB <= P4_START_MIB + 32 )); then
-    die "Not enough free space to create storage partition"
+  if (( STORAGE_END_MIB <= STORAGE_START_MIB + 32 )); then
+    die "ERROR: Not enough free space to create storage partition! You need an larger disk!"
   fi
 
-  log "Creating partition 4 on ${ROOT_DISK}: ${P4_START_MIB}MiB -> ${P4_END_MIB}MiB"
+  swapoff -a
 
-  parted -s "${ROOT_DISK}" unit MiB mkpart primary ext4 "${P4_START_MIB}" "${P4_END_MIB}"
+  log "Growing the 'extended' / partition 4 on ${ROOT_DISK}..."
+  parted -f -s "${ROOT_DISK}" unit MiB resizepart 4 "${STORAGE_END_MIB}"
+
+  log "Creating 'storage' partition on ${ROOT_DISK}: ${STORAGE_START_MIB}MiB -> ${STORAGE_END_MIB}MiB"
+  parted -f -s "${ROOT_DISK}" unit MiB mkpart logical ext4 "${STORAGE_START_MIB}" "${STORAGE_END_MIB}"
 
   partprobe "${ROOT_DISK}" || true
   udevadm settle
   sleep 2
 
-  [[ -b "${PART4}" ]] || die "Partition 4 was not detected after creation"
+  [[ -b "${PART_STORAGE}" ]] || die "ERROR: Partition 'storage' was not detected after creation!"
 }
 
 format_and_mount_storage() {
-  log "Formatting ${PART4} as ext4"
-  mkfs.ext4 -F -L storage "${PART4}"
-  tune2fs -m 0 "${PART4}" || true
+  log "Formatting ${PART_STORAGE} as ext4"
+  mkfs.ext4 -F -L storage "${PART_STORAGE}"
+  tune2fs -m 0 "${PART_STORAGE}" || true
 
   mkdir -p /storage
-  mount LABEL=storage /storage
+  mount LABEL=storage /storage || die "ERROR: Partition 'storage' was not detected for mount!"
 
   mkdir -p \
     /storage/library \
@@ -106,12 +110,12 @@ format_and_mount_storage() {
 main() {
   detect_root_disk
 
-  if partition4_exists; then
-    log "Partition 4 already exists: ${PART4}"
+  if partition_storage_exists; then
+    log "Partition 'storage' already exists: ${PART_STORAGE}"
     exit 0
   fi
 
-  create_partition4
+  create_partition_storage
   format_and_mount_storage
 
   log "Storage initialization completed. Rebooting..."

@@ -1,9 +1,9 @@
 #!/bin/bash
-set -Eeuo pipefail
+#set -Eeuo pipefail
 
 DISPLAY_PROFILE="${DECKSMITHOS_PRIMARY_DISPLAY:-}"
-SPI_TOUCH_PRODUCT="${DECKSMITHOS_SPI_TOUCH_PRODUCT:-ADS7846 Touchscreen}"
-SPI_FB="${DECKSMITHOS_SPI_FB:-/dev/fb1}"
+SPI_TOUCH_PRODUCT="${DECKSMITHOS_SPI_TOUCH_PRODUCT:-}"
+SPI_FB="${DECKSMITHOS_SPI_FB:-}"
 
 echo "Installing DecksmithOS session files"
 
@@ -19,7 +19,7 @@ if [ "${DISPLAY_PROFILE}" = "spi35" ]; then
   export FRAMEBUFFER=${SPI_FB}
 fi
 
-unclutter -idle 0.2 -root &
+#unclutter -idle 0.2 -root &
 
 if command -v plymouth >/dev/null 2>&1; then
   if plymouth --help 2>&1 | grep -q -- '--retain-splash'; then
@@ -33,42 +33,29 @@ openbox-session &
 exec /usr/local/bin/decksmithos-mixxx
 EOF
 
-mkdir -p ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.config/openbox
-cat > ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.config/openbox/autostart <<EOF
-xsetroot -solid black &
-xset s off &
-xset -dpms &
-xset s noblank &
-EOF
+#mkdir -p ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.config/openbox
+#cat > ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.config/openbox/autostart <<EOF
+#xsetroot -solid black &
+#xset s off &
+#xset -dpms &
+#xset s noblank &
+#EOF
+
+mkdir -p ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.mixxx
+install -v -m 644 files/mixxx.cfg "${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.mixxx/mixxx.cfg"
+install -v -m 644 files/soundconfig.xml "${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.mixxx/soundconfig.xml"
 
 on_chroot <<EOF
 chmod +x /home/${FIRST_USER_NAME}/.xsession
 chown -R ${FIRST_USER_NAME}:${FIRST_USER_NAME} /home/${FIRST_USER_NAME}/
 EOF
 
-cat > ${ROOTFS_DIR}/usr/local/bin/decksmithos-mixxx <<'EOF'
-#!/bin/bash
-set -euo pipefail
-
-LOG_DIR="/storage/logs"
-mkdir -p "${LOG_DIR}"
-
-exec >>"${LOG_DIR}/mixxx.log" 2>&1
-
-CORES="${DECKSMITHOS_CORES:-2,3}"
-ARGS=(--fullscreen)
-
-renice -n -5 $$ >/dev/null 2>&1 || true
-exec taskset -c "${CORES}" mixxx "${ARGS[@]}"
-EOF
-
-chmod +x ${ROOTFS_DIR}/usr/local/bin/decksmithos-mixxx
-
-echo "Option \"AutoAddGPU\" \"false\"" > ${ROOTFS_DIR}/etc/X11/xorg.conf
+#echo "Option \"AutoAddGPU\" \"false\"" > ${ROOTFS_DIR}/etc/X11/xorg.conf
 
 mkdir -p ${ROOTFS_DIR}/etc/X11/xorg.conf.d
+install -v -m 644 files/45-evdev.conf "${ROOTFS_DIR}/etc/X11/xorg.conf.d/45-evdev.conf"
 
-if [[ "${DISPLAY_PROFILE}" == "spi35" ]]; then
+if [ "${DISPLAY_PROFILE}" == "spi35" ]; then
   echo "Writing Xorg fbdev configuration for SPI primary display"
 
   cat > ${ROOTFS_DIR}/etc/X11/xorg.conf.d/98-spi-screen.conf <<EOF
@@ -76,6 +63,7 @@ Section "Device"
     Identifier  "DecksmithOS SPI Screen"
     Driver      "fbturbo"
     Option      "fbdev" "${SPI_FB}"
+    Option      "SwapbuffersWait" "true"
 EndSection
 EOF
 

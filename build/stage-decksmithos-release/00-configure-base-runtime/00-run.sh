@@ -2,15 +2,11 @@
 #set -Eeuo pipefail
 
 echo "Configuring DecksmithOS release runtime"
-
 echo "${TARGET_HOSTNAME}" > "${ROOTFS_DIR}/etc/hostname"
-
 echo "127.0.0.1 localhost" > "${ROOTFS_DIR}/etc/hosts"
 echo "127.0.1.1 ${TARGET_HOSTNAME}" >> "${ROOTFS_DIR}/etc/hosts"
 
 on_chroot <<EOF
-systemctl enable nodm
-
 systemctl disable bluetooth || true
 systemctl disable avahi-daemon || true
 systemctl disable triggerhappy || true
@@ -23,17 +19,6 @@ echo "Disabling apt runtime"
 rm -rf ${ROOTFS_DIR}/var/lib/apt
 rm -rf ${ROOTFS_DIR}/var/cache/apt
 rm -rf ${ROOTFS_DIR}/var/log/apt
-for unit in \
-    apt-daily.service \
-    apt-daily.timer \
-    apt-daily-upgrade.service \
-    apt-daily-upgrade.timer
-do
-    on_chroot <<EOF
-systemctl disable "${unit}" >/dev/null 2>&1 || true
-systemctl mask "${unit}" >/dev/null 2>&1 || true
-EOF
-done
 
 echo "Removing documentation"
 rm -rf ${ROOTFS_DIR}/usr/share/man
@@ -55,8 +40,13 @@ rm -rf ${ROOTFS_DIR}/lib/modules/*/kernel/net
 echo "Applying release profile"
 on_chroot <<EOF
 passwd -l "${FIRST_USER_NAME}" || true
+passwd -l "root" || true
 
-apt -y --allow-remove-essential purge apt \
+systemctl disable "ssh" || true
+systemctl mask "ssh" || true
+
+apt -y --allow-remove-essential purge \
+  apt \
   apt-listchanges \
   apt-utils \
   aptitude \
@@ -73,8 +63,13 @@ apt -y --allow-remove-essential purge apt \
   iputils-arping \
   iputils-ping \
   htop \
-  strace || true
+  strace \
+  mc \
+  mingetty \
+  gpm \
+  ifupdown || true
 apt -y autoremove --purge
+
 EOF
 
 on_chroot > ${ROOTFS_DIR}/../packages <<EOF
@@ -82,6 +77,7 @@ dpkg -l
 EOF
 
 echo "Clean rootfs"
+rm -rf ${ROOTFS_DIR}/etc/ssh
 rm -rf ${ROOTFS_DIR}/mnt
 rm -rf ${ROOTFS_DIR}/opt
 rm -rf ${ROOTFS_DIR}/srv
@@ -93,4 +89,3 @@ rm -rf ${ROOTFS_DIR}/var/local
 rm -rf ${ROOTFS_DIR}/var/mail
 rm -rf ${ROOTFS_DIR}/var/opt
 rm -rf ${ROOTFS_DIR}/var/spool
-

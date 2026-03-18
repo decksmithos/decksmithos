@@ -1,0 +1,2 @@
+<!DOCTYPE SoundManagerConfig>
+<SoundManagerConfig api="ALSA" deck_count="4" force_network_clock="0" latency="5" samplerate="44100" sync_buffers="2"/>

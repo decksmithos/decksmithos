@@ -1,0 +1,13 @@
+#!/bin/bash
+#set -euo pipefail
+
+LOG_DIR="/var/log"
+mkdir -p "${LOG_DIR}"
+
+exec >>"${LOG_DIR}/mixxx.log" 2>&1
+
+CORES="${DECKSMITHOS_CORES:-2,3,4}"
+#ARGS=(--fullscreen)
+
+renice -n -5 $$ >/dev/null 2>&1 || true
+exec taskset -c "${CORES}" mixxx "${ARGS[@]}"

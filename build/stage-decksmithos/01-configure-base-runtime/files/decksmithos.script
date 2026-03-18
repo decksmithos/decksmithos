@@ -1,0 +1,22 @@
+# DecksmithOS Plymouth script
+# Static centered splash on pure black background.
+
+#fun main ()
+#{
+    Plymouth.SetBackgroundTopColor (0, 0, 0);
+    Plymouth.SetBackgroundBottomColor (0, 0, 0);
+
+    logo.image = Image ("splash.png");
+    logo.sprite = Sprite ();
+
+    screen.w = Window.GetWidth ();
+    screen.h = Window.GetHeight ();
+    logo.w = logo.image.GetWidth ();
+    logo.h = logo.image.GetHeight ();
+
+    logo.x = (screen.w - logo.w) / 2;
+    logo.y = (screen.h - logo.h) / 2;
+
+    logo.sprite.SetImage (logo.image);
+    logo.sprite.SetPosition (logo.x, logo.y, 0);
+#}
