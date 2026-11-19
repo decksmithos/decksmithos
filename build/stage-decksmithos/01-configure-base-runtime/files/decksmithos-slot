@@ -1,0 +1,130 @@
+#!/bin/bash
+# DecksmithOS A/B slot selection (Raspberry Pi bootloader tryboot, autoboot.txt).
+#
+#   slot A = p2 boot_A + p4 rootfs_A      slot B = p3 boot_B + p5 rootfs_B
+#
+# autoboot.txt on p1 (PARTLABEL=autoboot) names the default boot partition and,
+# under [tryboot], the partition used for exactly one boot after
+# `reboot "0 tryboot"`. Any later reboot or power cycle returns to the default,
+# which is the rollback path for a slot that does not come up.
+#
+# Usage:
+#   decksmithos-slot [status]   show running slot, default slot, tryboot flag
+#   decksmithos-slot try        boot the other slot once (reboots now)
+#   decksmithos-slot commit     make the running slot the default
+set -Eeuo pipefail
+
+AUTOBOOT_FILE="autoboot.txt"
+
+die() { echo "decksmithos-slot: $*" >&2; exit 1; }
+
+boot_partnum() { case "$1" in A) echo 2 ;; B) echo 3 ;; *) return 1 ;; esac; }
+other_slot()   { case "$1" in A) echo B ;; B) echo A ;; *) return 1 ;; esac; }
+slot_of_bootpart() { case "$1" in 2) echo A ;; 3) echo B ;; *) echo "?" ;; esac; }
+
+root_partlabel() {
+  blkid -p -o value -s PART_ENTRY_NAME "$(findmnt -n -o SOURCE /)" 2>/dev/null || true
+}
+
+running_slot() {
+  case "$(root_partlabel)" in
+    rootfs_A) echo A ;;
+    rootfs_B) echo B ;;
+    *) return 1 ;;
+  esac
+}
+
+autoboot_dev() {
+  local root_dev disk dev
+  root_dev="$(findmnt -n -o SOURCE /)"
+  disk="/dev/$(lsblk -n -o PKNAME "${root_dev}" | head -n1)"
+  dev="$(lsblk -l -n -p -o NAME,PARTN "${disk}" | awk '$2==1 {print $1}')"
+  [[ -n "${dev}" ]] || die "partition 1 not found on ${disk}"
+  [[ "$(blkid -p -o value -s PART_ENTRY_NAME "${dev}")" == "autoboot" ]] \
+    || die "${dev} is not the autoboot partition (PARTLABEL=autoboot expected)"
+  echo "${dev}"
+}
+
+MNT=""
+release_autoboot() {
+  if [[ -n "${MNT}" ]]; then
+    umount "${MNT}" 2>/dev/null || true
+    rmdir "${MNT}" 2>/dev/null || true
+    MNT=""
+  fi
+}
+trap release_autoboot EXIT
+
+# Run "$@" with the autoboot partition mounted at $MNT ($1 = ro|rw).
+with_autoboot() {
+  local mode="$1"; shift
+  local dev
+  dev="$(autoboot_dev)"
+  MNT="$(mktemp -d /run/decksmithos-autoboot.XXXXXX)"
+  mount -t vfat -o "${mode}" "${dev}" "${MNT}"
+  "$@"
+  release_autoboot
+}
+
+# Prints "<default partition> <tryboot partition>" from autoboot.txt.
+read_autoboot() {
+  awk -F= '
+    /^\[/ { sect = $0; next }
+    $1 == "boot_partition" && sect == "[all]"     { def = $2 }
+    $1 == "boot_partition" && sect == "[tryboot]" { try = $2 }
+    END { print (def == "" ? "?" : def), (try == "" ? "?" : try) }
+  ' "${MNT}/${AUTOBOOT_FILE}" | tr -d '\r'
+}
+
+write_autoboot() { # <default partition> <tryboot partition>
+  # Write a complete new file, then replace the old one, so that a power loss
+  # leaves either the old or the new content.
+  printf '[all]\ntryboot_a_b=1\nboot_partition=%s\n[tryboot]\nboot_partition=%s\n' "$1" "$2" \
+    > "${MNT}/${AUTOBOOT_FILE}.new"
+  sync
+  mv -f "${MNT}/${AUTOBOOT_FILE}.new" "${MNT}/${AUTOBOOT_FILE}"
+  sync
+}
+
+dt_u32() { # bootloader property from the device tree, if exposed
+  local f="/proc/device-tree/chosen/bootloader/$1"
+  [[ -r "${f}" ]] && od -An -tu4 --endian=big "${f}" | tr -d ' ' || echo "?"
+}
+
+show_status() {
+  local def try
+  read -r def try < <(read_autoboot)
+  echo "running slot:   $(running_slot || echo "unknown (root PARTLABEL '$(root_partlabel)')")"
+  echo "default slot:   $(slot_of_bootpart "${def}") (boot_partition=${def})"
+  echo "tryboot slot:   $(slot_of_bootpart "${try}") (boot_partition=${try})"
+  echo "booted from:    partition $(dt_u32 partition), tryboot flag $(dt_u32 tryboot)"
+}
+
+do_try() {
+  local cur other def try
+  cur="$(running_slot)" || die "cannot determine the running slot"
+  other="$(other_slot "${cur}")"
+  read -r def try < <(read_autoboot)
+  [[ "${def}" == "$(boot_partnum "${cur}")" ]] \
+    || die "default slot is not the running slot ${cur}; run 'decksmithos-slot commit' first"
+  if [[ "${try}" != "$(boot_partnum "${other}")" ]]; then
+    write_autoboot "${def}" "$(boot_partnum "${other}")"
+  fi
+  echo "Rebooting once into slot ${other}; any further reboot returns to slot ${cur} unless committed."
+}
+
+do_commit() {
+  local cur
+  cur="$(running_slot)" || die "cannot determine the running slot"
+  write_autoboot "$(boot_partnum "${cur}")" "$(boot_partnum "$(other_slot "${cur}")")"
+  echo "Slot ${cur} is now the default."
+}
+
+[[ "${EUID}" -eq 0 ]] || die "run as root"
+
+case "${1:-status}" in
+  status) with_autoboot ro show_status ;;
+  try)    with_autoboot rw do_try && systemctl reboot "0 tryboot" ;;
+  commit) with_autoboot rw do_commit ;;
+  *)      die "usage: decksmithos-slot [status|try|commit]" ;;
+esac

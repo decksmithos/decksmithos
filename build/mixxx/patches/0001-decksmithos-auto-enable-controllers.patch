@@ -1,0 +1,151 @@
+Description: Auto-enable controllers that have never been configured
+ DecksmithOS runs Mixxx as an appliance without mouse or keyboard, so a
+ plugged-in controller has to work without visiting the preferences.
+ On start-up, a controller with no "[Controller]" entry and no configured
+ mapping is enabled when exactly one installed mapping matches it:
+ HID/bulk devices by the product IDs declared in the mappings (the existing
+ Controller::matchMapping), MIDI devices by name (every word of the device
+ name, minus the "MIDI n" port suffix, must appear in the mapping name or
+ file name; fewest additional words wins; ties and generic names such as
+ "USB MIDI" are rejected). Explicit user choices stored in the config,
+ including a disabled controller, always take precedence.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-19
+---
+--- a/src/controllers/controllermanager.cpp
++++ b/src/controllers/controllermanager.cpp
+@@ -1,7 +1,9 @@
+ #include "controllers/controllermanager.h"
+ 
++#include <QRegularExpression>
+ #include <QSet>
+ #include <QThread>
++#include <limits>
+ 
+ #include "controllers/controller.h"
+ #include "controllers/controllerlearningeventfilter.h"
+@@ -68,6 +70,99 @@
+ // kept for backwards compatibility.
+ const QString kSettingsGroup = QLatin1String("[ControllerPreset]");
+ 
++// DecksmithOS: automatic mapping selection for controllers that have never been
++// configured, so that a plugged-in controller works without opening the
++// preferences (appliance use without mouse or keyboard).
++
++/// Lower-case alphanumeric words of a name ("Numark Mixtrack (Pro) 3" ->
++/// {numark, mixtrack, pro, 3}).
++QSet<QString> nameTokens(const QString& text) {
++    static const QRegularExpression kSeparators(QStringLiteral("[^a-z0-9]+"));
++    const QStringList parts = text.toLower().split(kSeparators, Qt::SkipEmptyParts);
++    return QSet<QString>(parts.cbegin(), parts.cend());
++}
++
++/// Words identifying a MIDI device, without the port suffix
++/// ("DDJ-400 MIDI 1" -> {ddj, 400}).
++QSet<QString> midiDeviceTokens(const QString& deviceName) {
++    static const QRegularExpression kMidiPortSuffix(
++            QStringLiteral("\\s+MIDI\\s*\\d+$"),
++            QRegularExpression::CaseInsensitiveOption);
++    static const QRegularExpression kAlsaPortSuffix(QStringLiteral("\\s+\\d+:\\d+$"));
++    QString core = deviceName;
++    core.remove(kMidiPortSuffix);
++    core.remove(kAlsaPortSuffix);
++    return nameTokens(core);
++}
++
++/// Words of a mapping: its <name> plus its file name without extension.
++QSet<QString> mappingTokens(const MappingInfo& mapping, const QString& extension) {
++    QString fileName = QFileInfo(mapping.getPath()).fileName();
++    if (fileName.endsWith(extension, Qt::CaseInsensitive)) {
++        fileName.chop(extension.size());
++    }
++    return nameTokens(mapping.getName()) | nameTokens(fileName);
++}
++
++/// Returns the file path of the only mapping that matches the controller, or an
++/// empty string if there is no match or the match is ambiguous.
++/// - HID/bulk: the product IDs declared in the mapping (Controller::matchMapping).
++/// - MIDI: every word of the device name must appear in the mapping name or
++///   file name; the mapping with the fewest additional words wins; ties and
++///   generic device names are rejected.
++QString findAutoMapping(Controller* pController, const QStringList& mappingPaths) {
++    const QString extension = pController->mappingExtension();
++    MappingInfoEnumerator enumerator(mappingPaths);
++    const QList<MappingInfo> mappings = enumerator.getMappingsByExtension(extension);
++
++    if (extension != QStringLiteral(MIDI_MAPPING_EXTENSION)) {
++        QString match;
++        for (const MappingInfo& mapping : mappings) {
++            if (pController->matchMapping(mapping)) {
++                if (!match.isEmpty()) {
++                    return QString(); // ambiguous
++                }
++                match = mapping.getPath();
++            }
++        }
++        return match;
++    }
++
++    const QString& deviceName = pController->getName();
++    if (deviceName.contains(QStringLiteral("Midi Through"), Qt::CaseInsensitive)) {
++        return QString();
++    }
++    const QSet<QString> device = midiDeviceTokens(deviceName);
++    bool hasDigit = false;
++    for (const QString& token : device) {
++        for (const QChar c : token) {
++            hasDigit = hasDigit || c.isDigit();
++        }
++    }
++    if (device.isEmpty() || (device.size() < 2 && !hasDigit)) {
++        return QString(); // too generic, e.g. "USB MIDI"
++    }
++
++    int bestScore = std::numeric_limits<int>::max();
++    int bestCount = 0;
++    QString bestPath;
++    for (const MappingInfo& mapping : mappings) {
++        const QSet<QString> tokens = mappingTokens(mapping, extension);
++        if (!tokens.contains(device)) {
++            continue;
++        }
++        const int score = static_cast<int>((tokens - device).size());
++        if (score < bestScore) {
++            bestScore = score;
++            bestCount = 1;
++            bestPath = mapping.getPath();
++        } else if (score == bestScore) {
++            ++bestCount;
++        }
++    }
++    return bestCount == 1 ? bestPath : QString();
++}
++
+ } // anonymous namespace
+ 
+ QString firstAvailableFilename(QSet<QString>& filenames,
+@@ -257,6 +352,23 @@
+         // The filename for this device name.
+         QString deviceName = sanitizeDeviceName(name);
+ 
++        // DecksmithOS: enable controllers that were never configured if exactly
++        // one installed mapping matches. An explicit user choice (including
++        // disabling the controller) is stored in the config and always wins.
++        const ConfigKey enabledKey(QStringLiteral("[Controller]"), deviceName);
++        if (!m_pConfig->exists(enabledKey) &&
++                getConfiguredMappingFileForDevice(deviceName).isEmpty()) {
++            const QString autoMapping = findAutoMapping(pController, mappingPaths);
++            if (autoMapping.isEmpty()) {
++                qInfo() << "ControllerManager: no unique mapping found for" << name;
++            } else {
++                qInfo() << "ControllerManager: auto-enabling" << name
++                        << "with mapping" << autoMapping;
++                m_pConfig->setValue(enabledKey, 1);
++                m_pConfig->set(ConfigKey(kSettingsGroup, deviceName), ConfigValue(autoMapping));
++            }
++        }
++
+         // Check if device is enabled
+         if (!m_pConfig->getValue(ConfigKey("[Controller]", deviceName), 0)) {
+             continue;

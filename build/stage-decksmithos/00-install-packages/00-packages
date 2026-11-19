@@ -18,8 +18,13 @@ nodm
 unclutter
 plymouth
 plymouth-themes
-mixxx
 udisks2
+sqlite3
+fonts-open-sans
+fonts-liberation
+fdisk
+parted
+e2fsprogs
 dhcpcd-base
 udev
 netbase

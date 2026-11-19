@@ -2,8 +2,9 @@
 #set -Eeuo pipefail
 
 DISPLAY_PROFILE="${DECKSMITHOS_PRIMARY_DISPLAY:-}"
-SPI_TOUCH_PRODUCT="${DECKSMITHOS_SPI_TOUCH_PRODUCT:-}"
 SPI_FB="${DECKSMITHOS_SPI_FB:-}"
+
+: "${ROOTFS_DIR:?ROOTFS_DIR must point at the target rootfs}"
 
 echo "Installing DecksmithOS session files"
 
@@ -41,9 +42,25 @@ EOF
 #xset s noblank &
 #EOF
 
-mkdir -p ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.mixxx
-install -v -m 644 files/mixxx.cfg "${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.mixxx/mixxx.cfg"
-install -v -m 644 files/soundconfig.xml "${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.mixxx/soundconfig.xml"
+# Mixxx defaults: copied to /storage/config/mixxx by decksmithos-mixxx on first start.
+mkdir -p "${ROOTFS_DIR}/usr/share/decksmithos/mixxx-defaults"
+# Additional Mixxx skins (synced from mixxx/skins by build.sh). LateNight ships with Mixxx.
+if [ -d files/skins ]; then
+  for skin in files/skins/*/; do
+    [ -f "${skin}skin.xml" ] || continue
+    name="$(basename "${skin}")"
+    rm -rf "${ROOTFS_DIR}/usr/share/mixxx/skins/${name}"
+    cp -r "${skin}" "${ROOTFS_DIR}/usr/share/mixxx/skins/${name}"
+    chmod -R u=rwX,go=rX "${ROOTFS_DIR}/usr/share/mixxx/skins/${name}"
+    echo "Installed Mixxx skin: ${name}"
+  done
+else
+  echo "WARNING: files/skins missing (run via build.sh); only built-in Mixxx skins installed"
+fi
+
+# soundconfig.xml is not shipped: decksmithos-mixxx generates it for the detected
+# controller audio (a config without outputs makes Mixxx stop at a dialog).
+install -v -m 644 files/mixxx.cfg "${ROOTFS_DIR}/usr/share/decksmithos/mixxx-defaults/mixxx.cfg"
 
 on_chroot <<EOF
 chmod +x /home/${FIRST_USER_NAME}/.xsession
@@ -55,27 +72,4 @@ EOF
 mkdir -p ${ROOTFS_DIR}/etc/X11/xorg.conf.d
 install -v -m 644 files/45-evdev.conf "${ROOTFS_DIR}/etc/X11/xorg.conf.d/45-evdev.conf"
 
-if [ "${DISPLAY_PROFILE}" == "spi35" ]; then
-  echo "Writing Xorg fbdev configuration for SPI primary display"
-
-  cat > ${ROOTFS_DIR}/etc/X11/xorg.conf.d/98-spi-screen.conf <<EOF
-Section "Device"
-    Identifier  "DecksmithOS SPI Screen"
-    Driver      "fbturbo"
-    Option      "fbdev" "${SPI_FB}"
-    Option      "SwapbuffersWait" "true"
-EndSection
-EOF
-
-  cat > ${ROOTFS_DIR}/etc/X11/xorg.conf.d/99-calibration.conf <<EOF
-Section "InputClass"
-    Identifier      "DecksmithOS SPI Touch Calibration"
-    MatchProduct    "${SPI_TOUCH_PRODUCT}"
-    Option          "Calibration" "3932 300 294 3801"
-    Option          "SwapAxes" "1"
-    Option          "EmulateThirdButton" "1"
-    Option          "EmulateThirdButtonTimeout" "1000"
-    Option          "EmulateThirdButtonMoveThreshold" "300"
-EndSection
-EOF
-fi
+# Display-specific Xorg configuration is installed by ../03-display-profile.

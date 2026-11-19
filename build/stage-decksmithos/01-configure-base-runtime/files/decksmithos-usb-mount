@@ -1,0 +1,110 @@
+#!/bin/bash
+# Mount USB storage read-only into fixed slots, in order of insertion:
+#   first device -> /usb, second -> /usb2; further devices are ignored.
+# A freed slot is reused by the next device. One slot per physical device:
+# only its first mountable partition is used. The system disk is never touched.
+#
+# Called by decksmithos-usb-mount@<kernel name>.service (started from udev):
+#   decksmithos-usb-mount add|remove <kernel name, e.g. sda1>
+set -Eeuo pipefail
+
+read -r -a SLOTS <<< "${DECKSMITHOS_USB_SLOTS:-/usb /usb2}"
+USB_USER="dj"
+LOCK="/run/decksmithos-usb.lock"
+
+log() { printf '[decksmithos-usb] %s\n' "$*"; }
+
+ACTION="${1:?usage: $0 add|remove <kernel name>}"
+NAME="${2:?usage: $0 add|remove <kernel name>}"
+DEV="/dev/${NAME}"
+
+# Parent disk of a block device (the device itself if it has no parent).
+disk_of() {
+  local pk
+  pk="$(lsblk -n -o PKNAME "$1" 2>/dev/null | head -n1 || true)"
+  echo "${pk:-$(basename "$1")}"
+}
+
+system_disks() {
+  local m src
+  for m in / /boot/firmware /storage; do
+    src="$(findmnt -n -o SOURCE "${m}" 2>/dev/null || true)"
+    [[ "${src}" == /dev/* ]] && disk_of "${src}"
+  done
+  return 0
+}
+
+slot_source() {
+  findmnt -n -o SOURCE --mountpoint "$1" 2>/dev/null || true
+}
+
+do_add() {
+  exec 9>"${LOCK}"
+  flock 9
+
+  local disk fstype type opts uid gid slot src
+  disk="$(disk_of "${DEV}")"
+
+  if system_disks | grep -qxF "${disk}"; then
+    log "${DEV}: on system disk ${disk}, ignoring"
+    return 0
+  fi
+
+  for slot in "${SLOTS[@]}"; do
+    src="$(slot_source "${slot}")"
+    if [[ -n "${src}" && "$(disk_of "${src}")" == "${disk}" ]]; then
+      log "${DEV}: ${disk} is already mounted at ${slot} (${src}), ignoring this partition"
+      return 0
+    fi
+  done
+
+  fstype="$(blkid -p -o value -s TYPE "${DEV}" 2>/dev/null || true)"
+  uid="$(id -u "${USB_USER}")"
+  gid="$(id -g "${USB_USER}")"
+  local common="ro,nosuid,nodev,noexec"
+  local owner="uid=${uid},gid=${gid},fmask=0133,dmask=0022"
+  type="${fstype}"
+  case "${fstype}" in
+    vfat)       opts="${common},${owner},utf8,shortname=mixed" ;;
+    exfat)      opts="${common},${owner},iocharset=utf8" ;;
+    ext3|ext4)  opts="${common},noload" ;;   # noload: never replay a journal on the stick
+    ext2)       opts="${common}" ;;
+    hfsplus)    opts="${common},uid=${uid},gid=${gid}" ;;
+    ntfs)       type="ntfs3"; opts="${common},${owner},iocharset=utf8" ;;
+    *)
+      log "${DEV}: unsupported or no filesystem ('${fstype}'), ignoring"
+      return 0
+      ;;
+  esac
+
+  for slot in "${SLOTS[@]}"; do
+    if [[ -z "$(slot_source "${slot}")" ]]; then
+      mkdir -p "${slot}"
+      mount -t "${type}" -o "${opts}" "${DEV}" "${slot}"
+      log "${DEV} (${fstype}, $(blkid -p -o value -s LABEL "${DEV}" 2>/dev/null || true)) mounted read-only at ${slot}"
+      return 0
+    fi
+  done
+
+  log "${DEV}: all slots in use (${SLOTS[*]}); at most ${#SLOTS[@]} USB storage devices are supported"
+}
+
+do_remove() {
+  exec 9>"${LOCK}"
+  flock 9
+
+  local slot
+  for slot in "${SLOTS[@]}"; do
+    if [[ "$(slot_source "${slot}")" == "${DEV}" ]]; then
+      # The device may already be gone; fall back to a lazy unmount.
+      umount "${slot}" 2>/dev/null || umount -l "${slot}"
+      log "${DEV} unmounted from ${slot}"
+    fi
+  done
+}
+
+case "${ACTION}" in
+  add)    do_add ;;
+  remove) do_remove ;;
+  *)      log "unknown action '${ACTION}'"; exit 2 ;;
+esac

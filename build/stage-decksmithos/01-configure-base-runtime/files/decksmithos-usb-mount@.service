@@ -1,0 +1,11 @@
+[Unit]
+Description=DecksmithOS read-only USB storage mount (%I)
+# Stops (and unmounts) automatically when the device disappears.
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/decksmithos-usb-mount add %I
+ExecStop=/usr/local/sbin/decksmithos-usb-mount remove %I

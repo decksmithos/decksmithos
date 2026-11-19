@@ -1,0 +1,14 @@
+[Unit]
+Description=DecksmithOS dev: VNC access to the running X session (:0)
+After=nodm.service
+Wants=nodm.service
+
+[Service]
+# Shares the existing X display (no separate desktop). -auth guess finds the
+# X server's authority file; retries until the X session is up.
+ExecStart=/usr/bin/x11vnc -display :0 -auth guess -forever -shared -noxdamage -rfbport 5900 -rfbauth /etc/x11vnc.pass
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

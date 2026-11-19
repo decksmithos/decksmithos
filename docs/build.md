@@ -128,14 +128,17 @@ The standard pi-gen output is still a conventional Raspberry Pi OS image.
 
 DecksmithOS converts that image into its firmware-style layout using:
 
-build/postprocess-ab.sh
+build/postprocess.sh
 
-Target partition layout:
+Target partition layout (GPT, see docs/disk-layout.md):
 
-boot
+autoboot
+boot_A
+boot_B
 rootfs_A
 rootfs_B
-storage
+swap
+storage (created on first boot)
 
 The initial boot target is:
 
@@ -210,7 +213,7 @@ Bootable Lite image with DecksmithOS runtime and SPI primary display
 
 Phase 2
 
-A/B image layout and cmdline slot switching
+A/B image layout and tryboot slot switching
 
 Phase 3
 
@@ -220,29 +223,16 @@ Phase 4
 
 Firmware-style updater and rollback handling
 
-## Switching the Active Root Slot
+## Switching the Active Slot
 
-DecksmithOS uses `cmdline.txt` root switching for A/B boot selection.
-
-Utility script:
+DecksmithOS selects slots with the Raspberry Pi bootloader's tryboot A/B
+mode (`autoboot.txt` on p1). Each slot has its own boot partition and
+rootfs. On the device:
 
 ```text
-build/switch-rootfs.sh
+sudo decksmithos-slot          # status
+sudo decksmithos-slot try      # boot the other slot once
+sudo decksmithos-slot commit   # make the running slot the default
+```
 
-Behavior:
-
-detects the current cmdline.txt
-
-resolves the PARTUUID of rootfs_A and rootfs_B
-
-rewrites the root=PARTUUID=... kernel argument
-
-Examples:
-
-sudo ./build/switch-rootfs.sh
-sudo ./build/switch-rootfs.sh A
-sudo ./build/switch-rootfs.sh B
-
-This is the initial boot slot switching mechanism used by DecksmithOS.
-
-A more advanced updater with rollback validation may replace this workflow in later versions.
+See `docs/disk-layout.md` for the layout and rollback behaviour.

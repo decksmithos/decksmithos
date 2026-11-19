@@ -50,17 +50,18 @@ This method is simple and efficient.
 
 ## Strategy 2 — A/B Root Filesystem
 
-DecksmithOS supports dual root partitions:
-rootfs_A
-rootfs_B
+DecksmithOS has two complete slots, each a boot partition plus a root
+filesystem (A = boot_A + rootfs_A, B = boot_B + rootfs_B), selected by
+the Raspberry Pi bootloader's tryboot mode (see disk-layout.md).
 
 Update procedure:
 
-1. Determine the currently active slot (A or B)
-2. Write the new root filesystem to the inactive slot
-3. Switch boot target to the updated slot
-4. Reboot
-5. If boot fails, roll back by switching back to the previous slot
+1. Determine the running slot (`decksmithos-slot`)
+2. Write the new boot files and root filesystem to the other slot
+3. `decksmithos-slot try`: reboot once into the new slot
+4. Check that the new slot works, then `decksmithos-slot commit`
+5. If it fails or is not committed, the next reboot or power cycle
+   returns to the previous slot automatically
 
 This provides safe rollback capability.
 

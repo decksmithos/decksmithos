@@ -1,5 +1,28 @@
 #!/bin/bash
-#set -Eeuo pipefail
+# Create the DecksmithOS /storage partition on first boot.
+#
+# Expected GPT layout on the boot disk (see docs/disk-layout.md):
+#   p1 autoboot, p2 boot_A, p3 boot_B, p4 rootfs_A, p5 rootfs_B, p6 swap
+#                                                (written by the image)
+#   p7 storage                                   (created here)
+#
+# Safety rules:
+#   - only runs on a GPT disk whose partitions 1-6 carry the expected PARTLABELs;
+#   - never formats a partition that already contains a filesystem;
+#   - idempotent: re-running after success or after an interruption is safe.
+set -Eeuo pipefail
+
+STORAGE_USER="${DECKSMITHOS_STORAGE_USER:-dj}"
+STORAGE_LABEL="storage"
+# Filesystem label until the directory structure is complete. The final label is
+# set last, so an interrupted run is resumed (the service only runs while no
+# filesystem is labelled "storage").
+STORAGE_LABEL_PENDING="storage-new"
+# Leave ~15% of the disk unallocated (project overprovisioning policy).
+STORAGE_DISK_PERCENT=85
+MIN_STORAGE_MIB=1024
+EXPECTED_LABELS=(autoboot boot_A boot_B rootfs_A rootfs_B swap)
+STORAGE_PARTN=$(( ${#EXPECTED_LABELS[@]} + 1 ))
 
 log() {
   printf '[decksmithos-storage-init] %s\n' "$*"
@@ -10,117 +33,146 @@ die() {
   exit 1
 }
 
-ROOT_DEV="$(findmnt -n -o SOURCE /)"
 ROOT_DISK=""
-ROOT_PART=""
-PART_STORAGE=""
-DISK_SIZE_BYTES=0
-DISK_SIZE_MIB=0
-TARGET_END_MIB=0
-SWAP_END_MIB=0
-STORAGE_START_MIB=0
-STORAGE_END_MIB=0
 
 detect_root_disk() {
-  case "${ROOT_DEV}" in
-    /dev/mmcblk*p[0-9]|/dev/nvme*n*p[0-9])
-      ROOT_DISK="${ROOT_DEV%p[0-9]}"
-      ROOT_PART="${ROOT_DEV##*p}"
-      PART_STORAGE="${ROOT_DISK}p6"
-      ;;
-    /dev/sd[a-z][0-9])
-      ROOT_DISK="${ROOT_DEV%[0-9]}"
-      ROOT_PART="${ROOT_DEV##*[!0-9]}"
-      PART_STORAGE="${ROOT_DISK}6"
-      ;;
-    *)
-      die "ERROR: Unsupported root device format: ${ROOT_DEV}"
-      ;;
-  esac
+  local root_dev parent
+  root_dev="$(findmnt -n -o SOURCE /)"
+  parent="$(lsblk -n -o PKNAME "${root_dev}" | head -n1)"
+  [[ -n "${parent}" ]] || die "Cannot determine parent disk of ${root_dev}"
+  ROOT_DISK="/dev/${parent}"
+  log "Root device ${root_dev} on disk ${ROOT_DISK}"
 }
 
-partition_storage_exists() {
-  [[ -b "${PART_STORAGE}" ]]
+partition_path() {
+  # Partition device path for partition number $1 on ROOT_DISK.
+  lsblk -l -n -p -o NAME,PARTN "${ROOT_DISK}" | awk -v n="$1" '$2==n {print $1}'
 }
 
-create_partition_storage() {
-  DISK_SIZE_BYTES="$(blockdev --getsize64 "${ROOT_DISK}")"
-  DISK_SIZE_MIB=$((DISK_SIZE_BYTES / 1024 / 1024))
+partlabel() {
+  # Read the GPT partition name straight from disk (does not depend on the udev db).
+  blkid -p -o value -s PART_ENTRY_NAME "$1" 2>/dev/null || true
+}
 
-  TARGET_END_MIB=$(( DISK_SIZE_MIB * 85 / 100 ))
+validate_layout() {
+  local pttype i dev label
+  pttype="$(blkid -p -o value -s PTTYPE "${ROOT_DISK}" 2>/dev/null || true)"
+  [[ "${pttype}" == "gpt" ]] || die "Partition table on ${ROOT_DISK} is '${pttype}', expected 'gpt'"
 
-  # Read end of swap / partition 5 in MiB
-  SWAP_END_MIB="$(
-    parted -sm "${ROOT_DISK}" unit MiB print \
-      | awk -F: '$1=="5" {gsub("MiB","",$3); print int($3)}'
-  )"
+  for i in "${!EXPECTED_LABELS[@]}"; do
+    dev="$(partition_path $((i + 1)))"
+    [[ -n "${dev}" ]] || die "Partition $((i + 1)) missing on ${ROOT_DISK}"
+    label="$(partlabel "${dev}")"
+    [[ "${label}" == "${EXPECTED_LABELS[$i]}" ]] \
+      || die "Partition ${dev} has PARTLABEL '${label}', expected '${EXPECTED_LABELS[$i]}'"
+  done
 
-  [[ -n "${SWAP_END_MIB}" ]] || die "ERROR: Could not determine end of swap / partition 5"
+  # Anything beyond the storage partition, or one with a foreign label, means this
+  # is not our disk layout.
+  local count
+  count="$(lsblk -l -n -o PARTN "${ROOT_DISK}" | awk 'NF' | wc -l)"
+  (( count <= STORAGE_PARTN )) || die "Unexpected partitions on ${ROOT_DISK} (${count} found); refusing to touch it"
+}
 
-  STORAGE_START_MIB="$((SWAP_END_MIB + 1))"
-  STORAGE_END_MIB="${TARGET_END_MIB}"
+create_storage_partition() {
+  local disk_mib swap_end_mib start_mib end_mib swap_partn=$(( STORAGE_PARTN - 1 ))
 
-  if (( STORAGE_END_MIB <= STORAGE_START_MIB + 32 )); then
-    die "ERROR: Not enough free space to create storage partition! You need an larger disk!"
-  fi
+  # The image is smaller than the disk: move the backup GPT to the real end of the disk.
+  log "Relocating backup GPT to end of ${ROOT_DISK}"
+  sfdisk --relocate gpt-bak-std "${ROOT_DISK}"
 
-  swapoff -a
+  disk_mib=$(( $(blockdev --getsize64 "${ROOT_DISK}") / 1024 / 1024 ))
+  swap_end_mib="$(parted -sm "${ROOT_DISK}" unit MiB print | awk -F: -v n="${swap_partn}" '$1==n {gsub("MiB","",$3); print int($3)}')"
+  [[ -n "${swap_end_mib}" ]] || die "Could not determine end of partition ${swap_partn} (swap)"
 
-  log "Growing the 'extended' / partition 4 on ${ROOT_DISK}..."
-  parted -f -s "${ROOT_DISK}" unit MiB resizepart 4 "${STORAGE_END_MIB}"
+  start_mib=$(( swap_end_mib + 1 ))
+  end_mib=$(( disk_mib * STORAGE_DISK_PERCENT / 100 ))
+  (( end_mib - start_mib >= MIN_STORAGE_MIB )) \
+    || die "Not enough space for storage: ${start_mib}-${end_mib} MiB on ${disk_mib} MiB disk"
 
-  log "Creating 'storage' partition on ${ROOT_DISK}: ${STORAGE_START_MIB}MiB -> ${STORAGE_END_MIB}MiB"
-  parted -f -s "${ROOT_DISK}" unit MiB mkpart logical ext4 "${STORAGE_START_MIB}" "${STORAGE_END_MIB}"
-
+  log "Creating partition ${STORAGE_PARTN} '${STORAGE_LABEL}': ${start_mib}MiB -> ${end_mib}MiB (disk ${disk_mib}MiB)"
+  parted -s "${ROOT_DISK}" unit MiB mkpart "${STORAGE_LABEL}" ext4 "${start_mib}" "${end_mib}"
   partprobe "${ROOT_DISK}" || true
   udevadm settle
-  sleep 2
-
-  [[ -b "${PART_STORAGE}" ]] || die "ERROR: Partition 'storage' was not detected after creation!"
 }
 
-format_and_mount_storage() {
-  log "Formatting ${PART_STORAGE} as ext4"
-  mkfs.ext4 -F -L storage "${PART_STORAGE}"
-  tune2fs -m 0 "${PART_STORAGE}" || true
+format_storage_partition() {
+  local dev="$1" fstype
+  fstype="$(blkid -p -o value -s TYPE "${dev}" || true)"
+  if [[ -n "${fstype}" ]]; then
+    die "${dev} already contains a '${fstype}' filesystem; refusing to format it"
+  fi
+  log "Formatting ${dev} as ext4"
+  mkfs.ext4 -F -L "${STORAGE_LABEL_PENDING}" -m 0 "${dev}"
+}
 
-  mkdir -p /storage
-  mount LABEL=storage /storage || die "ERROR: Partition 'storage' was not detected for mount!"
+POPULATE_MNT=""
+cleanup() {
+  if [[ -n "${POPULATE_MNT}" ]]; then
+    umount "${POPULATE_MNT}" 2>/dev/null || true
+    rmdir "${POPULATE_MNT}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
-  mkdir -p \
-    /storage/library \
-    /storage/recordings \
-    /storage/logs \
-    /storage/config \
-    /storage/exports \
-    /storage/cache \
-    /storage/crates
-
-  chmod 777 /storage
-  chmod 777 /storage/library
-  chmod 777 /storage/recordings
-  chmod 777 /storage/exports
-  chmod 777 /storage/crates
-  chmod 777 /storage/cache
-
-  chmod 777 /storage/config
-  chmod 777 /storage/logs
+populate_storage() {
+  local dev="$1" mnt
+  mnt="$(mktemp -d)"
+  POPULATE_MNT="${mnt}"
+  mount "${dev}" "${mnt}"
+  mkdir -p "${mnt}"/{library,recordings,logs,config,exports,cache,crates}
+  chown "${STORAGE_USER}:${STORAGE_USER}" "${mnt}"/{library,recordings,config,exports,cache,crates}
+  chmod 0755 "${mnt}"/{library,recordings,config,exports,cache,crates}
+  # /var/log is bind-mounted from here; keep it root-owned, with a user-writable
+  # subdirectory for the Mixxx session log.
+  chown root:root "${mnt}/logs"
+  chmod 0755 "${mnt}/logs"
+  mkdir -p "${mnt}/logs/mixxx" "${mnt}/config/mixxx"
+  chown "${STORAGE_USER}:${STORAGE_USER}" "${mnt}/logs/mixxx" "${mnt}/config/mixxx"
+  umount "${mnt}"
+  rmdir "${mnt}"
+  POPULATE_MNT=""
+  log "Setting filesystem label ${STORAGE_LABEL}"
+  e2label "${dev}" "${STORAGE_LABEL}"
 }
 
 main() {
   detect_root_disk
+  validate_layout
 
-  if partition_storage_exists; then
-    log "Partition 'storage' already exists: ${PART_STORAGE}"
+  local dev
+  dev="$(partition_path "${STORAGE_PARTN}")"
+
+  if [[ -z "${dev}" ]]; then
+    create_storage_partition
+    dev="$(partition_path "${STORAGE_PARTN}")"
+    [[ -n "${dev}" ]] || die "Partition ${STORAGE_PARTN} not detected after creation"
+  else
+    local label
+    label="$(partlabel "${dev}")"
+    [[ "${label}" == "${STORAGE_LABEL}" ]] || die "Partition ${STORAGE_PARTN} (${dev}) has PARTLABEL '${label}'; refusing to touch it"
+    log "Partition ${STORAGE_PARTN} already exists: ${dev}"
+  fi
+
+  local fstype fslabel
+  fstype="$(blkid -p -o value -s TYPE "${dev}" || true)"
+  fslabel="$(blkid -p -o value -s LABEL "${dev}" || true)"
+  if [[ -z "${fstype}" ]]; then
+    # Empty partition: first run, or a run interrupted before mkfs.
+    format_storage_partition "${dev}"
+    populate_storage "${dev}"
+  elif [[ "${fstype}" == "ext4" && "${fslabel}" == "${STORAGE_LABEL_PENDING}" ]]; then
+    log "Resuming an interrupted initialization of ${dev}"
+    populate_storage "${dev}"
+  else
+    # A completed run, or data that is not ours: never touch it.
+    log "${dev} already has a '${fstype}' filesystem labelled '${fslabel}'; nothing to do"
     exit 0
   fi
 
-  create_partition_storage
-  format_and_mount_storage
-
-  log "Storage initialization completed. Rebooting..."
+  log "Storage initialization completed; rebooting so fstab mounts /storage and /var/log"
   sync
-  reboot -f
+  systemctl --no-block reboot
 }
 
 main "$@"

@@ -136,11 +136,14 @@ The system boots directly into Mixxx in fullscreen mode.
 # Storage Layout
 
 DecksmithOS uses a firmware-style partition layout designed for reliability and safe updates.
-Disk
+Disk (GPT)
 │
-├─ boot (FAT32)
+├─ autoboot (FAT16, slot selection)
+├─ boot_A (FAT32)
+├─ boot_B (FAT32)
 ├─ rootfs_A (ext4)
 ├─ rootfs_B (ext4)
+├─ swap
 └─ storage (ext4)
 
 ---
@@ -151,7 +154,7 @@ Filesystem:
 FAT32
 
 Typical size:
-256 MB
+512 MB per slot (boot_A, boot_B)
 
 Contents:
 
@@ -235,9 +238,11 @@ Recommended configuration:
 64 GB SSD/NVMe
 
 Typical layout example:
-- boot: 256 MB
+- autoboot: 32 MB
+- boot_A, boot_B: 512 MB each
 - rootfs_A: 3 GB
 - rootfs_B: 3 GB
+- swap: 1 GB
 - storage: remaining space
 
 This leaves tens of gigabytes available for music storage.

@@ -1,0 +1,110 @@
+# Rebuild the pinned Debian Mixxx source package (build/mixxx/mixxx.conf)
+# for Debian trixie arm64 on a native GitHub-hosted arm64 runner.
+#
+# - push / pull request touching build/mixxx: build and test, keep the .debs as a
+#   workflow artifact for 14 days.
+# - manual run with "publish": additionally create a GitHub release holding the
+#   .debs, .buildinfo, .changes and SHA256SUMS. An existing release is never
+#   overwritten; bump MIXXX_LOCAL_SUFFIX to publish a new build.
+name: Mixxx package
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: Run the Mixxx test suite during the build
+        type: boolean
+        default: true
+      publish:
+        description: Publish the packages as a GitHub release
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - build/mixxx/**
+      - .github/workflows/mixxx-deb.yml
+  pull_request:
+    paths:
+      - build/mixxx/**
+      - .github/workflows/mixxx-deb.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mixxx-deb-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    timeout-minutes: 300
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned version
+        id: version
+        shell: bash
+        run: |
+          . build/mixxx/mixxx.conf
+          version="${MIXXX_SOURCE_VERSION}${MIXXX_LOCAL_SUFFIX}"
+          # '~' is not allowed in git tag names.
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=mixxx/${version//\~/_}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-mixxx-trixie-arm64-${{ steps.version.outputs.version }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-mixxx-trixie-arm64-${{ steps.version.outputs.version }}-
+            ccache-mixxx-trixie-arm64-
+
+      - name: Build packages
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          MIXXX_NOCHECK: ${{ (github.event_name == 'workflow_dispatch' && !inputs.run_tests) && '1' || '0' }}
+        run: build/mixxx/build-mixxx-deb.sh out
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixxx-trixie-arm64
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mixxx-trixie-arm64
+          path: out
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; bump MIXXX_LOCAL_SUFFIX in build/mixxx/mixxx.conf"
+            exit 1
+          fi
+          gh release create "$TAG" out/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Mixxx $VERSION (trixie arm64)" \
+            --notes "Debian Mixxx source package rebuilt for Debian trixie arm64 for DecksmithOS. See build-info.txt and SHA256SUMS."

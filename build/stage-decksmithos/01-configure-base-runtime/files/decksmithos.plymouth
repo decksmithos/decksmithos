@@ -2,6 +2,7 @@
 Name=DecksmithOS
 Description=DecksmithOS boot splash
 ModuleName=script
+DeviceScale=1
 
 [script]
 ImageDir=/usr/share/plymouth/themes/decksmithos

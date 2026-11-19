@@ -1,0 +1,9 @@
+
+# Display profile: td2 (Raspberry Pi Touch Display 2, 7", DSI, 720x1280 native portrait)
+# Verified on CM5 during manual bring-up (AGENTS.md section 15). The DRM connector is
+# DSI-1 even though the overlay parameter is dsi0; do not "fix" this.
+# The display needs its separate 5 V power cable, otherwise its I2C controller does
+# not answer and the driver probe is deferred forever (check dmesg).
+dtoverlay=vc4-kms-dsi-ili9881-7inch,dsi0
+# Present in the verified bring-up config; may not be required by the panel.
+dtparam=i2c_arm=on

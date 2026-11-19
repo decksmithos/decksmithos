@@ -1,4 +1,11 @@
 # DecksmithOS hardware profile
+disable_overscan=1
+usb_max_current_enable=1
+# PCIe Gen 3 is not officially certified on Pi 5 / CM5 (Gen 2 is).
+# Keep only if validated on the exact carrier + SSD: link at 8GT/s,
+# no AER/NVMe errors in dmesg under sustained load. Otherwise remove
+# this line to fall back to Gen 2. See AGENTS.md section 12.
+dtparam=pciex1_gen=3
 
 # disable onboard wifi
 dtoverlay=disable-wifi
@@ -8,3 +15,9 @@ dtoverlay=disable-bt
 
 # disable onboard audio
 dtparam=audio=off
+
+# noaudio: no HDMI audio devices; audio goes only through the controller.
+dtoverlay=vc4-kms-v3d,noaudio
+
+# Display-specific settings are appended by the selected display profile
+# (stage-decksmithos/03-display-profile/files/<profile>/config.txt).
