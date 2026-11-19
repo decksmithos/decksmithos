@@ -1,0 +1,26 @@
+#!/bin/bash
+# DecksmithOS dev profile: keep the SSH host keys across reboots.
+#
+# The root filesystem is read-only with a RAM overlay, so keys generated at
+# boot would change on every boot. They are generated once and kept in
+# /storage/dev/ssh-host-keys. Without /storage, volatile keys are used so that
+# SSH still works.
+set -Eeuo pipefail
+
+KEYS="/storage/dev/ssh-host-keys"
+
+if mountpoint -q /storage && compgen -G "${KEYS}/ssh_host_*_key" >/dev/null; then
+  cp -p "${KEYS}"/ssh_host_* /etc/ssh/
+  echo "SSH host keys restored from ${KEYS}"
+  exit 0
+fi
+
+rm -f /etc/ssh/ssh_host_*_key*
+ssh-keygen -A
+if mountpoint -q /storage; then
+  install -d -m 700 "${KEYS}"
+  cp -p /etc/ssh/ssh_host_* "${KEYS}/"
+  echo "SSH host keys generated and saved in ${KEYS}"
+else
+  echo "WARNING: /storage not mounted; SSH host keys are volatile" >&2
+fi

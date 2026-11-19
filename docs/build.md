@@ -217,7 +217,7 @@ A/B image layout and tryboot slot switching
 
 Phase 3
 
-Read-only rootfs and full writable path migration to /storage
+Read-only rootfs (done: overlayroot) and full writable path migration to /storage
 
 Phase 4
 
@@ -236,3 +236,31 @@ sudo decksmithos-slot commit   # make the running slot the default
 ```
 
 See `docs/disk-layout.md` for the layout and rollback behaviour.
+
+The same is available from the system menu (short press on the power
+button), together with the version of each slot.
+
+## Update Files
+
+After post-processing, `build.sh` runs `build/make-update.sh`, which
+packs slot A of the new image into a signed update file:
+
+```text
+build/output/decksmithos-<profile>-<version>.update
+```
+
+Signing uses `~/.ssh/decksmithos_ed25519` (override with
+`DECKSMITHOS_SIGN_KEY`); its passphrase is read from
+`~/.ssh/decksmithos.pass` if that file exists (`DECKSMITHOS_SIGN_PASSFILE`),
+otherwise it is asked for. Without the key the step is skipped; set
+`DECKSMITHOS_MAKE_UPDATE=0` to skip it on purpose. It can also be run
+alone on any built image:
+
+```text
+build/make-update.sh build/output/decksmithos-release.img
+```
+
+To install: copy the file to the root of a USB stick as
+`decksmithos.update` and use the system menu, or in the dev profile
+`sudo decksmithos-update install <file>`. Format and rules:
+`docs/update-strategy.md`.

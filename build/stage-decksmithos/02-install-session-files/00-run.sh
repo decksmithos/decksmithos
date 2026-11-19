@@ -20,7 +20,9 @@ if [ "${DISPLAY_PROFILE}" = "spi35" ]; then
   export FRAMEBUFFER=${SPI_FB}
 fi
 
-#unclutter -idle 0.2 -root &
+# Touch: no mouse cursor. Hidden from the start and on every touch; a real
+# mouse (dev) shows it again while it moves.
+unclutter-xfixes --start-hidden --hide-on-touch --timeout 2 &
 
 if command -v plymouth >/dev/null 2>&1; then
   if plymouth --help 2>&1 | grep -q -- '--retain-splash'; then
@@ -31,6 +33,17 @@ if command -v plymouth >/dev/null 2>&1; then
 fi
 
 openbox-session &
+
+# Touchscreen calibration saved on /storage (decksmithos-touch calibrate).
+/usr/local/bin/decksmithos-touch apply || true
+
+# Dev profile: show touches (compositor + overlay) and the dev-mode notice
+# once Mixxx is on screen.
+if [ "\$(cat /etc/decksmithos/profile 2>/dev/null)" = "dev" ]; then
+  (sleep 6; /usr/local/bin/decksmithos-touch overlay on) &
+  (sleep 10; /usr/local/bin/decksmithos-dev-banner) &
+fi
+
 exec /usr/local/bin/decksmithos-mixxx
 EOF
 

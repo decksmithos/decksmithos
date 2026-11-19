@@ -1,0 +1,530 @@
+#!/usr/bin/python3
+"""DecksmithOS system menu, opened by a short press of the power button.
+
+Full screen above Mixxx, made for touch. Actions that end the session or
+change the system need a second tap within a few seconds. Root actions go
+through `sudo decksmithos-system <action>` (/etc/sudoers.d/decksmithos-system).
+
+  decksmithos-menu            open the menu
+  decksmithos-menu --toggle   open it, or close it if it is already open
+  decksmithos-menu --message TITLE TEXT
+                              full-screen notice without buttons (power off)
+
+Sections: actions (power, restart, Mixxx, touch, dev root mode), system
+update from USB (decksmithos.update in the root of a stick), bootloader
+EEPROM update, and the A/B slots with "Restart into slot X".
+"""
+
+import datetime
+import os
+import queue
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import tkinter as tk
+
+PIDFILE = f"/tmp/decksmithos-menu-{os.getuid()}.pid"
+IDLE_CLOSE_MS = 60_000
+CONFIRM_MS = 4_000
+
+BG, PANEL, FG, DIM = "#101317", "#1b2027", "#e8eaed", "#8a929c"
+ACCENT, WARN, DANGER, OK = "#3aa0ff", "#ffb020", "#ff5a4f", "#3ecf8e"
+DISABLED_BG = "#15191e"
+
+
+def read_file(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+PROFILE = read_file("/etc/decksmithos/profile", "release")
+
+
+def system_cmd(*args):
+    test_cmd = os.environ.get("DECKSMITHOS_SYSTEM_CMD")  # tests: run a stub without sudo
+    if test_cmd:
+        return [test_cmd, *args]
+    return ["sudo", "-n", "/usr/local/sbin/decksmithos-system", *args]
+
+
+def system(*args, capture=False, timeout=20):
+    cmd = system_cmd(*args)
+    if capture:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.stdout if r.returncode == 0 else None
+    subprocess.Popen(cmd, start_new_session=True)
+    return None
+
+
+def kv_lines(text):
+    out = {}
+    for line in (text or "").splitlines():
+        if "=" in line and " " not in line.strip():
+            k, v = line.strip().split("=", 1)
+            out[k] = v
+    return out
+
+
+def other_menu_pid():
+    try:
+        pid = int(read_file(PIDFILE))
+        os.kill(pid, 0)
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"decksmithos-menu" in f.read():
+                return pid
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def parse_slots(text):
+    slots = {}
+    for line in (text or "").splitlines():
+        info = dict(kv.split("=", 1) for kv in line.split() if "=" in kv)
+        if "slot" in info:
+            slots[info["slot"]] = info
+    return slots
+
+
+def epoch_date(value):
+    try:
+        return datetime.datetime.fromtimestamp(int(value), datetime.timezone.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def system_info():
+    parts = [socket.gethostname()]
+    if PROFILE == "dev":
+        try:
+            ips = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=3).stdout.split()
+            if ips:
+                parts.append(ips[0])
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    temp = read_file("/sys/class/thermal/thermal_zone0/temp")
+    if temp.isdigit():
+        parts.append(f"{int(temp) / 1000:.0f} °C")
+    if os.path.ismount("/storage"):
+        free = shutil.disk_usage("/storage").free / 1e9
+        parts.append(f"/storage {free:.0f} GB free")
+    else:
+        parts.append("/storage NOT MOUNTED")
+    return "   ·   ".join(parts)
+
+
+class Menu:
+    def __init__(self, root):
+        self.root = root
+        self.pending = {}  # button -> (original text, after id)
+        self.busy = False  # a long operation runs: no idle close, no other actions
+        root.configure(bg=BG)
+        root.attributes("-fullscreen", True)
+        root.attributes("-topmost", True)
+        # Also size it explicitly, in case no window manager handles -fullscreen.
+        root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0")
+        root.title("DecksmithOS")
+        root.config(cursor="none")
+        self.idle_job = None
+        root.bind_all("<Button>", lambda e: self.reset_idle())
+        self.reset_idle()
+
+        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+        scale = max(0.6, min(w, h) / 720)
+        self.scale = scale
+        self.f_title = ("DejaVu Sans", int(26 * scale), "bold")
+        self.f_btn = ("DejaVu Sans", int(16 * scale), "bold")
+        self.f_text = ("DejaVu Sans", int(13 * scale))
+        self.f_small = ("DejaVu Sans", int(11 * scale))
+        self.pad = int(12 * scale)
+
+        # Gather state once, before drawing.
+        self.slots = parse_slots(system("slots", capture=True))
+        self.update_path = (system("update-find", capture=True) or "").strip()
+        self.update = kv_lines(system("update-check", self.update_path, capture=True, timeout=60)) \
+            if self.update_path else {}
+        self.bootloader = kv_lines((system("bootloader-status", capture=True, timeout=30) or "").replace(" ", "\n"))
+
+        self.page = tk.Frame(root, bg=BG)
+        self.page.pack(fill="both", expand=True)
+        self.draw_main()
+
+    # --- widgets --------------------------------------------------------------
+    def button(self, parent, text, command, color=PANEL, enabled=True, width=None):
+        b = tk.Button(parent, text=text, command=command, font=self.f_btn, bg=color, fg=FG,
+                      activebackground=color, activeforeground=FG, relief="flat", bd=0,
+                      highlightthickness=0, wraplength=int(300 * self.scale),
+                      padx=self.pad, pady=self.pad, disabledforeground=DIM)
+        if not enabled:
+            b.configure(state="disabled", bg=DISABLED_BG, activebackground=DISABLED_BG)
+        if width:
+            b.configure(width=width)
+        return b
+
+    def header(self, parent, title=None):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=self.pad * 2, pady=(self.pad * 2, self.pad))
+        title = title or ("DecksmithOS" + ("  —  DEV MODE" if PROFILE == "dev" else ""))
+        tk.Label(top, text=title, font=self.f_title, bg=BG,
+                 fg=WARN if PROFILE == "dev" else FG).pack(side="left")
+        if not self.busy:
+            self.button(top, "Close", self.close, color=PANEL, width=8).pack(side="right")
+        return top
+
+    def clear_page(self):
+        self.page.destroy()
+        self.page = tk.Frame(self.root, bg=BG)
+        self.page.pack(fill="both", expand=True)
+        self.pending.clear()
+
+    # --- main page --------------------------------------------------------------
+    def draw_main(self):
+        self.header(self.page)
+        bl_cur, bl_lat = self.bootloader.get("current"), self.bootloader.get("latest")
+        info = system_info() + f"   ·   bootloader {epoch_date(bl_cur)}"
+        tk.Label(self.page, text=info, font=self.f_small, bg=BG, fg=DIM,
+                 anchor="w").pack(fill="x", padx=self.pad * 2)
+
+        body = tk.Frame(self.page, bg=BG)
+        body.pack(fill="both", expand=True, padx=self.pad * 2, pady=self.pad * 2)
+        left = tk.Frame(body, bg=BG)
+        left.pack(side="left", fill="both", expand=True, padx=(0, self.pad))
+        right = tk.Frame(body, bg=BG)
+        right.pack(side="left", fill="both", expand=True, padx=(self.pad, 0))
+
+        actions = [
+            ("Power off", lambda b: self.confirm(b, "Tap again to power off", self.power_off), DANGER, True),
+            ("Restart", lambda b: self.confirm(b, "Tap again to restart", lambda: self.run_and_quit("reboot")), WARN, True),
+            ("Restart Mixxx", lambda b: self.confirm(b, "Tap again to restart Mixxx",
+                                                      lambda: self.run_and_quit("restart-mixxx")), PANEL, True),
+            ("Calibrate touchscreen", lambda b: self.calibrate(), PANEL, True),
+        ]
+        overlay_on = subprocess.run(["decksmithos-touch", "overlay", "status"],
+                                    capture_output=True).returncode == 0
+        actions.append(("Hide touches" if overlay_on else "Show touches",
+                        lambda b: self.toggle_overlay(overlay_on), PANEL, True))
+        if PROFILE == "dev":
+            rootfs = system("rootfs-status", capture=True) or ""
+            if "next boot:  writable" in rootfs:
+                actions.append(("Restart read-only", lambda b: self.confirm(
+                    b, "Tap again: restart read-only", lambda: self.run_and_quit("reboot-readonly")), WARN, True))
+            else:
+                actions.append(("Restart writable (dev)", lambda b: self.confirm(
+                    b, "Tap again: restart writable", lambda: self.run_and_quit("reboot-writable")), WARN, True))
+
+        actions.append(self.update_action())
+        actions.append(self.bootloader_action(bl_cur, bl_lat))
+
+        cols = 2
+        for i, (text, cb, color, enabled) in enumerate(actions):
+            btn = self.button(left, text, None, color=color, enabled=enabled)
+            if enabled:
+                btn.configure(command=lambda b=btn, cb=cb: cb(b))
+            btn.grid(row=i // cols, column=i % cols, sticky="nsew", padx=self.pad // 2, pady=self.pad // 2)
+        for c in range(cols):
+            left.columnconfigure(c, weight=1, uniform="actions")
+        for r in range((len(actions) + cols - 1) // cols):
+            left.rowconfigure(r, weight=1, uniform="actions")
+
+        self.slots_frame(right)
+
+    def update_action(self):
+        u = self.update
+        if not self.update_path:
+            return ("No update on USB", None, PANEL, False)
+        if u.get("signature") != "ok":
+            return ("Update on USB: invalid signature", None, PANEL, False)
+        if not self.can_install():
+            return ("Update: keep or leave the tryboot slot first", None, PANEL, False)
+        note = {"older": "  (older)", "same": "  (same build)"}.get(u.get("compare"), "")
+        text = f"Install update\n{u.get('version', '?')} {u.get('profile', '?')}{note}"
+        return (text, lambda b: self.confirm(b, f"Tap again: install into slot {self.inactive_slot()}",
+                                             self.install_update), ACCENT, True)
+
+    def bootloader_action(self, cur, lat):
+        if not (cur or "").isdigit() or not (lat or "").isdigit():
+            return ("Bootloader: version unknown", None, PANEL, False)
+        if int(lat) <= int(cur):
+            return (f"Bootloader up to date\n{epoch_date(cur)}", None, PANEL, False)
+        return (f"Update bootloader\n{epoch_date(cur)} → {epoch_date(lat)}",
+                lambda b: self.confirm(b, "Tap again. Do not power off during the update",
+                                       self.update_bootloader), WARN, True)
+
+    def running_slot(self):
+        return next((s for s, i in self.slots.items() if i.get("running") == "yes"), None)
+
+    def default_slot(self):
+        return next((s for s, i in self.slots.items() if i.get("default") == "yes"), None)
+
+    def inactive_slot(self):
+        return {"A": "B", "B": "A"}.get(self.running_slot(), "?")
+
+    def can_install(self):
+        return self.running_slot() is not None and self.running_slot() == self.default_slot()
+
+    def slots_frame(self, parent):
+        slots = self.slots
+        running, default = self.running_slot(), self.default_slot()
+        heading = "System slots"
+        if running:
+            heading = f"Running slot {running} ({slots[running].get('version', 'unknown')})"
+        tk.Label(parent, text=heading, font=self.f_btn, bg=BG, fg=FG,
+                 anchor="w").pack(fill="x", pady=(0, self.pad // 2))
+        if not slots:
+            tk.Label(parent, text="Slot information unavailable.", font=self.f_text,
+                     bg=BG, fg=DIM, anchor="w").pack(fill="x")
+            return
+        for name in ("A", "B"):
+            info = slots.get(name, {})
+            card = tk.Frame(parent, bg=PANEL, padx=self.pad, pady=self.pad)
+            card.pack(fill="both", expand=True, pady=self.pad // 2)
+            tags = []
+            if info.get("running") == "yes":
+                tags.append("RUNNING")
+            if info.get("default") == "yes":
+                tags.append("DEFAULT")
+            head = f"Slot {name}" + (f"   {' · '.join(tags)}" if tags else "")
+            tk.Label(card, text=head, font=self.f_btn, bg=PANEL,
+                     fg=OK if info.get("running") == "yes" else FG, anchor="w").pack(fill="x")
+            ver = info.get("version", "unknown")
+            if ver == "unknown":
+                tk.Label(card, text="Empty or incomplete (interrupted update).", font=self.f_small,
+                         bg=PANEL, fg=WARN, anchor="w").pack(fill="x", pady=(4, 0))
+                continue
+            details = (f"{ver}   {info.get('profile', '?')}\n"
+                       f"built {info.get('date', '?')}\n"
+                       f"Mixxx {info.get('mixxx', '?')}")
+            tk.Label(card, text=details, font=self.f_small, bg=PANEL, fg=DIM,
+                     justify="left", anchor="w").pack(fill="x", pady=(4, 0))
+            if running and default == running and name != running:
+                # Boots the other slot once, right away; any later restart
+                # returns to the running (default) slot unless it is kept.
+                btn = self.button(card, f"Restart into slot {name} ({ver})", None, color=ACCENT)
+                btn.configure(command=lambda b=btn, n=name: self.confirm(
+                    b, f"Tap again: restart into slot {n}", lambda: self.run_and_quit("try-slot")))
+                btn.pack(fill="x", pady=(self.pad // 2, 0))
+                tk.Label(card, text=f"One boot only: the next restart returns to slot {running} "
+                         f"unless you keep slot {name} from there.", font=self.f_small, bg=PANEL,
+                         fg=DIM, justify="left", anchor="w", wraplength=int(520 * self.scale)).pack(fill="x", pady=(4, 0))
+            elif running and default != running and name == default:
+                # Running a tryboot slot: a plain restart goes back to the default.
+                btn = self.button(card, f"Restart into slot {name} ({ver})", None, color=ACCENT)
+                btn.configure(command=lambda b=btn, n=name: self.confirm(
+                    b, f"Tap again: restart into slot {n}", lambda: self.run_and_quit("reboot")))
+                btn.pack(fill="x", pady=(self.pad // 2, 0))
+            elif name == running and default != running:
+                tk.Label(card, text="Booted once (tryboot). The next restart returns to the "
+                         "default slot unless you keep this one.", font=self.f_small, bg=PANEL,
+                         fg=WARN, justify="left", anchor="w", wraplength=int(520 * self.scale)).pack(fill="x", pady=(4, 0))
+                btn = self.button(card, f"Keep slot {name} as default", None, color=OK)
+                btn.configure(command=lambda b=btn: self.confirm(b, "Tap again to keep this slot", self.commit))
+                btn.pack(fill="x", pady=(self.pad // 2, 0))
+
+    # --- long operations (update, bootloader) -------------------------------------
+    def progress_page(self, title, cmd, on_done):
+        """Run cmd, show "progress <pct> <text>" lines as a bar, then on_done(ok, last lines)."""
+        self.busy = True
+        if self.idle_job:
+            self.root.after_cancel(self.idle_job)
+        self.clear_page()
+        self.header(self.page, title)
+        box = tk.Frame(self.page, bg=BG)
+        box.pack(fill="both", expand=True, padx=self.pad * 4, pady=self.pad * 4)
+        status = tk.Label(box, text="Starting…", font=self.f_text, bg=BG, fg=FG, anchor="w")
+        status.pack(fill="x")
+        bar_w = int(self.root.winfo_screenwidth() - self.pad * 10)
+        bar = tk.Canvas(box, width=bar_w, height=int(28 * self.scale), bg=PANEL, highlightthickness=0)
+        bar.pack(fill="x", pady=self.pad)
+        fill = bar.create_rectangle(0, 0, 0, int(28 * self.scale), fill=ACCENT, width=0)
+        tk.Label(box, text="Do not power off.", font=self.f_small, bg=BG, fg=WARN, anchor="w").pack(fill="x")
+
+        lines = queue.Queue()
+        tail = []
+
+        def reader():
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            except OSError as e:
+                lines.put(f"ERROR {e}")
+                lines.put(("exit", 1))
+                return
+            for line in p.stdout:
+                lines.put(line.rstrip("\n"))
+            lines.put(("exit", p.wait()))
+
+        threading.Thread(target=reader, daemon=True).start()
+
+        def poll():
+            while not lines.empty():
+                item = lines.get()
+                if isinstance(item, tuple):
+                    self.busy = False
+                    on_done(item[1] == 0, tail[-4:])
+                    return
+                if item.startswith("progress "):
+                    parts = item.split(" ", 2)
+                    try:
+                        pct = max(0, min(100, int(parts[1])))
+                    except ValueError:
+                        pct = 0
+                    bar.coords(fill, 0, 0, bar_w * pct / 100, int(28 * self.scale))
+                    status.configure(text=parts[2] if len(parts) > 2 else "")
+                elif item:
+                    tail.append(item)
+            self.root.after(150, poll)
+        poll()
+
+    def result_page(self, title, ok, message, details, buttons):
+        self.clear_page()
+        self.header(self.page, title)
+        box = tk.Frame(self.page, bg=BG)
+        box.pack(fill="both", expand=True, padx=self.pad * 4, pady=self.pad * 2)
+        tk.Label(box, text=message, font=self.f_btn, bg=BG, fg=OK if ok else DANGER,
+                 anchor="w", justify="left", wraplength=int(1100 * self.scale)).pack(fill="x")
+        if details:
+            tk.Label(box, text="\n".join(details), font=self.f_small, bg=BG, fg=DIM, anchor="w",
+                     justify="left", wraplength=int(1100 * self.scale)).pack(fill="x", pady=self.pad)
+        row = tk.Frame(box, bg=BG)
+        row.pack(fill="x", pady=self.pad * 2)
+        for text, color, cb in buttons:
+            btn = self.button(row, text, None, color=color)
+            btn.configure(command=lambda b=btn, cb=cb: cb(b))
+            btn.pack(side="left", padx=(0, self.pad), ipadx=self.pad)
+        self.reset_idle()
+
+    def install_update(self):
+        target = self.inactive_slot()
+        version = self.update.get("version", "?")
+
+        def done(ok, tail):
+            if ok:
+                self.result_page(
+                    "System update", True, f"Version {version} is installed in slot {target}.",
+                    [f"Slot {self.running_slot()} is unchanged. Restarting into slot {target} boots it once; "
+                     f"keep it from the menu there if it works, or restart to come back."],
+                    [(f"Restart into slot {target}", ACCENT,
+                      lambda b: self.confirm(b, f"Tap again: restart into slot {target}",
+                                             lambda: self.run_and_quit("try-slot"))),
+                     ("Later", PANEL, lambda b: self.close())])
+            else:
+                self.result_page("System update", False,
+                                 f"The update was not installed. Slot {self.running_slot()} is unchanged.",
+                                 tail, [("Close", PANEL, lambda b: self.close())])
+
+        self.progress_page(f"Installing {version} into slot {target}",
+                           system_cmd("update-install", self.update_path), done)
+
+    def update_bootloader(self):
+        def done(ok, tail):
+            if ok:
+                self.result_page("Bootloader", True, "The bootloader was updated. It is used from the next restart.",
+                                 tail, [("Restart", WARN, lambda b: self.confirm(
+                                     b, "Tap again to restart", lambda: self.run_and_quit("reboot"))),
+                                     ("Later", PANEL, lambda b: self.close())])
+            else:
+                self.result_page("Bootloader", False, "The bootloader was not updated.", tail,
+                                 [("Close", PANEL, lambda b: self.close())])
+
+        self.progress_page("Updating the bootloader", system_cmd("bootloader-update"), done)
+
+    # --- behaviour --------------------------------------------------------------
+    def reset_idle(self):
+        if self.idle_job:
+            self.root.after_cancel(self.idle_job)
+            self.idle_job = None
+        if not self.busy:
+            self.idle_job = self.root.after(IDLE_CLOSE_MS, self.close)
+
+    def confirm(self, button, prompt, action):
+        """First tap arms the button, a second tap within CONFIRM_MS runs it."""
+        if button in self.pending:
+            text, job = self.pending.pop(button)
+            self.root.after_cancel(job)
+            button.configure(text=text)
+            action()
+            return
+        original = button.cget("text")
+        button.configure(text=prompt)
+
+        def disarm():
+            if button in self.pending and button.winfo_exists():
+                button.configure(text=self.pending.pop(button)[0])
+        self.pending[button] = (original, self.root.after(CONFIRM_MS, disarm))
+
+    def run_and_quit(self, action):
+        system(action)
+        self.close()
+
+    def power_off(self):
+        subprocess.Popen([os.path.abspath(sys.argv[0]), "--message", "Powering off",
+                          "Mixxx is saving its settings."], start_new_session=True)
+        self.run_and_quit("poweroff")
+
+    def commit(self):
+        system("commit-slot", capture=True)
+        self.close()
+
+    def calibrate(self):
+        self.close()
+        subprocess.Popen(["decksmithos-touch", "calibrate"], start_new_session=True)
+
+    def toggle_overlay(self, is_on):
+        subprocess.run(["decksmithos-touch", "overlay", "off" if is_on else "on"])
+        self.close()
+
+    def close(self):
+        if self.busy:
+            return
+        self.root.destroy()
+
+
+def show_message(title, text):
+    root = tk.Tk()
+    root.configure(bg=BG, cursor="none")
+    root.attributes("-fullscreen", True)
+    root.attributes("-topmost", True)
+    root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0")
+    tk.Label(root, text=title, font=("DejaVu Sans", 34, "bold"), bg=BG, fg=FG).pack(expand=True, anchor="s")
+    tk.Label(root, text=text, font=("DejaVu Sans", 16), bg=BG, fg=DIM).pack(expand=True, anchor="n")
+    root.mainloop()
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["--message"]:
+        show_message(args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else "")
+        return
+    pid = other_menu_pid()
+    if pid:
+        if args[:1] == ["--toggle"]:
+            os.kill(pid, signal.SIGTERM)
+        return
+    with open(PIDFILE, "w") as f:
+        f.write(str(os.getpid()))
+    root = tk.Tk()
+    menu = Menu(root)
+
+    def on_term(*_):
+        # A running update or bootloader write is not interrupted by the button.
+        root.after(0, menu.close)
+    signal.signal(signal.SIGTERM, on_term)
+
+    def tick():  # lets Python run the SIGTERM handler while Tk waits
+        root.after(200, tick)
+    tick()
+    root.mainloop()
+    if read_file(PIDFILE) == str(os.getpid()):
+        os.unlink(PIDFILE)
+
+
+if __name__ == "__main__":
+    main()

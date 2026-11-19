@@ -20,6 +20,7 @@ systemctl disable systemd-timesyncd || true
 systemctl disable ssh || true
 systemctl mask ssh || true
 systemctl disable sshswitch || true
+systemctl mask sshswitch || true
 
 # The release image keeps no usable passwords: dj (generated FIRST_USER_PASS
 # from build.sh) and root are both locked.
@@ -54,7 +55,9 @@ on_chroot <<'EOF'
 set -e
 missing=""
 for p in mixxx mixxx-data xserver-xorg-core nodm openbox plymouth udev udisks2 \
-         sqlite3 parted fdisk e2fsprogs dosfstools rpi-eeprom raspi-utils python3; do
+         sqlite3 parted fdisk e2fsprogs dosfstools rpi-eeprom raspi-utils python3 overlayroot \
+         sudo python3-tk python3-xlib xcompmgr xinput unclutter-xfixes xinput-calibrator \
+         zstd openssh-client flashrom; do
   dpkg-query -W -f='${db:Status-Abbrev}' "${p}" 2>/dev/null | grep -q '^ii' || missing="${missing} ${p}"
 done
 if [ -n "${missing}" ]; then

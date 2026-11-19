@@ -75,6 +75,14 @@ EndSection
 EOF
 fi
 
+# --- Touch device name for decksmithos-touch / the touch overlay ---------------------
+mkdir -p "${ROOTFS_DIR}/etc/decksmithos"
+if [[ -f "${PROFILE_DIR}/touch.conf" ]]; then
+  install -v -m 644 "${PROFILE_DIR}/touch.conf" "${ROOTFS_DIR}/etc/decksmithos/touch.conf"
+elif [[ "${DISPLAY_PROFILE}" == "spi35" ]]; then
+  echo "TOUCH_DEVICE=\"${DECKSMITHOS_SPI_TOUCH_PRODUCT:-}\"" > "${ROOTFS_DIR}/etc/decksmithos/touch.conf"
+fi
+
 # --- Plymouth ---------------------------------------------------------------------
 THEME_DIR="${ROOTFS_DIR}/usr/share/plymouth/themes/decksmithos"
 mkdir -p "${ROOTFS_DIR}/etc/plymouth" "${THEME_DIR}"

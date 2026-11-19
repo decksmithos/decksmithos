@@ -1,0 +1,150 @@
+#!/usr/bin/python3
+"""DecksmithOS power button handler (runs as root).
+
+The CM5 power button is a gpio-keys input device named "pwr_button" that
+sends KEY_POWER. systemd-logind is told to ignore it
+(/etc/systemd/logind.conf.d/decksmithos-power.conf); this daemon handles it:
+
+  short press  -> open the system menu on the display (decksmithos-menu)
+  long press   -> clean power off once the button has been held for
+                  LONG_PRESS_SECONDS, before the PMIC's own forced power-off
+
+Settings: /etc/default/decksmithos-power (LONG_PRESS_SECONDS, default 2).
+For tests, DECKSMITHOS_POWER_DEVICE may name the event device (or a FIFO
+fed with input_event records).
+"""
+
+import glob
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+
+EV_KEY = 1
+KEY_POWER = 116
+DEVICE_NAME = "pwr_button"
+EVENT = struct.Struct("llHHi")  # struct input_event on 64-bit Linux
+
+SESSION_USER = os.environ.get("DECKSMITHOS_SESSION_USER", "dj")
+MENU = os.environ.get("DECKSMITHOS_MENU", "/usr/local/bin/decksmithos-menu")
+SYSTEM = os.environ.get("DECKSMITHOS_SYSTEM", "/usr/local/sbin/decksmithos-system")
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def read_settings():
+    settings = {"LONG_PRESS_SECONDS": "2"}
+    try:
+        with open(os.environ.get("DECKSMITHOS_POWER_SETTINGS", "/etc/default/decksmithos-power")) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    settings[key.strip()] = value.strip().strip('"')
+    except FileNotFoundError:
+        pass
+    return float(settings["LONG_PRESS_SECONDS"])
+
+
+def find_device():
+    override = os.environ.get("DECKSMITHOS_POWER_DEVICE")
+    if override:
+        return override
+    for name_file in sorted(glob.glob("/sys/class/input/event*/device/name")):
+        with open(name_file) as f:
+            if f.read().strip() == DEVICE_NAME:
+                return "/dev/input/" + name_file.split("/")[4]
+    return None
+
+
+def session_env():
+    env = {"DISPLAY": ":0", "HOME": f"/home/{SESSION_USER}", "PATH": "/usr/local/bin:/usr/bin:/bin"}
+    xauth = f"/home/{SESSION_USER}/.Xauthority"
+    if os.path.exists(xauth):
+        env["XAUTHORITY"] = xauth
+    return env
+
+
+def run_in_session(*args):
+    """Start a program in the user's X session, detached."""
+    # Not root only in tests: run as the current user.
+    cmd = ["runuser", "-u", SESSION_USER, "--", "env"] if os.geteuid() == 0 else ["env"]
+    cmd += [f"{k}={v}" for k, v in session_env().items()]
+    cmd += list(args)
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        log(f"cannot start {args[0]}: {e}")
+
+
+def short_press():
+    log("short press: system menu")
+    # decksmithos-menu closes an already open menu instead of opening a second one.
+    run_in_session(MENU, "--toggle")
+
+
+def long_press():
+    log("long press: power off")
+    run_in_session(MENU, "--message", "Powering off", "You can release the power button.")
+    subprocess.run([SYSTEM, "poweroff"], check=False)
+
+
+def main():
+    long_seconds = read_settings()
+    while True:
+        path = find_device()
+        if not path:
+            log(f"input device '{DEVICE_NAME}' not found; retrying")
+            time.sleep(10)
+            continue
+        log(f"listening on {path} (long press: {long_seconds:g} s)")
+        try:
+            handle(path, long_seconds)
+        except OSError as e:
+            log(f"{path}: {e}; reopening")
+            time.sleep(2)
+
+
+def handle(path, long_seconds):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        pressed_at = None
+        buf = b""
+        while True:
+            timeout = None
+            if pressed_at is not None:
+                timeout = max(0.0, pressed_at + long_seconds - time.monotonic())
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                # Held long enough: act now, while the button is still down.
+                pressed_at = None
+                long_press()
+                continue
+            data = os.read(fd, EVENT.size * 16)
+            if not data:  # FIFO writer closed (tests)
+                return
+            buf += data
+            while len(buf) >= EVENT.size:
+                _, _, etype, code, value = EVENT.unpack_from(buf)
+                buf = buf[EVENT.size:]
+                if etype != EV_KEY or code != KEY_POWER:
+                    continue
+                if value == 1:
+                    pressed_at = time.monotonic()
+                elif value == 0 and pressed_at is not None:
+                    pressed_at = None
+                    short_press()
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

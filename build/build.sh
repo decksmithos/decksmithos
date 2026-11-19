@@ -182,9 +182,27 @@ run_postprocess() {
   [ -x "${POSTPROCESS_SCRIPT}" ] || chmod +x "${POSTPROCESS_SCRIPT}"
 
   log "Running A/B post-processing on: ${input_image}"
+  # Source revision shown per slot by the system menu (decksmithos-slot info).
+  local version
+  version="$(git -C "${BUILD_DIR}/.." describe --always --dirty --tags 2>/dev/null || echo unknown)"
   sudo DECKSMITHOS_PROFILE="${DECKSMITHOS_PROFILE}" \
     DECKSMITHOS_PRIMARY_DISPLAY="${DECKSMITHOS_PRIMARY_DISPLAY}" \
+    DECKSMITHOS_VERSION="${version}" \
     "${POSTPROCESS_SCRIPT}" "${input_image}"
+}
+
+# Signed update file for the system menu (build/make-update.sh). Skipped when
+# the signing key is not on this machine or DECKSMITHOS_MAKE_UPDATE=0.
+make_update_file() {
+  local key="${DECKSMITHOS_SIGN_KEY:-${HOME}/.ssh/decksmithos_ed25519}"
+  if [[ "${DECKSMITHOS_MAKE_UPDATE:-1}" == 0 ]]; then
+    log "Update file skipped (DECKSMITHOS_MAKE_UPDATE=0)"
+  elif [[ ! -f "${key}" ]]; then
+    log "Update file skipped: signing key ${key} not found"
+  else
+    "${BUILD_DIR}/make-update.sh" "${BUILD_DIR}/output/decksmithos-${DECKSMITHOS_PROFILE}.img" \
+      || die "make-update.sh failed"
+  fi
 }
 
 compress_final_image() {
@@ -223,6 +241,7 @@ main() {
   log "Latest pi-gen image: ${latest_img}"
 
   run_postprocess "${latest_img}"
+  make_update_file
   compress_final_image
 
   log "Build finished successfully"

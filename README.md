@@ -71,7 +71,18 @@ DecksmithOS does not support manual system upgrades.
 
 System updates are delivered as new firmware images.
 
-Updates are applied using an **A/B root filesystem strategy**.
+Updates are applied using an **A/B root filesystem strategy**: a signed
+`decksmithos.update` file on a USB stick is installed from the system
+menu (short press on the power button) into the inactive slot, booted
+once, and kept only if it works. See `docs/update-strategy.md`.
+
+---
+
+# Installing
+
+Flash `decksmithos-release.img.xz` to the CM5's NVMe SSD with Raspberry
+Pi Imager or balenaEtcher (Windows, macOS, Linux) or `bmaptool` (Linux).
+See `docs/flashing.md`.
 
 ---
 
@@ -179,7 +190,7 @@ Filesystem:
 ext4
 
 Typical size per partition:
-3 GB
+4 GB (mounted read-only at runtime)
 
 The root filesystem contains:
 
@@ -240,8 +251,8 @@ Recommended configuration:
 Typical layout example:
 - autoboot: 32 MB
 - boot_A, boot_B: 512 MB each
-- rootfs_A: 3 GB
-- rootfs_B: 3 GB
+- rootfs_A: 4 GB
+- rootfs_B: 4 GB
 - swap: 1 GB
 - storage: remaining space
 

@@ -27,6 +27,8 @@ install -v -m 755 files/decksmithos-init-storage "${ROOTFS_DIR}/usr/local/sbin/d
 install -v -m 755 files/decksmithos-mixxx "${ROOTFS_DIR}/usr/local/bin/decksmithos-mixxx"
 # A/B slot selection via the bootloader's tryboot mode (autoboot.txt on p1).
 install -v -m 755 files/decksmithos-slot "${ROOTFS_DIR}/usr/local/sbin/decksmithos-slot"
+# Read-only root (overlayroot, enabled in cmdline.txt by build/postprocess.sh).
+install -v -m 755 files/decksmithos-rootfs "${ROOTFS_DIR}/usr/local/sbin/decksmithos-rootfs"
 
 # Read-only USB storage in two slots (/usb, /usb2), mounted in order of insertion.
 install -v -m 755 files/decksmithos-usb-mount "${ROOTFS_DIR}/usr/local/sbin/decksmithos-usb-mount"
@@ -55,6 +57,9 @@ systemctl disable avahi-daemon || true
 systemctl disable triggerhappy || true
 systemctl disable hciuart || true
 systemctl disable systemd-timesyncd || true
+# No unattended firmware changes; /boot/firmware is read-only anyway.
+# EEPROM updates are a manual step (docs/first-boot-checklist.md).
+systemctl disable rpi-eeprom-update || true
 
 # Passwords are profile-specific (stage-decksmithos-dev / -release); none are set here.
 usermod -aG audio,video,input,render,plugdev "${FIRST_USER_NAME}" || true

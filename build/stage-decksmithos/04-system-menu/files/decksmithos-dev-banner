@@ -1,0 +1,64 @@
+#!/usr/bin/python3
+"""Development-mode notice, shown over Mixxx at the start of every dev session."""
+
+import os
+import subprocess
+import tkinter as tk
+
+BG, PANEL, FG, DIM, WARN = "#101317", "#1b2027", "#e8eaed", "#8a929c", "#ffb020"
+AUTO_CLOSE_MS = 120_000
+
+
+def read_file(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def root_is_writable():
+    r = subprocess.run(["findmnt", "-n", "-o", "FSTYPE", "/"], capture_output=True, text=True)
+    return r.stdout.strip() != "overlay"
+
+
+def main():
+    version = dict(line.split("=", 1) for line in read_file("/etc/decksmithos/version").splitlines() if "=" in line)
+    lines = [
+        "This is a DecksmithOS development image. It is not meant for live mixing.",
+        "",
+        "•  SSH and VNC are enabled with a known password on the wired network.",
+        "•  The touch overlay and its compositor are running; they use extra CPU and GPU.",
+        "•  Debug services and extra logging may affect audio timing.",
+    ]
+    if root_is_writable():
+        lines.append("•  The root filesystem is WRITABLE: changes are permanent. "
+                     "Use the power menu to restart read-only.")
+    lines += ["", "Use a release image for performances."]
+
+    root = tk.Tk()
+    root.configure(bg=BG, cursor="none")
+    root.attributes("-fullscreen", True)
+    root.attributes("-topmost", True)
+    root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0")
+    scale = max(0.6, min(root.winfo_screenwidth(), root.winfo_screenheight()) / 720)
+
+    box = tk.Frame(root, bg=PANEL, padx=int(36 * scale), pady=int(30 * scale))
+    box.place(relx=0.5, rely=0.5, anchor="center")
+    tk.Label(box, text="DEVELOPMENT MODE", font=("DejaVu Sans", int(30 * scale), "bold"),
+             bg=PANEL, fg=WARN).pack(anchor="w")
+    tk.Label(box, text="\n".join(lines), font=("DejaVu Sans", int(15 * scale)), bg=PANEL, fg=FG,
+             justify="left", anchor="w", wraplength=int(1000 * scale)).pack(anchor="w", pady=(int(14 * scale), 0))
+    tk.Label(box, text=f"{version.get('version', '?')}   built {version.get('date', '?')}   "
+                       f"Mixxx {version.get('mixxx', '?')}",
+             font=("DejaVu Sans", int(11 * scale)), bg=PANEL, fg=DIM).pack(anchor="w", pady=(int(14 * scale), 0))
+    tk.Button(box, text="I understand", command=root.destroy, font=("DejaVu Sans", int(17 * scale), "bold"),
+              bg=WARN, fg=BG, activebackground=WARN, activeforeground=BG, relief="flat", bd=0,
+              highlightthickness=0, padx=int(30 * scale), pady=int(14 * scale)).pack(anchor="e", pady=(int(20 * scale), 0))
+    root.after(AUTO_CLOSE_MS, root.destroy)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    if read_file("/etc/decksmithos/profile", "release") == "dev" or os.environ.get("DECKSMITHOS_FORCE_BANNER"):
+        main()

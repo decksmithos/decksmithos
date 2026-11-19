@@ -1,0 +1,5 @@
+# DecksmithOS power button (decksmithos-powerd).
+# Seconds the button must be held for a clean power off. Must stay below the
+# PMIC's own forced power-off time (measure on the hardware: see
+# docs/first-boot-checklist.md).
+LONG_PRESS_SECONDS=2

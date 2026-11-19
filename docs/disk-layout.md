@@ -16,18 +16,23 @@ Disk (GPT)
 ├─ p1 autoboot  FAT16  PARTLABEL=autoboot   32 MiB   autoboot.txt only
 ├─ p2 boot_A    FAT32  PARTLABEL=boot_A    512 MiB   firmware/kernel/config of slot A
 ├─ p3 boot_B    FAT32  PARTLABEL=boot_B    512 MiB   firmware/kernel/config of slot B
-├─ p4 rootfs_A  ext4   PARTLABEL=rootfs_A    3 GiB
-├─ p5 rootfs_B  ext4   PARTLABEL=rootfs_B    3 GiB
+├─ p4 rootfs_A  ext4   PARTLABEL=rootfs_A    4 GiB   mounted read-only (overlay)
+├─ p5 rootfs_B  ext4   PARTLABEL=rootfs_B    4 GiB   mounted read-only (overlay)
 ├─ p6 swap      swap   PARTLABEL=swap        1 GiB
 └─ p7 storage   ext4   PARTLABEL=storage     created on first boot (up to 85% of the disk)
 ```
 
-The shipped image contains p1-p6 (about 8.1 GiB); both slots initially
-hold the same system. On first boot `decksmithos-init-storage` relocates
-the backup GPT to the end of the disk, creates p7 and formats it. It
-refuses to run on a non-GPT disk or if p1-p6 do not carry the expected
-PARTLABELs, and never formats a partition that already contains a
-filesystem.
+The shipped image contains p1-p6 (a 10 GiB layout holding about 2.7 GB
+of data): slot A holds the system, slot B is formatted but empty until
+the first update (the menu shows it as "Empty", and it is never tried).
+Flash it with `bmaptool` and the `.bmap` file next to it, which writes
+only the blocks with data. On first boot `decksmithos-init-storage`
+relocates the backup GPT to the end of the disk, creates p7 and formats
+it. It refuses to run on a non-GPT disk or if p1-p6 do not carry the
+expected PARTLABELs, and never formats a partition that already contains
+a filesystem. The one exception is a p7 it has just created itself:
+signatures found there are left-overs of the disk's previous use (the
+areas bmaptool does not write keep their old contents) and are wiped.
 
 ---
 
@@ -59,6 +64,17 @@ cycle returns to the default slot, which is the rollback path.
 | `decksmithos-slot` | running slot, default slot, tryboot slot, bootloader flags |
 | `decksmithos-slot try` | point `[tryboot]` at the other slot and reboot once into it |
 | `decksmithos-slot commit` | make the running slot the default |
+| `decksmithos-slot info` | per slot: running/default/tryboot and its version record |
+
+Each boot partition carries `decksmithos-version.txt` (source revision,
+build date, profile, display, Mixxx version; also `/etc/decksmithos/version`
+in the rootfs). The system menu (short press on the power button) shows
+both slots and offers "Restart into slot X" (try) and, in a tryboot
+slot, "Keep slot X as default" (commit).
+
+Updates only ever write the inactive slot, and only while the running
+slot is the default: writing the default slot from an uncommitted
+tryboot slot would destroy the fallback.
 
 Update flow (updater not implemented yet): write boot + rootfs of the
 inactive slot, `decksmithos-slot try`, check health in the new slot,
@@ -92,18 +108,39 @@ Partitions:
 - `rootfs_A` (active or inactive depending on current boot target)
 - `rootfs_B` (the other slot)
 
-Typical size (per rootfs slot):
-ext4
+Filesystem: ext4, 4 GiB per slot.
 
-Typical size:
-3 GB
-￼
 Contents:
 - operating system
 - DecksmithOS runtime
 - Mixxx installation
 
 Mount options prioritize reliability over performance.
+
+### Read-only at runtime
+
+The running slot is never written. `overlayroot` (initramfs) mounts the
+slot's rootfs read-only under `/media/root-ro` and puts a tmpfs overlay
+on `/`: programs can still write, but those changes live in RAM and are
+gone after a reboot. Persistent data belongs on `/storage` (Mixxx
+settings and database, logs via the `/var/log` bind mount, dev SSH host
+keys). `/boot/firmware` is mounted read-only as well.
+
+The overlay is switched on by
+`overlayroot=tmpfs:swap=1,recurse=0` in the slot's `cmdline.txt`
+(`recurse=0` leaves `/storage` alone, `swap=1` keeps the swap partition).
+`/etc/machine-id` is empty, so systemd uses a transient machine ID.
+
+`decksmithos-rootfs` (on the device, as root):
+
+| Command | Effect |
+|---|---|
+| `decksmithos-rootfs` | is the overlay active now / configured for the next boot |
+| `decksmithos-rootfs rw` | next boot of this slot is writable (overlay off) |
+| `decksmithos-rootfs ro` | next boot of this slot is read-only again |
+| `overlayroot-chroot` | shell in the real rootfs mounted writable, no reboot needed |
+
+These are meant for the dev profile; the release image has no login.
 
 ---
 

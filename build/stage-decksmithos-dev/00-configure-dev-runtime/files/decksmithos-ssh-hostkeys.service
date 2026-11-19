@@ -1,0 +1,13 @@
+[Unit]
+Description=DecksmithOS dev: persistent SSH host keys on /storage
+# storage.mount is "nofail", so local-fs.target alone does not wait for it.
+After=local-fs.target storage.mount decksmithos-storage-init.service
+Before=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/decksmithos-ssh-hostkeys
+
+[Install]
+WantedBy=multi-user.target

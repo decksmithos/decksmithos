@@ -1,0 +1,10 @@
+[Unit]
+Description=DecksmithOS power button (short press: system menu, long press: power off)
+
+[Service]
+ExecStart=/usr/local/sbin/decksmithos-powerd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

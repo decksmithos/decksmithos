@@ -1,0 +1,122 @@
+#!/bin/bash
+# DecksmithOS touchscreen tools (run as the session user inside the X session).
+#
+#   decksmithos-touch apply            apply the saved calibration (called by .xsession)
+#   decksmithos-touch calibrate        run xinput_calibrator, save and apply the result
+#   decksmithos-touch reset            forget the calibration
+#   decksmithos-touch overlay on|off|status
+#                                      show touches as fading discs (starts the
+#                                      xcompmgr compositor while it is on)
+#
+# The touch device name comes from /etc/decksmithos/touch.conf (display profile).
+# The calibration lives on /storage, so it survives reboots and slot changes.
+set -Eeuo pipefail
+
+TOUCH_CONF="/etc/decksmithos/touch.conf"
+CAL_DIR="/storage/config/touch"
+CAL_FILE="${CAL_DIR}/evdev-axis-calibration"
+PROP="Evdev Axis Calibration"
+
+log() { echo "decksmithos-touch: $*" >&2; }
+die() { log "$*"; exit 1; }
+
+TOUCH_DEVICE=""
+[[ -r "${TOUCH_CONF}" ]] && TOUCH_DEVICE="$(sed -n 's/^TOUCH_DEVICE=//p' "${TOUCH_CONF}" | tr -d '"')"
+
+touch_id() {
+  [[ -n "${TOUCH_DEVICE}" ]] || return 1
+  xinput list --id-only "${TOUCH_DEVICE}" 2>/dev/null | head -n1
+}
+
+apply_calibration() {
+  local id values
+  [[ -s "${CAL_FILE}" ]] || return 0
+  id="$(touch_id)" || { log "touch device '${TOUCH_DEVICE}' not found"; return 0; }
+  read -r -a values < "${CAL_FILE}"
+  [[ "${#values[@]}" -eq 4 ]] || { log "ignoring malformed ${CAL_FILE}"; return 0; }
+  xinput set-prop "${id}" "${PROP}" "${values[@]}"
+  log "applied calibration ${values[*]} to ${TOUCH_DEVICE}"
+}
+
+# Identity calibration: the device's own axis ranges, as reported for the first
+# two valuators ("Range: <min> - <max>"). evdev keeps these ranges unchanged
+# when a calibration is set. xinput cannot clear the property, so a reset
+# sets this identity instead.
+identity_calibration() {
+  xinput list --long "$1" | awk '/Range:/ && n < 2 { printf "%d %d ", $2, $4; n++ } END { print "" }'
+}
+
+clear_calibration() {
+  local id="$1" ident
+  read -r -a ident <<< "$(identity_calibration "${id}")"
+  [[ "${#ident[@]}" -eq 4 ]] || { log "cannot read the axis ranges of ${TOUCH_DEVICE}"; return 1; }
+  xinput set-prop "${id}" "${PROP}" "${ident[@]}"
+}
+
+calibrate() {
+  local id out values
+  id="$(touch_id)" || die "touch device '${TOUCH_DEVICE}' not found"
+  # Start from the uncalibrated device so the result does not build on an old one.
+  clear_calibration "${id}" || true
+  out="$(xinput_calibrator --device "${id}" --output-type xinput --misclick 30 2>&1)" \
+    || { apply_calibration; die "calibration cancelled or failed"; }
+  # Output line: xinput set-int-prop "<dev>" "Evdev Axis Calibration" 32 <minx> <maxx> <miny> <maxy>
+  values="$(sed -n 's/.*"Evdev Axis Calibration" 32 \(-\?[0-9]\+ -\?[0-9]\+ -\?[0-9]\+ -\?[0-9]\+\).*/\1/p' <<< "${out}" | tail -n1)"
+  if [[ -z "${values}" ]]; then
+    apply_calibration
+    die "no calibration in xinput_calibrator output"
+  fi
+  mkdir -p "${CAL_DIR}"
+  echo "${values}" > "${CAL_FILE}.new" && mv -f "${CAL_FILE}.new" "${CAL_FILE}"
+  apply_calibration
+}
+
+reset_calibration() {
+  local id
+  rm -f "${CAL_FILE}"
+  if id="$(touch_id)"; then
+    clear_calibration "${id}" || true
+  fi
+  log "calibration removed"
+}
+
+overlay_running() { pgrep -u "$(id -u)" -f decksmithos-touch-overlay >/dev/null; }
+
+overlay_on() {
+  local i
+  overlay_running && return 0
+  if ! pgrep -u "$(id -u)" -x xcompmgr >/dev/null; then
+    xcompmgr -n &
+    disown
+  fi
+  # The overlay needs the compositor (transparency); wait until it owns _NET_WM_CM_S0.
+  for ((i = 0; i < 50; i++)); do
+    python3 -c 'import sys
+from Xlib import display
+d = display.Display()
+sys.exit(0 if d.get_selection_owner(d.intern_atom("_NET_WM_CM_S%d" % d.get_default_screen())) else 1)' 2>/dev/null && break
+    sleep 0.1
+  done
+  nohup /usr/local/bin/decksmithos-touch-overlay >/dev/null 2>&1 &
+  disown
+}
+
+overlay_off() {
+  pkill -u "$(id -u)" -f decksmithos-touch-overlay || true
+  pkill -u "$(id -u)" -x xcompmgr || true
+}
+
+case "${1:-}" in
+  apply)     apply_calibration ;;
+  calibrate) calibrate ;;
+  reset)     reset_calibration ;;
+  overlay)
+    case "${2:-status}" in
+      on)     overlay_on ;;
+      off)    overlay_off ;;
+      status) overlay_running && echo on || { echo off; exit 1; } ;;
+      *)      die "usage: decksmithos-touch overlay on|off|status" ;;
+    esac
+    ;;
+  *) die "usage: decksmithos-touch apply|calibrate|reset|overlay on|off|status" ;;
+esac

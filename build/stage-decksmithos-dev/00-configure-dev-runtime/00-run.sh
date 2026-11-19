@@ -48,6 +48,13 @@ chmod 600 /etc/x11vnc.pass
 systemctl enable decksmithos-x11vnc.service
 EOF
 
+# SSH host keys persist on /storage (the root filesystem is read-only).
+install -m 755 files/decksmithos-ssh-hostkeys "${ROOTFS_DIR}/usr/local/sbin/decksmithos-ssh-hostkeys"
+install -m 644 files/decksmithos-ssh-hostkeys.service "${ROOTFS_DIR}/etc/systemd/system/decksmithos-ssh-hostkeys.service"
+on_chroot <<EOF
+systemctl enable decksmithos-ssh-hostkeys.service
+EOF
+
 mkdir -p "${ROOTFS_DIR}/etc/ssh/sshd_config.d"
 cat > "${ROOTFS_DIR}/etc/ssh/sshd_config.d/99local.conf" <<'EOF'
 # DecksmithOS dev profile only.

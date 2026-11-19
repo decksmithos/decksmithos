@@ -1,0 +1,3 @@
+# DecksmithOS: the system menu (running as the session user) may run the
+# system actions; decksmithos-system accepts only a fixed list of actions.
+dj ALL=(root) NOPASSWD: /usr/local/sbin/decksmithos-system

@@ -154,8 +154,8 @@ NVMe (GPT)          PARTLABEL   FS LABEL
 ├── p1 autoboot     autoboot    AUTOBOOT   FAT16, 32 MiB, autoboot.txt only
 ├── p2 boot_A       boot_A      BOOT_A     FAT32, 512 MiB, boot files of slot A
 ├── p3 boot_B       boot_B      BOOT_B     FAT32, 512 MiB, boot files of slot B
-├── p4 rootfs_A     rootfs_A    rootfs_A   ext4, 3 GiB
-├── p5 rootfs_B     rootfs_B    rootfs_B   ext4, 3 GiB
+├── p4 rootfs_A     rootfs_A    rootfs_A   ext4, 4 GiB
+├── p5 rootfs_B     rootfs_B    rootfs_B   ext4, 4 GiB
 ├── p6 swap         swap        swap       1 GiB
 └── p7 storage      storage     storage    ext4, created on first boot
 ```
@@ -189,14 +189,26 @@ CM5 hardware until the checklist item passes.
 ### A/B root filesystems
 
 -   `rootfsA` and `rootfsB` are separate system slots.
--   Runtime root should be read-only.
+-   Runtime root is read-only (implemented, both profiles): `overlayroot`
+    in the initramfs (`overlayroot=tmpfs:swap=1,recurse=0` in each
+    slot's `cmdline.txt`, written by `build/postprocess.sh`) mounts the
+    slot read-only with a tmpfs overlay; everything outside `/storage`
+    is lost at reboot. `/boot/firmware` is mounted `ro`.
+    `/etc/machine-id` is empty (transient ID, no "first boot" on every
+    boot). Tools must find the root device from `root=PARTUUID=` in
+    `/proc/cmdline`, because `/` is an overlay. Dev: `decksmithos-rootfs
+    rw|ro` toggles the overlay for the next boot of the running slot,
+    `overlayroot-chroot` makes one-off changes without rebooting; dev SSH
+    host keys persist in `/storage/dev/ssh-host-keys`.
 -   Firmware update writes the inactive slot, validates it, then
     switches boot selection.
 -   Provide rollback if the new slot fails.
 -   Do not perform routine `apt upgrade` on the running system.
 -   A few GB per rootfs was the target; 2--3 GB was discussed as a
     possible optimized size, not a measured result. Keep each under 10
-    GB if practical, but validate the full dependency set.
+    GB if practical, but validate the full dependency set. Current
+    slot size: 4 GiB (`ROOTFS_SIZE_MIB`); the dev rootfs used 2.5 GB
+    with Mixxx 2.5.0, too close to the former 3 GiB.
 
 ### Persistent storage
 
@@ -230,11 +242,15 @@ permissions are explicit, with user data accessible to `dj`.
 
 ### First-boot partition creation
 
-The image contains autoboot, both slots and swap; first boot
-creates `/storage` (p7) from remaining disk space. The implemented
-initializer refuses to run unless the disk is GPT and p1--p6 carry the
-expected PARTLABELs, and never formats a partition that already holds a
-filesystem. A reserve of approximately 15% of total disk
+The image contains autoboot, slot A, an empty (formatted) slot B and
+swap; the first update fills slot B. `postprocess.sh` also writes a
+`.bmap` next to the image, so `bmaptool copy` flashes only the ~2.7 GB
+of data instead of the 10 GiB layout. First boot creates `/storage` (p7)
+from remaining disk space. The implemented initializer refuses to run
+unless the disk is GPT and p1--p6 carry the expected PARTLABELs, and
+never formats a partition that already holds a filesystem, except stale
+signatures on a p7 it created itself in the same run (bmaptool leaves a
+used disk's old contents in the unwritten areas). A reserve of approximately 15% of total disk
 capacity was discussed to avoid allocating all available SSD space; this
 is a project proposal, not a universal SSD rule.
 
@@ -456,7 +472,14 @@ upstream revisions and the list of changes: `mixxx/skins/UPSTREAM.md`.
 allowed there, unlike the 3.5-inch skin). Page switching must stay
 controller-agnostic: the library page follows the standard
 `[Skin],show_maximized_library` control, never a skin-private control.
-Remaining touch work: library row height and finger scrolling, small
+Implemented, unverified on the panel: the mouse cursor is hidden
+(`unclutter-xfixes --start-hidden --hide-on-touch` in `.xsession`; a
+real mouse shows it while moving), and a long press (800 ms) is a right
+click (evdev `EmulateThirdButton`, td2 profile
+`xorg.conf.d/92-touch-longpress.conf`). Trade-off: a touch reaches Mixxx
+as a left click only on finger movement or release, so holding an
+on-screen button (cue preview) is not possible by touch; delete the file
+to turn it off. Remaining touch work: library row height and finger scrolling, small
 buttons outside the top bar (BEAT FX channel buttons, Q), verification on
 the real panel. None of these skins fits 480×320.
 
@@ -466,6 +489,59 @@ the real panel. None of these skins fits 480×320.
 -   Large (7-inch): envisioned as medium layout plus additional
     information. These are future directions, not finalized
     specifications.
+
+### Power button and system menu
+
+Implemented in `build/stage-decksmithos/04-system-menu/`, unverified on
+hardware. The CM5 IO board's power button is a `gpio-keys` device named
+`pwr_button` (GPIO 20, `KEY_POWER`, from the device tree). logind
+ignores it (`logind.conf.d/decksmithos-power.conf`); its long-press time
+is fixed at 5 s. `decksmithos-powerd` (root) handles it:
+
+-   short press: `decksmithos-menu` over Mixxx (Tk, full screen, touch
+    sized). Power off, Restart, Restart Mixxx (two taps each), Calibrate
+    touchscreen, Show/Hide touches; dev only: Restart writable / Restart
+    read-only. Slot panel: version, build date, profile and Mixxx version
+    of A and B (`decksmithos-slot info`, read from
+    `decksmithos-version.txt` in each boot partition); "Restart into slot
+    X" = `decksmithos-slot try` (one boot, reboots now); in a tryboot slot
+    "Keep slot X as default" = `commit`, and the default slot's button is
+    a plain restart.
+-   long press: clean power off after `LONG_PRESS_SECONDS`
+    (`/etc/default/decksmithos-power`, default 2 s). Must be shorter
+    than the PMIC's forced power-off hold time: measure on the hardware.
+-   Root actions go through `decksmithos-system` (fixed action list,
+    allowed for `dj` by `/etc/sudoers.d/decksmithos-system`). Power off and
+    restart send Mixxx SIGTERM and wait up to 15 s; whether Mixxx saves
+    its state on SIGTERM is unverified.
+
+System updates (implemented, verified on a loop-device copy of the dev
+image, not on hardware): `build/make-update.sh <image>` makes
+`decksmithos-<profile>-<version>.update` (tar: `manifest`,
+`manifest.sig`, `boot.tar.zst`, `rootfs.tar.zst`), signed with
+`ssh-keygen -Y sign` (namespace `decksmithos-update`) by the key
+`~/.ssh/decksmithos_ed25519` (passphrase in `~/.ssh/decksmithos.pass`;
+never commit either). The device trusts
+`/etc/decksmithos/update-signers`. The menu looks for
+`decksmithos.update` (fixed name, any case) in the root of `/usb` or
+`/usb2`; `decksmithos-update` installs into the inactive slot only while
+the running slot is the default, verifies hashes before writing,
+rewrites the slot's cmdline/fstab PARTUUIDs and writes
+`decksmithos-version.txt` last (a slot without it is never tried).
+Older versions and dev/release switches are allowed (decided). The
+menu's "Update bootloader" (both profiles, decided) writes the
+`rpi-eeprom` default release only if newer, via the immediate path
+(AB EEPROM or `flashrom`); never downgrades.
+
+Touch tools (`decksmithos-touch`): `calibrate` runs `xinput_calibrator`
+and stores the evdev axis calibration in
+`/storage/config/touch/evdev-axis-calibration`, applied by `.xsession`;
+`overlay on|off` starts `xcompmgr` plus `decksmithos-touch-overlay`
+(click-through ARGB window: fading discs for taps, trails for drags,
+growing disc while held, orange on right click; reads X RECORD and the
+touch device's BTN_TOUCH). The overlay refuses to start without a
+compositor. The touch device name comes from
+`/etc/decksmithos/touch.conf` (display profile).
 
 ## 8. Plymouth splash
 
@@ -524,6 +600,11 @@ Implemented (dev profile only): password `decksmithos` for `dj` and
 for both `dj` and `root`; root autologin on tty1; `x11vnc` sharing the
 running X display `:0` on port 5900 (`decksmithos-x11vnc.service`, VNC
 password = first 8 characters of the dev password, i.e. `decksmit`).
+Dev mode exists only in the dev image (decided): every session starts
+the touch overlay with its compositor and shows an English
+"DEVELOPMENT MODE" notice (`decksmithos-dev-banner`). Runtime tools read
+the profile from `/etc/decksmithos/profile` (written by
+`postprocess.sh`).
 
 ### Release
 
@@ -600,7 +681,9 @@ Keep documentation synchronized with implementation.
 -   [ ] A/B slots identified correctly (`decksmithos-slot` shows A).
 -   [ ] `decksmithos-slot try` boots slot B once; next reboot returns
     to A; `try` + `commit` in B makes B the default.
--   [ ] Rootfs read-only in normal runtime.
+-   [ ] Rootfs read-only in normal runtime (`findmnt /` shows
+    `overlay`; `decksmithos-rootfs` status; a file written to `/etc`
+    is gone after reboot; `rw`/`ro` toggle works in dev).
 -   [ ] `/storage` mounted and writable.
 -   [ ] First-boot partition creation safe/idempotent.
 -   [ ] Existing data preserved.
@@ -642,7 +725,9 @@ configuration. 3. Exact Waveshare display and touch controller/overlay.
 and pinned pi-gen revision. 6. Mixxx version and skin schema. 7. `nodm`
 suitability on selected OS. 8. Plymouth support on selected SPI panel.
 9. ~~A/B boot selection and rollback mechanism~~ — decided: tryboot
-(§5); automatic health check and updater still open. 10. Partition sizes and
+(§5); updater implemented (`decksmithos-update`, signed
+`decksmithos.update` from USB via the system menu, see
+`docs/update-strategy.md`); automatic health check still open. 10. Partition sizes and
 15% reserve policy. 11. Whether eMMC is unused, used for rescue, or
 otherwise. 12. Whether package management is removed from final image.
 13. Standard versus low-latency/RT kernel based on measurement. 14.
@@ -651,6 +736,18 @@ DecksmithOS-owned Git repository is needed. 16. Primary display target
 for current development (3.5-inch SPI vs Touch Display 2). 17. ~~Whether
 touch input is used at all on the 7-inch display~~ — decided: yes (§7). 18. Pinned Mixxx version
 and whether the TinyDeck 480 draft is kept, reworked, or discarded.
+19. ~~Bluetooth speakers as audio output~~ — decided: no (2026-11-19).
+A2DP adds about 150--250 ms of variable latency (low-latency codecs
+such as aptX LL are rare on speakers and poorly supported on Linux), so
+the master on the speakers lags the headphone cue on the controller and
+beatmatching by ear breaks; compensating with Mixxx's headphone delay
+makes jog/cue/scratch feel late. Main on Bluetooth plus headphones on the
+controller's USB audio means two audio clocks drifting apart (xruns or
+desync). It would also bring back BlueZ/bluez-alsa, a pairing UI and a
+radio in release (Bluetooth is disabled on purpose, §4), and 2.4 GHz is
+unreliable in crowded venues. For practice at home, use an external
+Bluetooth transmitter on the controller's Master (RCA) output: no
+system change. Revisit only if a measured low-latency path exists.
 
 ## 14. Instructions for coding agents
 
@@ -733,7 +830,9 @@ others.
     a `Monitor` section for `DSI-1` with `Option "Rotate" "right"`.
 3.  **Touch input** --- `/etc/X11/xorg.conf.d/91-touch-rotate.conf`,
     an `InputClass` matching the Goodix touch controller with
-    `Option "SwapAxes" "1"` and `Option "InvertY" "1"`.
+    `Option "SwapAxes" "1"` and `Option "InvertY" "1"`. These are
+    evdev options (the touch device uses the evdev driver via
+    `45-evdev.conf`); `92-touch-longpress.conf` relies on evdev too.
 4.  **Plymouth** --- rotation inside `decksmithos.script` (see §8),
     because `DeviceRotation` is ignored by the `script` module.
 

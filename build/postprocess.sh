@@ -14,7 +14,13 @@
 # (autoboot.txt, tryboot_a_b=1): boot_A + rootfs_A form slot A, boot_B +
 # rootfs_B slot B. Each slot has its own kernel and boot configuration, so a
 # slot is updated as a whole. See decksmithos-slot and docs/disk-layout.md.
-# Both slots receive the same system initially.
+# Only slot A receives the system. Slot B is formatted but left empty (no
+# version record, so it is never tried); the first update fills it. This keeps
+# the image small: with bmaptool only slot A's data is written when flashing.
+#
+# The root filesystem runs read-only: overlayroot (initramfs) puts a tmpfs
+# overlay on top of it, so runtime writes outside /storage are lost at reboot.
+# /boot/firmware is mounted read-only. See decksmithos-rootfs.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +32,7 @@ MNT_DIR="${WORK_DIR}/mnt"
 
 AUTOBOOT_SIZE_MIB="${AUTOBOOT_SIZE_MIB:-32}"
 BOOT_SIZE_MIB="${BOOT_SIZE_MIB:-512}"
-ROOTFS_SIZE_MIB="${ROOTFS_SIZE_MIB:-3072}"
+ROOTFS_SIZE_MIB="${ROOTFS_SIZE_MIB:-4096}"
 SWAP_SIZE_MIB="${SWAP_SIZE_MIB:-1024}"
 PART_START_MIB=1
 # Last partition end + 1 MiB for the backup GPT header/table at the end of the image.
@@ -112,15 +118,31 @@ mkswap -L swap "${OUT_LOOP}p6"
 
 mount "${OUT_LOOP}p1" "${DST_AUTOBOOT}"
 mount "${OUT_LOOP}p2" "${DST_BOOT_A}"
-mount "${OUT_LOOP}p3" "${DST_BOOT_B}"
 mount "${OUT_LOOP}p4" "${DST_ROOTFS_A}"
-mount "${OUT_LOOP}p5" "${DST_ROOTFS_B}"
 
-echo "[4/6] Copying boot and root filesystems into both slots"
+echo "[4/6] Copying boot and root filesystems into slot A (slot B stays empty)"
 # FAT cannot store owners/ACLs/xattrs: copy the boot partitions with -rt only.
 rsync -rt --delete "${SRC_BOOT}/" "${DST_BOOT_A}/"
-rsync -rt --delete "${SRC_BOOT}/" "${DST_BOOT_B}/"
 rsync -aHAX --delete "${SRC_ROOT}/" "${DST_ROOTFS_A}/"
+
+# Version record: /etc/decksmithos/version in the rootfs and
+# decksmithos-version.txt in the boot partition (read by decksmithos-slot info
+# without mounting the other slot's rootfs). key=value, values without spaces.
+MIXXX_VERSION="$(dpkg-query --admindir="${DST_ROOTFS_A}/var/lib/dpkg" -W -f='${Version}' mixxx 2>/dev/null || echo none)"
+VERSION_RECORD="version=${DECKSMITHOS_VERSION:-unknown}
+date=$(date -u +%Y-%m-%dT%H:%MZ)
+profile=${PROFILE}
+display=${DISPLAY_PROFILE}
+mixxx=${MIXXX_VERSION}"
+install -d "${DST_ROOTFS_A}/etc/decksmithos"
+echo "${VERSION_RECORD}" > "${DST_ROOTFS_A}/etc/decksmithos/version"
+# Profile marker for runtime tools (dev banner, system menu).
+echo "${PROFILE}" > "${DST_ROOTFS_A}/etc/decksmithos/profile"
+echo "${VERSION_RECORD}" > "${DST_BOOT_A}/decksmithos-version.txt"
+
+# Empty machine-id: systemd generates a transient one on the read-only root and
+# does not treat every boot as a first boot (as "uninitialized" would).
+: > "${DST_ROOTFS_A}/etc/machine-id"
 
 # Release: remove package management. This cannot happen in the pi-gen stage,
 # because pi-gen's export-image still runs apt-get after the last stage.
@@ -140,15 +162,12 @@ if [[ "${PROFILE}" == "release" ]]; then
   [[ ! -e "${DST_ROOTFS_A}/usr/bin/apt-get" ]] || die "apt-get still present in the release rootfs"
 fi
 
-# Slot B starts as an exact copy of slot A.
-rsync -aHAX --delete "${DST_ROOTFS_A}/" "${DST_ROOTFS_B}/"
-
-echo "[5/6] Writing per-slot fstab and cmdline.txt"
+echo "[5/6] Writing fstab and cmdline.txt of slot A"
 [[ -f "${SRC_BOOT}/cmdline.txt" ]] || die "cmdline.txt not found in the source boot partition"
 # Drop what this script sets itself, and Raspberry Pi OS first-boot actions:
 # "resize" would grow the root partition, which is not the last one here.
 BASE_CMDLINE="$(tr -s ' \n' '\n\n' < "${SRC_BOOT}/cmdline.txt" \
-  | grep -vE '^(root=|rootfstype=|rootwait$|panic=|quiet$|splash$|resize$|init=.*firstboot|systemd\.run.*firstboot|$)' \
+  | grep -vE '^(root=|rootfstype=|rootwait$|panic=|quiet$|splash$|resize$|overlayroot=.*|init=.*firstboot|systemd\.run.*firstboot|$)' \
   | paste -sd' ')"
 
 if [[ "${PROFILE}" == "dev" ]]; then
@@ -157,6 +176,9 @@ else
   QUIET="quiet splash vt.global_cursor_default=0"
 fi
 FB="$(tr -d '\n' < "${DISPLAY_CMDLINE_FILE}")"
+# Read-only root with a RAM overlay. recurse=0: leave /storage and the other
+# fstab mounts alone; swap=1: keep the swap partition (overlayroot drops it by default).
+OVERLAYROOT="overlayroot=tmpfs:swap=1,recurse=0"
 
 partuuid() { blkid -p -o value -s PART_ENTRY_UUID "$1"; }
 
@@ -171,7 +193,7 @@ write_slot() { # <slot> <boot dev> <boot mount> <root dev> <root mount>
   cat > "${root_mnt}/etc/fstab" <<EOF
 # DecksmithOS slot ${slot}
 PARTUUID=${root_partuuid}  /               ext4   defaults,noatime                    0 1
-PARTUUID=${boot_partuuid}  /boot/firmware  vfat   defaults,noatime                    0 2
+PARTUUID=${boot_partuuid}  /boot/firmware  vfat   ro,noatime                          0 2
 LABEL=storage              /storage        ext4   defaults,noatime,nofail             0 2
 PARTLABEL=swap             none            swap   sw,nofail                           0 0
 tmpfs                      /tmp            tmpfs  nosuid,nodev,mode=1777,size=256M    0 0
@@ -179,13 +201,12 @@ tmpfs                      /var/tmp        tmpfs  nosuid,nodev,mode=1777,size=12
 /storage/logs              /var/log        none   bind,nofail                         0 0
 EOF
 
-  echo "${BASE_CMDLINE} root=PARTUUID=${root_partuuid} rootfstype=ext4 rootwait panic=1 ${QUIET} ${FB} plymouth.ignore-serial-consoles usbcore.autosuspend=-1" \
+  echo "${BASE_CMDLINE} root=PARTUUID=${root_partuuid} rootfstype=ext4 rootwait panic=1 ${OVERLAYROOT} ${QUIET} ${FB} plymouth.ignore-serial-consoles usbcore.autosuspend=-1" \
     | sed -E 's#[[:space:]]+# #g' > "${boot_mnt}/cmdline.txt"
 
   echo "  slot ${slot}: boot PARTUUID=${boot_partuuid}, root PARTUUID=${root_partuuid}"
 }
 write_slot A "${OUT_LOOP}p2" "${DST_BOOT_A}" "${OUT_LOOP}p4" "${DST_ROOTFS_A}"
-write_slot B "${OUT_LOOP}p3" "${DST_BOOT_B}" "${OUT_LOOP}p5" "${DST_ROOTFS_B}"
 
 echo "[6/6] Writing autoboot.txt (default slot A, tryboot slot B)"
 # Same format as decksmithos-slot writes on the device.
@@ -198,6 +219,20 @@ boot_partition=3
 EOF
 
 sync
+cleanup
+OUT_LOOP="" BASE_LOOP=""
+
+# Block map for flashing only the blocks that hold data:
+#   sudo bmaptool copy decksmithos-<profile>.img /dev/sdX
+BMAP="${OUTPUT_IMAGE%.img}.bmap"
+rm -f "${BMAP}"
+if command -v bmaptool >/dev/null; then
+  bmaptool create -o "${BMAP}" "${OUTPUT_IMAGE}"
+  echo "Created: ${BMAP}"
+else
+  echo "WARNING: bmaptool not found (apt install bmap-tools); no ${BMAP}"
+fi
+
 echo
-echo "Created: ${OUTPUT_IMAGE}"
-echo "Default boot slot: A (p2 boot_A + p4 rootfs_A)"
+echo "Created: ${OUTPUT_IMAGE} ($(du -h "${OUTPUT_IMAGE}" | cut -f1) of data)"
+echo "Default boot slot: A (p2 boot_A + p4 rootfs_A); slot B is empty until the first update"

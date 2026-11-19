@@ -8,7 +8,10 @@
 #
 # Safety rules:
 #   - only runs on a GPT disk whose partitions 1-6 carry the expected PARTLABELs;
-#   - never formats a partition that already contains a filesystem;
+#   - never formats a partition that already contains a filesystem, except
+#     stale signatures on a partition it created itself in the same run
+#     (left-over contents of a previously used disk; bmaptool does not write
+#     the unused areas of the image);
 #   - idempotent: re-running after success or after an interruption is safe.
 set -Eeuo pipefail
 
@@ -35,9 +38,21 @@ die() {
 
 ROOT_DISK=""
 
+# Block device of the running root filesystem. With overlayroot, / is an
+# overlay, so take the root= PARTUUID from the kernel command line.
+root_device() {
+  local partuuid
+  partuuid="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^root=PARTUUID=//p' | tail -n1)"
+  if [[ -n "${partuuid}" && -e "/dev/disk/by-partuuid/${partuuid}" ]]; then
+    readlink -f "/dev/disk/by-partuuid/${partuuid}"
+  else
+    findmnt -n -o SOURCE /
+  fi
+}
+
 detect_root_disk() {
   local root_dev parent
-  root_dev="$(findmnt -n -o SOURCE /)"
+  root_dev="$(root_device)"
   parent="$(lsblk -n -o PKNAME "${root_dev}" | head -n1)"
   [[ -n "${parent}" ]] || die "Cannot determine parent disk of ${root_dev}"
   ROOT_DISK="/dev/${parent}"
@@ -140,11 +155,12 @@ main() {
   detect_root_disk
   validate_layout
 
-  local dev
+  local dev created=0
   dev="$(partition_path "${STORAGE_PARTN}")"
 
   if [[ -z "${dev}" ]]; then
     create_storage_partition
+    created=1
     dev="$(partition_path "${STORAGE_PARTN}")"
     [[ -n "${dev}" ]] || die "Partition ${STORAGE_PARTN} not detected after creation"
   else
@@ -157,6 +173,13 @@ main() {
   local fstype fslabel
   fstype="$(blkid -p -o value -s TYPE "${dev}" || true)"
   fslabel="$(blkid -p -o value -s LABEL "${dev}" || true)"
+  if [[ -n "${fstype}" && "${created}" == 1 ]]; then
+    # The partition did not exist a moment ago: what blkid finds is left over
+    # from the disk's previous use, not DecksmithOS data.
+    log "Stale '${fstype}' signature ('${fslabel}') on the new ${dev} (old disk contents); wiping it"
+    wipefs -a "${dev}"
+    fstype="" fslabel=""
+  fi
   if [[ -z "${fstype}" ]]; then
     # Empty partition: first run, or a run interrupted before mkfs.
     format_storage_partition "${dev}"

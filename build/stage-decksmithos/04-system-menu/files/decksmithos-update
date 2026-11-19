@@ -1,0 +1,197 @@
+#!/bin/bash
+# DecksmithOS system update: install a signed update file into the inactive slot.
+#
+#   decksmithos-update check <file>     verify the signature; print the manifest
+#                                       (key=value lines) plus signature= and compare=
+#   decksmithos-update install <file>   verify everything, then write the inactive slot
+#   decksmithos-update <file>           same as install
+#
+# Update file (decksmithos.update, made by build/make-update.sh): an uncompressed
+# tar holding, in this order,
+#   manifest         key=value: format, version, date, profile, display, mixxx,
+#                    bootloader, boot_sha256, rootfs_sha256, rootfs_kib
+#   manifest.sig     ssh-keygen -Y signature (namespace decksmithos-update) over manifest
+#   boot.tar.zst     boot partition contents
+#   rootfs.tar.zst   root filesystem (numeric owners, xattrs, ACLs)
+#
+# Rules: the running slot must be the default (never overwrite the fallback of
+# an uncommitted tryboot slot); only the other slot is written; /storage and
+# autoboot.txt are never touched. Older versions and other profiles are allowed.
+# The slot's decksmithos-version.txt is written last, so an interrupted install
+# leaves a slot without a version that the menu refuses to boot.
+#
+# Progress lines for the menu: "progress <percent> <text>".
+set -Eeuo pipefail
+
+SIGNERS="${DECKSMITHOS_UPDATE_SIGNERS:-/etc/decksmithos/update-signers}"
+NAMESPACE="decksmithos-update"
+SIGNER_ID="decksmithos"
+FORMAT=1
+VERSION_FILE="decksmithos-version.txt"
+
+WORK=""
+cleanup() {
+  [[ -n "${WORK}" ]] || return 0
+  umount "${WORK}/boot" 2>/dev/null || true
+  umount "${WORK}/root" 2>/dev/null || true
+  rm -rf "${WORK}"
+}
+trap cleanup EXIT
+
+die() { echo "decksmithos-update: $*" >&2; exit 1; }
+progress() { echo "progress $1 $2"; }
+
+member() { tar -xOf "$1" "$2"; }
+
+# Verify manifest.sig with the trusted key; prints "ok" or "bad".
+verify_signature() {
+  local file="$1"
+  [[ -r "${SIGNERS}" ]] || { echo bad; return; }
+  if member "${file}" manifest.sig > "${WORK}/manifest.sig" 2>/dev/null \
+     && member "${file}" manifest > "${WORK}/manifest" 2>/dev/null \
+     && ssh-keygen -Y verify -f "${SIGNERS}" -I "${SIGNER_ID}" -n "${NAMESPACE}" \
+          -s "${WORK}/manifest.sig" < "${WORK}/manifest" >/dev/null 2>&1; then
+    echo ok
+  else
+    echo bad
+  fi
+}
+
+mf() { sed -n "s/^$1=//p" "${WORK}/manifest" | head -n1; }
+
+running_version() { sed -n 's/^version=//p' /etc/decksmithos/version 2>/dev/null || echo unknown; }
+
+# Compare build dates (ISO, sortable): newer / same / older than the running system.
+compare_dates() {
+  local new="$1" cur
+  cur="$(sed -n 's/^date=//p' /etc/decksmithos/version 2>/dev/null)"
+  if [[ -z "${cur}" || -z "${new}" ]]; then echo unknown
+  elif [[ "${new}" > "${cur}" ]]; then echo newer
+  elif [[ "${new}" == "${cur}" ]]; then echo same
+  else echo older
+  fi
+}
+
+# Slot state from decksmithos-slot info: sets RUNNING, DEFAULT.
+read_slots() {
+  RUNNING="" DEFAULT=""
+  local line
+  while read -r line; do
+    [[ " ${line} " == *" running=yes "* ]] && RUNNING="$(sed -n 's/^slot=\([AB]\).*/\1/p' <<< "${line}")"
+    [[ " ${line} " == *" default=yes "* ]] && DEFAULT="$(sed -n 's/^slot=\([AB]\).*/\1/p' <<< "${line}")"
+  done < <(decksmithos-slot info)
+  return 0
+}
+
+root_device() {
+  local partuuid
+  partuuid="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^root=PARTUUID=//p' | tail -n1)"
+  if [[ -n "${partuuid}" && -e "/dev/disk/by-partuuid/${partuuid}" ]]; then
+    readlink -f "/dev/disk/by-partuuid/${partuuid}"
+  else
+    findmnt -n -o SOURCE /
+  fi
+}
+
+# Device of the partition with GPT name $1 on the system disk.
+part_by_label() {
+  local disk="${DECKSMITHOS_SYSTEM_DISK:-}"  # tests: a loop device
+  [[ -n "${disk}" ]] || disk="/dev/$(lsblk -n -o PKNAME "$(root_device)" | head -n1)"
+  lsblk -l -n -p -o NAME,PARTLABEL "${disk}" | awk -v l="$1" '$2==l {print $1}'
+}
+
+do_check() {
+  local file="$1" sig
+  WORK="$(mktemp -d /run/decksmithos-update.XXXXXX)"
+  sig="$(verify_signature "${file}")"
+  echo "signature=${sig}"
+  [[ "${sig}" == ok ]] || return 0
+  grep -E '^[a-z_0-9]+=[^[:space:]]*$' "${WORK}/manifest"
+  echo "compare=$(compare_dates "$(mf date)")"
+  echo "running_version=$(running_version)"
+}
+
+check_sha() { # <file> <member> <expected sha256> <label> <percent>
+  local got
+  progress "$5" "Checking $4"
+  got="$(member "$1" "$2" | sha256sum | awk '{print $1}')"
+  [[ "${got}" == "$3" ]] || die "$4: checksum mismatch (file damaged?)"
+}
+
+do_install() {
+  local file="$1" target boot_dev root_dev fs_label boot_label_fs boot_pu root_pu kib size_kib
+  [[ "${EUID}" -eq 0 ]] || die "run as root"
+  [[ -r "${file}" ]] || die "cannot read ${file}"
+  WORK="$(mktemp -d /run/decksmithos-update.XXXXXX)"
+
+  progress 1 "Checking signature"
+  [[ "$(verify_signature "${file}")" == ok ]] || die "invalid signature: not a DecksmithOS update signed with the trusted key"
+  [[ "$(mf format)" == "${FORMAT}" ]] || die "unsupported update format '$(mf format)'"
+
+  read_slots
+  [[ -n "${RUNNING}" ]] || die "cannot determine the running slot"
+  [[ "${RUNNING}" == "${DEFAULT}" ]] \
+    || die "slot ${RUNNING} runs once (tryboot) and is not the default: keep it or restart into slot ${DEFAULT} first"
+  target="$([[ "${RUNNING}" == A ]] && echo B || echo A)"
+  boot_dev="$(part_by_label "boot_${target}")"
+  root_dev="$(part_by_label "rootfs_${target}")"
+  [[ -b "${boot_dev}" && -b "${root_dev}" ]] || die "partitions of slot ${target} not found"
+  findmnt -n -S "${boot_dev}" >/dev/null && die "${boot_dev} is mounted"
+  findmnt -n -S "${root_dev}" >/dev/null && die "${root_dev} is mounted"
+
+  kib="$(mf rootfs_kib)"
+  size_kib=$(( $(blockdev --getsize64 "${root_dev}") / 1024 ))
+  [[ -n "${kib}" ]] && (( kib * 105 / 100 > size_kib )) \
+    && die "the system needs ${kib} KiB, slot ${target} has ${size_kib} KiB"
+
+  echo "Installing $(mf version) ($(mf profile), built $(mf date)) into slot ${target}"
+  check_sha "${file}" boot.tar.zst "$(mf boot_sha256)" "boot files" 3
+  check_sha "${file}" rootfs.tar.zst "$(mf rootfs_sha256)" "system files" 8
+
+  progress 30 "Formatting slot ${target}"
+  boot_label_fs="BOOT_${target}"
+  fs_label="rootfs_${target}"
+  mkfs.vfat -F 32 -n "${boot_label_fs}" "${boot_dev}" >/dev/null
+  mkfs.ext4 -q -F -L "${fs_label}" "${root_dev}"
+  mkdir -p "${WORK}/boot" "${WORK}/root"
+  mount -t vfat "${boot_dev}" "${WORK}/boot"
+  mount -t ext4 "${root_dev}" "${WORK}/root"
+
+  progress 35 "Writing system files"
+  member "${file}" rootfs.tar.zst | zstd -dc \
+    | tar -x --numeric-owner --xattrs --xattrs-include='*' --acls -p -C "${WORK}/root"
+  progress 90 "Writing boot files"
+  member "${file}" boot.tar.zst | zstd -dc \
+    | tar -x --no-same-owner --no-same-permissions --exclude="./${VERSION_FILE}" -C "${WORK}/boot"
+
+  progress 95 "Configuring slot ${target}"
+  boot_pu="$(blkid -p -o value -s PART_ENTRY_UUID "${boot_dev}")"
+  root_pu="$(blkid -p -o value -s PART_ENTRY_UUID "${root_dev}")"
+  [[ -n "${boot_pu}" && -n "${root_pu}" ]] || die "cannot read PARTUUIDs of slot ${target}"
+  [[ -f "${WORK}/boot/cmdline.txt" && -f "${WORK}/root/etc/fstab" ]] || die "update lacks cmdline.txt or fstab"
+  # The update carries the build image's PARTUUIDs; point both at this slot.
+  sed -i -E "s/(^| )root=PARTUUID=[^ ]+/\1root=PARTUUID=${root_pu}/" "${WORK}/boot/cmdline.txt"
+  sed -i -E \
+    -e "s#^PARTUUID=[^[:space:]]+([[:space:]]+/[[:space:]])#PARTUUID=${root_pu}\1#" \
+    -e "s#^PARTUUID=[^[:space:]]+([[:space:]]+/boot/firmware[[:space:]])#PARTUUID=${boot_pu}\1#" \
+    -e "s/^# DecksmithOS slot [AB]$/# DecksmithOS slot ${target}/" \
+    "${WORK}/root/etc/fstab"
+  grep -q "root=PARTUUID=${root_pu}" "${WORK}/boot/cmdline.txt" || die "cmdline.txt not updated"
+  grep -qE "^PARTUUID=${root_pu}[[:space:]]+/[[:space:]]" "${WORK}/root/etc/fstab" || die "fstab root not updated"
+  grep -qE "^PARTUUID=${boot_pu}[[:space:]]+/boot/firmware[[:space:]]" "${WORK}/root/etc/fstab" || die "fstab boot not updated"
+
+  # Last: the version record marks the slot as complete.
+  sync
+  member "${file}" boot.tar.zst | zstd -dc | tar -x -O "./${VERSION_FILE}" > "${WORK}/boot/${VERSION_FILE}"
+  sync
+  umount "${WORK}/boot" "${WORK}/root"
+  progress 100 "Installed in slot ${target}"
+  echo "slot=${target} version=$(mf version)"
+}
+
+case "${1:-}" in
+  check)   [[ -n "${2:-}" ]] || die "usage: decksmithos-update check <file>"; do_check "$2" ;;
+  install) [[ -n "${2:-}" ]] || die "usage: decksmithos-update install <file>"; do_install "$2" ;;
+  ""|-h|--help) die "usage: decksmithos-update [check|install] <file>" ;;
+  *)       do_install "$1" ;;
+esac

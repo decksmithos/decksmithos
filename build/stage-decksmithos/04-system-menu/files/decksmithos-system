@@ -1,0 +1,147 @@
+#!/bin/bash
+# DecksmithOS system actions (root). Called by decksmithos-powerd and, through
+# sudo (/etc/sudoers.d/decksmithos-system), by the system menu running as dj.
+#
+#   poweroff           stop Mixxx cleanly, then power off
+#   reboot             stop Mixxx cleanly, then reboot
+#   reboot-writable    dev profile only: next boot with a writable root, reboot
+#   reboot-readonly    dev profile only: next boot read-only again, reboot
+#   restart-mixxx      stop Mixxx; nodm starts a new session with a new Mixxx
+#   slots              slot state and versions (decksmithos-slot info)
+#   try-slot           boot the other slot once (decksmithos-slot try)
+#   commit-slot        keep the running slot as default (decksmithos-slot commit)
+#   rootfs-status      read-only state (decksmithos-rootfs status)
+#   update-find        print the path of decksmithos.update on /usb or /usb2, if any
+#   update-check PATH  verify an update file (decksmithos-update check)
+#   update-install PATH  install it into the inactive slot (progress lines)
+#   bootloader-status  installed and included EEPROM versions (epoch seconds)
+#   bootloader-update  write the included bootloader if it is newer (never older)
+set -Eeuo pipefail
+
+MIXXX_STOP_SECONDS=15
+
+log() { echo "decksmithos-system: $*"; logger -t decksmithos-system -- "$*" 2>/dev/null || true; }
+die() { log "ERROR: $*"; exit 1; }
+
+profile() { cat /etc/decksmithos/profile 2>/dev/null || echo release; }
+
+# Ask Mixxx to quit (SIGTERM) so that it can save its settings and library,
+# and wait for it; afterwards systemd would only kill it.
+stop_mixxx() {
+  local i
+  pgrep -x mixxx >/dev/null || return 0
+  log "stopping Mixxx"
+  pkill -TERM -x mixxx || true
+  for ((i = 0; i < MIXXX_STOP_SECONDS * 10; i++)); do
+    pgrep -x mixxx >/dev/null || { log "Mixxx stopped"; return 0; }
+    sleep 0.1
+  done
+  log "Mixxx still running after ${MIXXX_STOP_SECONDS}s; continuing"
+}
+
+# The menu may only name the update file on the USB slots (fixed name, any case).
+UPDATE_NAME="decksmithos.update"
+update_find() {
+  local mp f
+  for mp in /usb /usb2; do
+    mountpoint -q "${mp}" || continue
+    for f in "${mp}"/*; do
+      [[ -f "${f}" && "${f##*/}" == [Dd][Ee][Cc][Kk][Ss][Mm][Ii][Tt][Hh][Oo][Ss].[Uu][Pp][Dd][Aa][Tt][Ee] ]] \
+        && { echo "${f}"; return 0; }
+    done
+  done
+  return 1
+}
+update_path() {
+  local p="${1:-}"
+  [[ "${p}" =~ ^/usb2?/[^/]+$ && "${p,,}" == */"${UPDATE_NAME}" && -f "${p}" ]] \
+    || die "update file must be /usb/${UPDATE_NAME} or /usb2/${UPDATE_NAME}"
+  echo "${p}"
+}
+
+# "current=<epoch> latest=<epoch>" from rpi-eeprom-update (exit 1 = update available).
+bootloader_status() {
+  local out cur lat
+  out="$(rpi-eeprom-update 2>/dev/null || true)"
+  cur="$(sed -n 's/^ *CURRENT:.*(\([0-9]\+\)).*/\1/p' <<< "${out}" | head -n1)"
+  lat="$(sed -n 's/^ *LATEST:.*(\([0-9]\+\)).*/\1/p' <<< "${out}" | head -n1)"
+  echo "current=${cur:-unknown} latest=${lat:-unknown}"
+}
+
+bootloader_update() {
+  local cur lat
+  read -r cur lat <<< "$(bootloader_status)"
+  cur="${cur#current=}" lat="${lat#latest=}"
+  [[ "${cur}" =~ ^[0-9]+$ && "${lat}" =~ ^[0-9]+$ ]] || die "cannot read the bootloader versions"
+  (( lat > cur )) || die "the included bootloader is not newer than the installed one; nothing to do"
+  log "updating the bootloader EEPROM: ${cur} -> ${lat}"
+  # Immediate update only (AB EEPROM or flashrom). /boot/firmware stays read-only,
+  # so the older recovery.bin method cannot run half-way; it fails instead.
+  RPI_EEPROM_IMMEDIATE_UPDATE=1 rpi-eeprom-update -a
+  log "bootloader written; it is used from the next restart"
+}
+
+[[ "${EUID}" -eq 0 ]] || die "run as root"
+
+case "${1:-}" in
+  poweroff)
+    stop_mixxx
+    sync
+    systemctl poweroff
+    ;;
+  reboot)
+    stop_mixxx
+    sync
+    systemctl reboot
+    ;;
+  reboot-writable)
+    [[ "$(profile)" == dev ]] || die "reboot-writable is only available in the dev profile"
+    decksmithos-rootfs rw
+    stop_mixxx
+    sync
+    systemctl reboot
+    ;;
+  reboot-readonly)
+    [[ "$(profile)" == dev ]] || die "reboot-readonly is only available in the dev profile"
+    decksmithos-rootfs ro
+    stop_mixxx
+    sync
+    systemctl reboot
+    ;;
+  restart-mixxx)
+    stop_mixxx
+    ;;
+  slots)
+    decksmithos-slot info
+    ;;
+  try-slot)
+    # decksmithos-slot refuses (before rebooting) unless the running slot is the default.
+    stop_mixxx
+    sync
+    decksmithos-slot try
+    ;;
+  commit-slot)
+    decksmithos-slot commit
+    ;;
+  rootfs-status)
+    decksmithos-rootfs status
+    ;;
+  update-find)
+    update_find
+    ;;
+  update-check)
+    decksmithos-update check "$(update_path "${2:-}")"
+    ;;
+  update-install)
+    decksmithos-update install "$(update_path "${2:-}")"
+    ;;
+  bootloader-status)
+    bootloader_status
+    ;;
+  bootloader-update)
+    bootloader_update
+    ;;
+  *)
+    die "usage: decksmithos-system poweroff|reboot|reboot-writable|reboot-readonly|restart-mixxx|slots|try-slot|commit-slot|rootfs-status|update-find|update-check PATH|update-install PATH|bootloader-status|bootloader-update"
+    ;;
+esac

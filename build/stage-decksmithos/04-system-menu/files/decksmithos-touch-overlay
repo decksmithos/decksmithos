@@ -1,0 +1,283 @@
+#!/usr/bin/python3
+"""Show touches on screen as translucent discs that fade out.
+
+  tap           a disc at the touch point that fades out
+  drag/scroll   a trail of fading discs
+  holding still the disc grows and becomes more opaque; when the long press
+                turns into a right click (evdev EmulateThirdButton), the disc
+                changes colour
+
+The window covers the screen, is click-through (empty input shape) and is
+drawn with per-pixel alpha, so it needs a compositor (xcompmgr): without one
+it would black out the screen, so the program refuses to start.
+
+Event sources:
+  - X RECORD: pointer position and the buttons X actually delivers, i.e.
+    what Mixxx sees (right click = button 3).
+  - The touch device itself (BTN_TOUCH, read-only, no grab), because with
+    long-press emulation X delivers no button press while the finger is
+    held still. Optional: without access, X button 1 is used instead.
+"""
+
+import glob
+import os
+import queue
+import select
+import struct
+import sys
+import threading
+import time
+
+from Xlib import X, display
+from Xlib.ext import record, shape
+from Xlib.protocol import rq
+
+FPS = 40
+FADE_SECONDS = 0.6
+TRAIL_SPACING = 14          # px between trail discs while dragging
+R_TAP, R_HOLD = 22, 34      # disc radius: start, fully grown
+A_TAP, A_HOLD = 0.35, 0.65  # opacity: start, fully grown
+GROW_SECONDS = 0.8          # matches EmulateThirdButtonTimeout
+COLOR_TOUCH = (90, 200, 255)
+COLOR_RIGHT = (255, 150, 40)
+
+EV_KEY, BTN_TOUCH = 1, 330
+EVENT = struct.Struct("llHHi")
+
+
+def premultiplied(rgb, alpha):
+    a = max(0, min(255, int(alpha * 255)))
+    r, g, b = (c * a // 255 for c in rgb)
+    return (a << 24) | (r << 16) | (g << 8) | b
+
+
+def touch_device_path():
+    name = ""
+    try:
+        with open("/etc/decksmithos/touch.conf") as f:
+            for line in f:
+                if line.startswith("TOUCH_DEVICE="):
+                    name = line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        return None
+    for name_file in sorted(glob.glob("/sys/class/input/event*/device/name")):
+        with open(name_file) as f:
+            if name and f.read().strip() == name:
+                return "/dev/input/" + name_file.split("/")[4]
+    return None
+
+
+def touch_reader(path, events):
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        events.put(("no-touch-device",))
+        return
+    events.put(("touch-device",))
+    buf = b""
+    while True:
+        select.select([fd], [], [])
+        buf += os.read(fd, EVENT.size * 32)
+        while len(buf) >= EVENT.size:
+            _, _, etype, code, value = EVENT.unpack_from(buf)
+            buf = buf[EVENT.size:]
+            if etype == EV_KEY and code == BTN_TOUCH and value in (0, 1):
+                events.put(("down",) if value else ("up",))
+
+
+def record_reader(events):
+    dpy = display.Display()
+    ctx = dpy.record_create_context(
+        0, [record.AllClients],
+        [{"core_requests": (0, 0), "core_replies": (0, 0),
+          "ext_requests": (0, 0, 0, 0), "ext_replies": (0, 0, 0, 0),
+          "delivered_events": (0, 0), "device_events": (X.ButtonPress, X.MotionNotify),
+          "errors": (0, 0), "client_started": False, "client_died": False}])
+
+    def callback(reply):
+        if reply.category != record.FromServer or reply.client_swapped or not reply.data:
+            return
+        data = reply.data
+        while data:
+            ev, data = rq.EventField(None).parse_binary_value(data, dpy.display, None, None)
+            if ev.type == X.MotionNotify:
+                events.put(("motion", ev.root_x, ev.root_y))
+            elif ev.type == X.ButtonPress:
+                events.put(("press", ev.detail, ev.root_x, ev.root_y))
+            elif ev.type == X.ButtonRelease:
+                events.put(("release", ev.detail, ev.root_x, ev.root_y))
+
+    dpy.record_enable_context(ctx, callback)
+
+
+class Disc:
+    def __init__(self, x, y, born, radius=R_TAP, alpha=A_TAP, color=COLOR_TOUCH):
+        self.x, self.y, self.born = x, y, born
+        self.radius, self.alpha, self.color = radius, alpha, color
+        self.fading_since = None
+
+    def fade(self, now):
+        if self.fading_since is None:
+            self.fading_since = now
+
+    def current(self, now):
+        if self.fading_since is None:
+            return self.radius, self.alpha
+        k = (now - self.fading_since) / FADE_SECONDS
+        return self.radius * (1 + 0.3 * k), self.alpha * max(0.0, 1 - k)
+
+    def done(self, now):
+        return self.fading_since is not None and now - self.fading_since >= FADE_SECONDS
+
+
+class Overlay:
+    def __init__(self):
+        self.dpy = display.Display()
+        self.screen = self.dpy.screen()
+        root = self.screen.root
+        cm = self.dpy.intern_atom("_NET_WM_CM_S%d" % self.dpy.get_default_screen())
+        if not self.dpy.get_selection_owner(cm):
+            sys.exit("decksmithos-touch-overlay: no compositor running (start xcompmgr first)")
+        visual = None
+        for depth in self.screen.allowed_depths:
+            if depth.depth == 32:
+                for v in depth.visuals:
+                    if v.visual_class == X.TrueColor:
+                        visual = v.visual_id
+                        break
+        if visual is None:
+            sys.exit("decksmithos-touch-overlay: no 32-bit visual")
+        cmap = root.create_colormap(visual, X.AllocNone)
+        self.w, self.h = self.screen.width_in_pixels, self.screen.height_in_pixels
+        self.win = root.create_window(
+            0, 0, self.w, self.h, 0, 32, X.InputOutput, visual,
+            background_pixel=0, border_pixel=0, colormap=cmap,
+            override_redirect=True, event_mask=X.ExposureMask)
+        self.win.set_wm_name("decksmithos-touch-overlay")
+        # Empty input region: every touch goes through to the window below.
+        self.win.shape_rectangles(shape.SO.Set, shape.SK.Input, X.Unsorted, 0, 0, [])
+        self.win.map()
+        self.gc = self.win.create_gc(foreground=0)
+        self.dpy.flush()
+        self.root = root
+
+        self.events = queue.Queue()
+        self.discs = []
+        self.active = None          # disc under a finger that is down
+        self.touch_device = False   # BTN_TOUCH available
+        self.last_trail = None
+        self.pointer = (self.w // 2, self.h // 2)
+        self.dirty = []             # rectangles drawn in the last frame
+
+    def pointer_now(self):
+        p = self.root.query_pointer()
+        return p.root_x, p.root_y
+
+    def finger_down(self, now, pos=None):
+        x, y = pos or self.pointer_now()
+        self.pointer = (x, y)
+        self.active = Disc(x, y, now)
+        self.last_trail = (x, y)
+
+    def finger_up(self, now):
+        if self.active:
+            self.active.fade(now)
+            self.discs.append(self.active)
+            self.active = None
+
+    def handle(self, ev, now):
+        kind = ev[0]
+        if kind == "touch-device":
+            self.touch_device = True
+        elif kind == "no-touch-device":
+            self.touch_device = False
+        elif kind == "down":
+            self.finger_down(now)
+        elif kind == "up":
+            self.finger_up(now)
+        elif kind == "motion":
+            self.pointer = (ev[1], ev[2])
+            a = self.active
+            if a:
+                lx, ly = self.last_trail
+                if abs(ev[1] - lx) + abs(ev[2] - ly) >= TRAIL_SPACING:
+                    trail = Disc(lx, ly, now, a.radius, a.alpha, a.color)
+                    trail.fade(now)
+                    self.discs.append(trail)
+                    self.last_trail = (ev[1], ev[2])
+                a.x, a.y = ev[1], ev[2]
+        elif kind == "press":
+            button, x, y = ev[1], ev[2], ev[3]
+            if button == 3:
+                if not self.active:
+                    self.finger_down(now, (x, y))
+                self.active.color = COLOR_RIGHT
+                self.active.radius, self.active.alpha = R_HOLD, A_HOLD
+                self.active.born = now - GROW_SECONDS
+            elif button == 1 and not self.touch_device and not self.active:
+                self.finger_down(now, (x, y))
+            elif button in (4, 5, 6, 7):  # wheel / scroll
+                d = Disc(x, y, now, R_TAP * 0.6, A_TAP)
+                d.fade(now)
+                self.discs.append(d)
+        elif kind == "release":
+            if not self.touch_device and ev[1] in (1, 3):
+                self.finger_up(now)
+
+    def draw(self, now):
+        for x, y, w, h in self.dirty:
+            self.win.clear_area(x, y, w, h)
+        self.dirty = []
+        live = []
+        for d in self.discs:
+            if not d.done(now):
+                live.append(d)
+        self.discs = live
+        shapes = list(self.discs)
+        a = self.active
+        if a:
+            k = min(1.0, (now - a.born) / GROW_SECONDS)
+            if a.color == COLOR_TOUCH:
+                a.radius = R_TAP + (R_HOLD - R_TAP) * k
+                a.alpha = A_TAP + (A_HOLD - A_TAP) * k
+            shapes.append(a)
+        for d in shapes:
+            r, alpha = d.current(now)
+            if alpha <= 0.01:
+                continue
+            r = int(r)
+            self.gc.change(foreground=premultiplied(d.color, alpha))
+            box = (int(d.x) - r, int(d.y) - r, 2 * r, 2 * r)
+            self.win.fill_arc(self.gc, *box, 0, 360 * 64)
+            self.dirty.append((box[0] - 1, box[1] - 1, box[2] + 2, box[3] + 2))
+        if shapes:
+            self.win.configure(stack_mode=X.Above)
+        self.dpy.flush()
+        return bool(shapes) or bool(self.dirty)
+
+    def run(self):
+        path = touch_device_path()
+        if path:
+            threading.Thread(target=touch_reader, args=(path, self.events), daemon=True).start()
+        threading.Thread(target=record_reader, args=(self.events,), daemon=True).start()
+        animating = False
+        while True:
+            timeout = 1.0 / FPS if animating else 0.5
+            try:
+                ev = self.events.get(timeout=timeout)
+                now = time.monotonic()
+                self.handle(ev, now)
+                while not self.events.empty():
+                    self.handle(self.events.get_nowait(), now)
+            except queue.Empty:
+                pass
+            while self.dpy.pending_events():
+                self.dpy.next_event()  # Expose: the next frame redraws everything live
+            animating = self.draw(time.monotonic())
+
+
+if __name__ == "__main__":
+    try:
+        Overlay().run()
+    except KeyboardInterrupt:
+        pass

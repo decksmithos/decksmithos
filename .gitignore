@@ -4,3 +4,4 @@
 *.tmp
 build/output/
 cache/
+build/update-staging.*/

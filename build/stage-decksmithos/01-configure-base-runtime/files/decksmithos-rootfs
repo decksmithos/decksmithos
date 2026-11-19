@@ -1,0 +1,77 @@
+#!/bin/bash
+# DecksmithOS read-only root filesystem control.
+#
+# The root filesystem of each slot is mounted read-only by overlayroot
+# (initramfs) with a tmpfs overlay on top: the system can write anywhere, but
+# everything outside /storage is lost at reboot. The overlay is enabled by
+# "overlayroot=..." in the running slot's cmdline.txt (/boot/firmware).
+#
+# Usage:
+#   decksmithos-rootfs [status]  show whether the overlay is active / configured
+#   decksmithos-rootfs rw        boot this slot writable from the next reboot on
+#   decksmithos-rootfs ro        boot this slot read-only again (default)
+#
+# For a single change without rebooting, use `overlayroot-chroot`: it opens a
+# shell in the real (lower) root filesystem mounted writable.
+set -Eeuo pipefail
+
+CMDLINE="/boot/firmware/cmdline.txt"
+OVERLAY_ARG="overlayroot=tmpfs:swap=1,recurse=0"
+
+die() { echo "decksmithos-rootfs: $*" >&2; exit 1; }
+
+overlay_active() { [[ "$(findmnt -n -o FSTYPE /)" == overlay ]]; }
+configured_arg() { tr ' ' '\n' < "${CMDLINE}" | grep '^overlayroot=' || true; }
+
+BOOT_REMOUNTED=0
+restore_boot() {
+  if (( BOOT_REMOUNTED )); then
+    mount -o remount,ro /boot/firmware || echo "decksmithos-rootfs: /boot/firmware left writable" >&2
+  fi
+}
+trap restore_boot EXIT
+
+# Replace cmdline.txt atomically (single line) with the overlayroot argument
+# removed, then appended again if $1 is non-empty.
+write_cmdline() {
+  local arg="$1" line
+  line="$(tr ' ' '\n' < "${CMDLINE}" | grep -v -e '^overlayroot=' -e '^$' | paste -sd' ')"
+  [[ -n "${arg}" ]] && line="${line} ${arg}"
+  if findmnt -n -o OPTIONS /boot/firmware | tr ',' '\n' | grep -qx ro; then
+    mount -o remount,rw /boot/firmware
+    BOOT_REMOUNTED=1
+  fi
+  echo "${line}" > "${CMDLINE}.new"
+  sync
+  mv -f "${CMDLINE}.new" "${CMDLINE}"
+  sync
+}
+
+show_status() {
+  local arg
+  arg="$(configured_arg)"
+  if overlay_active; then
+    echo "now:        read-only root (RAM overlay; changes are lost at reboot)"
+  else
+    echo "now:        writable root (changes are permanent)"
+  fi
+  echo "next boot:  $([[ -n "${arg}" ]] && echo "read-only (${arg})" || echo "writable")"
+  echo "cmdline:    ${CMDLINE}"
+}
+
+[[ "${EUID}" -eq 0 ]] || die "run as root"
+[[ -f "${CMDLINE}" ]] || die "${CMDLINE} not found (is /boot/firmware mounted?)"
+
+case "${1:-status}" in
+  status) show_status ;;
+  rw)
+    write_cmdline ""
+    echo "This slot boots with a writable root from the next reboot on."
+    echo "Run 'decksmithos-rootfs ro' when done."
+    ;;
+  ro)
+    write_cmdline "${OVERLAY_ARG}"
+    echo "This slot boots read-only from the next reboot on."
+    ;;
+  *) die "usage: decksmithos-rootfs [status|rw|ro]" ;;
+esac
