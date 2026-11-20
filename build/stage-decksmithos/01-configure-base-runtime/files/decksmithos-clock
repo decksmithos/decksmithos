@@ -2,13 +2,18 @@
 # Keep the clock from starting over at every boot (like fake-hwclock).
 #
 #   decksmithos-clock save      write the current time to /storage/state/clock
-#   decksmithos-clock restore   set the clock to the saved time if it is behind
+#   decksmithos-clock restore   use the saved time only if the RTC lost the time
 #
-# Order of sources at boot: the RTC (battery backed on the CM5 IO board; the
-# kernel reads it at boot and, while NTP is synchronized, writes it back every
-# 11 minutes), then this saved time, which only ever moves the clock forward,
-# then NTP (dev profile, systemd-timesyncd). Saved at shutdown and every
-# 15 minutes (decksmithos-clock.service, decksmithos-clock-save.timer).
+# The RTC comes first: battery backed on the CM5 IO board, read by the kernel
+# at boot and, while NTP is synchronized, written back every 11 minutes. When
+# it is at or after the saved time it kept time and is trusted as it is (the
+# saved time is older by construction, it never sets the clock back). Only
+# when it is behind (no battery, a flat battery, never set) is the clock set
+# to the saved time, so that it does not start from 1970 or the build date.
+# NTP corrects it afterwards in the dev profile (systemd-timesyncd). Saved at
+# shutdown and every 15 minutes (decksmithos-clock.service,
+# decksmithos-clock-save.timer).
+RTC=/sys/class/rtc/rtc0/since_epoch
 STATE=/storage/state/clock
 
 case "$1" in
@@ -19,11 +24,19 @@ case "$1" in
   restore)
     [ -r "${STATE}" ] || exit 0
     saved="$(cat "${STATE}")"
-    now="$(date +%s)"
     case "${saved}" in ''|*[!0-9]*) echo "decksmithos-clock: ignoring ${STATE}: '${saved}'"; exit 0 ;; esac
+    rtc="$(cat "${RTC}" 2>/dev/null)"
+    case "${rtc}" in ''|*[!0-9]*) rtc="" ;; esac
+    if [ -n "${rtc}" ] && [ "${rtc}" -ge "${saved}" ]; then
+      echo "decksmithos-clock: RTC kept the time ($(date -u -d "@${rtc}" '+%F %T') UTC); saved time not used"
+      exit 0
+    fi
+    now="$(date +%s)"
     if [ "${saved}" -gt "${now}" ]; then
       date -u -s "@${saved}" > /dev/null
-      echo "decksmithos-clock: clock was behind; set to the time saved at shutdown: $(date -u '+%F %T') UTC"
+      echo "decksmithos-clock: RTC ${rtc:-missing} is behind the time saved at shutdown; clock set to $(date -u '+%F %T') UTC"
+    else
+      echo "decksmithos-clock: RTC ${rtc:-missing} is behind the saved time, but the clock is not; left as it is"
     fi
     ;;
   *)

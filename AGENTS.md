@@ -180,7 +180,8 @@ Decided boot selection: **Raspberry Pi bootloader tryboot A/B**
 (`autoboot.txt` with `tryboot_a_b=1`). Slot A = p2 + p4, slot B = p3 +
 p5; each slot has its own kernel, `config.txt` and `cmdline.txt`, and its
 fstab mounts its own boot partition on `/boot/firmware`. Default slot is
-`boot_partition` under `[all]`; `reboot "0 tryboot"` boots the
+`boot_partition` under `[all]`; `systemctl reboot
+--reboot-argument="0 tryboot"` boots the
 `[tryboot]` partition exactly once, so a failing new slot falls back on
 the next reboot/power cycle. `decksmithos-slot` (status / try / commit)
 implements this on the device; see `docs/disk-layout.md`. Unverified on
@@ -257,9 +258,19 @@ write tags or Serato markers into audio files
 
 Clock: the CM5 RTC (battery on the IO board) is read by the kernel at
 boot and written back every 11 minutes while NTP is synchronized
-(verified 2026-11-20). `decksmithos-clock` saves the time to
-`/storage/state/clock` at shutdown and every 15 minutes and restores it
-at boot only if the clock is behind (both profiles). Dev runs
+(verified 2026-11-20, including a power cut of a few minutes: correct
+time before NTP). `decksmithos-clock` saves the time to
+`/storage/state/clock` at shutdown and every 15 minutes; at boot the RTC
+wins when it is at or after the saved time, and only an RTC that lost
+the time is replaced by the saved time (both profiles).
+
+Machine ID: the image's `/etc/machine-id` is empty (read-only root);
+`decksmithos-overlay-init` writes a stable one into the overlay, derived
+from the board serial (md5 of `decksmithos-machine-id:<serial>`; it
+mounts sysfs briefly, since `/proc/device-tree` points into `/sys`).
+Without it systemd invented a random ID at every boot and journald,
+which files the persistent journal per machine ID, started a new
+directory each time (`journalctl -b -1` found nothing). Dev runs
 `systemd-timesyncd`; release has no network. RTC battery charging
 (`dtparam=rtc_bbat_vchg=...`) is off and must stay off on the
 development board: it has a CR2032 (not rechargeable; user, 2026-11-20).
@@ -544,11 +555,13 @@ before the next start, because Mixxx rewrites `mixxx.cfg` when it quits.
 `[App],show_preferences` (for a settings button in the skin's gear
 panel) and `DECKSMITHOS_NO_SOUND_DIALOGS` (set by `decksmithos-mixxx`:
 without a controller, Mixxx 2.5.6 stopped at a "No Output Devices" dialog
-that an appliance cannot answer). The patch is not yet built: publishing
-it means raising `MIXXX_LOCAL_SUFFIX` to `~deb13decksmithos2`, running
-the workflow with publish, and `pin-release.sh` in the same change (the
-image build refuses a version that `release.sha256` does not pin). Add
-the skin button only once the image installs that package.
+that an appliance cannot answer). Published as
+`2.5.6+dfsg-3~deb13decksmithos2` (2026-11-20) and pinned; the
+"DecksmithOS Standalone" gear panel has a MIXXX / SETTINGS button on
+`[App],show_preferences`. A new Mixxx build means raising
+`MIXXX_LOCAL_SUFFIX`, running the workflow with publish and
+`pin-release.sh`, committed together (the image build refuses a version
+that `release.sha256` does not pin).
 
 ### Future display sizes
 
@@ -768,8 +781,11 @@ Keep documentation synchronized with implementation.
     rising), SoC 55 °C. Still to do: a longer run to thermal steady state
     and a run with Mixxx playing.
 -   [ ] A/B slots identified correctly (`decksmithos-slot` shows A).
--   [ ] `decksmithos-slot try` boots slot B once; next reboot returns
-    to A; `try` + `commit` in B makes B the default.
+-   [x] `decksmithos-slot try` boots slot B once; `commit` in B makes B
+    the default (verified 2026-11-20 after fixing the reboot call:
+    systemd 257 rejects `systemctl reboot "0 tryboot"`, use
+    `--reboot-argument=`). Update from the USB menu into B: 29 s.
+    Still to check: a plain reboot from an uncommitted B returns to A.
 -   [ ] Rootfs read-only in normal runtime (`findmnt /` shows
     `overlay`; `decksmithos-rootfs` status; a file written to `/etc`
     is gone after reboot; `rw`/`ro` toggle works in dev).

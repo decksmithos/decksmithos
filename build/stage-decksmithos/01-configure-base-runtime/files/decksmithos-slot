@@ -5,7 +5,7 @@
 #
 # autoboot.txt on p1 (PARTLABEL=autoboot) names the default boot partition and,
 # under [tryboot], the partition used for exactly one boot after
-# `reboot "0 tryboot"`. Any later reboot or power cycle returns to the default,
+# `systemctl reboot --reboot-argument="0 tryboot"`. Any later reboot or power cycle returns to the default,
 # which is the rollback path for a slot that does not come up.
 #
 # Usage:
@@ -180,7 +180,9 @@ do_commit() {
 
 case "${1:-status}" in
   status) with_autoboot ro show_status ;;
-  try)    with_autoboot rw do_try && systemctl reboot "0 tryboot" ;;
+  # systemd 257 takes the firmware reboot argument only as an option
+  # ("systemctl reboot '0 tryboot'" fails with "Too many arguments").
+  try)    with_autoboot rw do_try && systemctl reboot --reboot-argument="0 tryboot" ;;
   commit) with_autoboot rw do_commit ;;
   info)   with_autoboot ro show_info ;;
   *)      die "usage: decksmithos-slot [status|try|commit|info]" ;;

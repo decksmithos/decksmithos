@@ -51,7 +51,7 @@ The Raspberry Pi bootloader reads `autoboot.txt` from p1:
 tryboot_a_b=1
 boot_partition=2      # default slot (A)
 [tryboot]
-boot_partition=3      # used for one boot after `reboot "0 tryboot"`
+boot_partition=3      # used for one boot after `systemctl reboot --reboot-argument="0 tryboot"`
 ```
 
 The tryboot flag lasts for exactly one boot. Any later reboot or power

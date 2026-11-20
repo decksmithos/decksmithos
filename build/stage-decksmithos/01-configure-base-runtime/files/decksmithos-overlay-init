@@ -62,5 +62,19 @@ mountpoint -q "${RO}/dev" && mount --move "${RO}/dev" /dev
 # remount of / by systemd. Only the overlay's copy of fstab changes.
 sed -i -E 's|^([^#[:space:]]+[[:space:]]+/[[:space:]].*)$|# read-only root, see decksmithos-overlay-init: \1|' /etc/fstab
 
+# A stable machine ID per board, derived from the board's serial number. The
+# image ships an empty /etc/machine-id (read-only root), so systemd would make
+# up a new random one at every boot, and journald, which files the persistent
+# journal under /var/log/journal/<machine-id>, would start a new directory each
+# time ("journalctl -b -1" finding nothing). Written to the overlay only.
+# (/proc/device-tree points into /sys, which nothing has mounted yet.)
+if [ ! -s /etc/machine-id ] && mount -t sysfs sysfs /sys 2>/dev/null; then
+  serial="$(tr -d '\000' < /sys/firmware/devicetree/base/serial-number 2>/dev/null)"
+  umount /sys
+  if [ -n "${serial}" ]; then
+    printf 'decksmithos-machine-id:%s' "${serial}" | md5sum | cut -c1-32 > /etc/machine-id
+  fi
+fi
+
 log "root is a RAM overlay on top of ${RO}"
 exec /sbin/init ${INIT_ARGS} < /dev/console > /dev/console 2>&1

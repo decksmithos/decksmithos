@@ -113,6 +113,48 @@
               </Children>
             </WidgetGroup>
 
+            <!-- Separator -->
+            <WidgetGroup>
+              <ObjectName>ShortcutColumnDivider</ObjectName>
+              <Size>0me,1f</Size>
+            </WidgetGroup>
+
+            <!-- MIXXX — the preferences dialog (sound, controllers, library,
+                 skin...). [App],show_preferences is added by the DecksmithOS
+                 Mixxx package (build/mixxx/patches/0002). -->
+            <WidgetGroup>
+              <ObjectName>ShortcutSectionSettings</ObjectName>
+              <Layout>vertical</Layout>
+              <Size>0me,110f</Size>
+              <Children>
+                <WidgetGroup><Size>0me,0me</Size></WidgetGroup>
+                <Label>
+                  <ObjectName>ShortcutSectionTitle</ObjectName>
+                  <Text>MIXXX</Text>
+                  <Size>me,22f</Size>
+                </Label>
+                <WidgetGroup>
+                  <ObjectName>SettingsButtons</ObjectName>
+                  <Layout>horizontal</Layout>
+                  <Size>me,65f</Size>
+                  <Children>
+                    <PushButton>
+                      <ObjectName>MixxxSettingsBtn</ObjectName>
+                      <!-- One state: a momentary button (1 while pressed). -->
+                      <NumberStates>1</NumberStates>
+                      <Size>me,55f</Size>
+                      <State><Number>0</Number><Text>SETTINGS</Text></State>
+                      <Connection>
+                        <ConfigKey>[App],show_preferences</ConfigKey>
+                        <ButtonState>LeftButton</ButtonState>
+                      </Connection>
+                    </PushButton>
+                  </Children>
+                </WidgetGroup>
+                <WidgetGroup><Size>0me,0me</Size></WidgetGroup>
+              </Children>
+            </WidgetGroup>
+
           </Children>
         </WidgetGroup>
 
