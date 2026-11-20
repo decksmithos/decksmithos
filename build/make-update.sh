@@ -63,9 +63,12 @@ log "image ${IMAGE}: version ${version}, profile ${profile}"
 log "packing boot partition"
 sudo tar -C "${MNT}/boot" -cf - . | zstd -q -T0 -"${ZSTD_LEVEL}" > "${STAGE}/boot.tar.zst"
 log "packing root filesystem (zstd -${ZSTD_LEVEL}, this takes a while)"
-sudo tar -C "${MNT}/root" --numeric-owner --xattrs --xattrs-include='*' --acls -cf - . \
+# The demo tracks belong to the full disk image only (stage 05-demo-music).
+DEMO_EXCLUDE="./usr/share/decksmithos/demo-library"
+sudo tar -C "${MNT}/root" --numeric-owner --xattrs --xattrs-include='*' --acls \
+  --exclude="${DEMO_EXCLUDE}" -cf - . \
   | zstd -q -T0 -"${ZSTD_LEVEL}" > "${STAGE}/rootfs.tar.zst"
-rootfs_kib="$(sudo du -sk --apparent-size "${MNT}/root" | awk '{print $1}')"
+rootfs_kib="$(sudo du -sk --apparent-size --exclude="${MNT}/root/${DEMO_EXCLUDE#./}" "${MNT}/root" | awk '{print $1}')"
 
 {
   echo "format=1"

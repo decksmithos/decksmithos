@@ -58,7 +58,8 @@ for p in mixxx mixxx-data xserver-xorg-core nodm openbox plymouth udev udisks2 \
          sqlite3 parted fdisk e2fsprogs dosfstools rpi-eeprom raspi-utils python3 overlayroot \
          sudo python3-tk python3-xlib xcompmgr xinput unclutter-xfixes xinput-calibrator \
          zstd openssh-client flashrom; do
-  dpkg-query -W -f='${db:Status-Abbrev}' "${p}" 2>/dev/null | grep -q '^ii' || missing="${missing} ${p}"
+  # "ii" installed, "hi" installed and held (mixxx, mixxx-data).
+  dpkg-query -W -f='${db:Status-Abbrev}' "${p}" 2>/dev/null | grep -qE '^[ih]i' || missing="${missing} ${p}"
 done
 if [ -n "${missing}" ]; then
   echo "ERROR: release purge removed required packages:${missing}" >&2

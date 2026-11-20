@@ -1,5 +1,7 @@
 # DecksmithOS: hand USB storage filesystems to decksmithos-usb-mount@.service,
 # which mounts them read-only at /usb or /usb2 in order of insertion.
 # Matches partitions and partition-less ("superfloppy") disks that carry a filesystem.
-ACTION=="add", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", \
+# "Connected through USB" is decided by the device path (a usb ancestor), not by
+# ID_BUS: SATA/NVMe enclosures with a SAT bridge report ID_BUS=ata.
+ACTION=="add", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ENV{ID_FS_USAGE}=="filesystem", \
   TAG+="systemd", ENV{SYSTEMD_WANTS}+="decksmithos-usb-mount@%k.service"

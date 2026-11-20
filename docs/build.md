@@ -264,3 +264,30 @@ To install: copy the file to the root of a USB stick as
 `decksmithos.update` and use the system menu, or in the dev profile
 `sudo decksmithos-update install <file>`. Format and rules:
 `docs/update-strategy.md`.
+
+## Output Files
+
+`build/output/` after a build:
+
+| File | Content |
+|---|---|
+| `decksmithos-<profile>.img` | disk image (10 GiB layout, slot B empty; sparse, ~2.5 GB of data) |
+| `decksmithos-<profile>.bmap` | block map for `bmaptool copy` |
+| `decksmithos-<profile>-<version>.update` | signed update file (see above) |
+| `decksmithos-release.img.xz` + `.sha256` | compressed image for distribution |
+
+## Demo Tracks
+
+`build/demo-music/tracks.tsv` lists 2--3 freely licensed tracks per
+genre (CC0 / CC BY / CC BY-SA, checked on each source page), pinned by
+SHA256. `build.sh` downloads them through `build/demo-music/fetch.sh`
+(cache: `build/demo-music/cache/`, not in git) and stage
+`05-demo-music` puts them into slot A of the full image as
+`/usr/share/decksmithos/demo-library/<Genre>/` plus `CREDITS.txt`. The
+first boot copies them to `/storage/library/Demo/` when it creates
+`/storage`; `decksmithos-mixxx` then makes one crate per genre. Update
+files leave them out. `DECKSMITHOS_DEMO_MUSIC=0` builds without them.
+
+Compression (`xz -9`, keeps the `.img`) is on by default for release
+and off for dev; override with `COMPRESS_OUTPUT=1` or `0`. Flashing on
+Windows, macOS and Linux: `docs/flashing.md`.

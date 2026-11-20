@@ -12,7 +12,6 @@ dos2unix
 eatmydata
 ethtool
 fakeroot
-flashrom
 g++
 gcc
 gdb

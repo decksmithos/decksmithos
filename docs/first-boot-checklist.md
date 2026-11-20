@@ -8,7 +8,9 @@ passes in `AGENTS.md` section 12. Use the **dev** image
 Dev access: user `dj` / `root`, password `decksmithos`, SSH key from
 `build/stage-decksmithos-dev/00-configure-dev-runtime/files/authorized_keys`,
 VNC on port 5900 (password `decksmit`). The device gets its address by
-DHCP on eth0.
+DHCP on eth0, in the background (`decksmithos-dhcp.service`): Mixxx does
+not wait for it. The address is shown in the "DEVELOPMENT MODE" notice
+(updated live) and in the system menu (short press on the power button).
 
 ---
 
@@ -72,6 +74,17 @@ The first boot creates `/storage` (p7) and reboots once by itself.
       bind mount of `/storage/logs` (`findmnt /var/log`).
 - [ ] SSH works; after a reboot the host key is unchanged (kept in
       `/storage/dev/ssh-host-keys`).
+- [ ] Mixxx starts without waiting for the network: boot with the
+      cable unplugged, plug it in later; the notice/menu then shows the
+      address. `systemd-analyze critical-chain nodm.service` shows no
+      network unit.
+- [ ] The journal survives a restart (`journalctl --list-boots` lists
+      more than one boot; stored in `/storage/logs/journal`).
+- [ ] Demo tracks (full image only): `/storage/library/Demo/<Genre>/`
+      with `CREDITS.txt`; Mixxx lists them after its first start. After
+      the next Mixxx start (restart Mixxx from the menu) the library has
+      one crate per genre (`decksmithos-mixxx` log: "created demo
+      crates").
 
 ## 3. Read-only root
 
@@ -190,7 +203,9 @@ less /storage/logs/mixxx/mixxx.log
 ## 8. USB storage
 
 - [ ] First stick mounts read-only on `/usb`, second on `/usb2`
-      (`findmnt /usb /usb2`); tracks appear in the library.
+      (`findmnt /usb /usb2`); tracks appear in the library. Try a plain
+      stick and an NVMe/SATA drive in a USB enclosure (bridges report
+      `ID_BUS=ata`); `journalctl -u "decksmithos-usb-mount@*"`.
 - [ ] Removing a stick while no track from it plays leaves Mixxx running.
 
 ## 9. Load and endurance

@@ -2,6 +2,7 @@
 """Development-mode notice, shown over Mixxx at the start of every dev session."""
 
 import os
+import socket
 import subprocess
 import tkinter as tk
 
@@ -20,6 +21,20 @@ def read_file(path, default=""):
 def root_is_writable():
     r = subprocess.run(["findmnt", "-n", "-o", "FSTYPE", "/"], capture_output=True, text=True)
     return r.stdout.strip() != "overlay"
+
+
+def ipv4_text():
+    """Global IPv4 addresses, or why there is none yet (same wording as the menu)."""
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "IP unknown"
+    ips = [f.split("/")[0] for line in out.splitlines() for f in line.split()[3:4]]
+    if ips:
+        return "IP " + ", ".join(ips)
+    carrier = read_file("/sys/class/net/eth0/carrier")
+    return "no IP yet (waiting for DHCP)" if carrier == "1" else "no IP (no network cable)"
 
 
 def main():
@@ -49,6 +64,15 @@ def main():
              bg=PANEL, fg=WARN).pack(anchor="w")
     tk.Label(box, text="\n".join(lines), font=("DejaVu Sans", int(15 * scale)), bg=PANEL, fg=FG,
              justify="left", anchor="w", wraplength=int(1000 * scale)).pack(anchor="w", pady=(int(14 * scale), 0))
+    # The lease may arrive while the notice is shown: refresh the address.
+    ip_label = tk.Label(box, font=("DejaVu Sans Mono", int(17 * scale), "bold"), bg=PANEL, fg=FG)
+    ip_label.pack(anchor="w", pady=(int(14 * scale), 0))
+
+    def refresh_ip():
+        ip_label.configure(text=f"{socket.gethostname()}   {ipv4_text()}")
+        root.after(2000, refresh_ip)
+
+    refresh_ip()
     tk.Label(box, text=f"{version.get('version', '?')}   built {version.get('date', '?')}   "
                        f"Mixxx {version.get('mixxx', '?')}",
              font=("DejaVu Sans", int(11 * scale)), bg=PANEL, fg=DIM).pack(anchor="w", pady=(int(14 * scale), 0))

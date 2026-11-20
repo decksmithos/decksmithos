@@ -14,7 +14,6 @@ install -v -m 644 files/waveshare35c.dtbo "${ROOTFS_DIR}/boot/firmware/overlays/
 install -v -m 644 files/waveshare4c.dtbo "${ROOTFS_DIR}/boot/firmware/overlays/waveshare4c.dtbo"
 
 install -v -m 644 files/apt-conf.local "${ROOTFS_DIR}/etc/apt/apt.conf.d/99local"
-install -v -m 644 files/interfaces-eth0 "${ROOTFS_DIR}/etc/network/interfaces.d/eth0"
 
 # Plymouth: common theme files. plymouthd.conf and decksmithos.script are
 # display-specific and installed by ../03-display-profile.
@@ -93,3 +92,7 @@ mkdir -p ${ROOTFS_DIR}/storage
 rm -fr ${ROOTFS_DIR}/var/log/*
 
 # Display-specific configuration is applied by ../03-display-profile.
+
+# Persistent journal on /storage (journalctl -b -1 after a restart or power off).
+install -v -d -m 755 "${ROOTFS_DIR}/etc/systemd/journald.conf.d"
+install -v -m 644 files/journald-decksmithos.conf "${ROOTFS_DIR}/etc/systemd/journald.conf.d/50-decksmithos.conf"

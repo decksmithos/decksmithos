@@ -16,6 +16,7 @@
 set -Eeuo pipefail
 
 STORAGE_USER="${DECKSMITHOS_STORAGE_USER:-dj}"
+DEMO_LIBRARY="${DECKSMITHOS_DEMO_LIBRARY:-/usr/share/decksmithos/demo-library}"
 STORAGE_LABEL="storage"
 # Filesystem label until the directory structure is complete. The final label is
 # set last, so an interrupted run is resumed (the service only runs while no
@@ -144,6 +145,18 @@ populate_storage() {
   chmod 0755 "${mnt}/logs"
   mkdir -p "${mnt}/logs/mixxx" "${mnt}/config/mixxx"
   chown "${STORAGE_USER}:${STORAGE_USER}" "${mnt}/logs/mixxx" "${mnt}/config/mixxx"
+  # Demo tracks: present only in a freshly flashed full image (update files
+  # leave them out), copied once, here, when /storage is created. The marker
+  # asks decksmithos-mixxx to put them into one crate per genre.
+  if [[ -d "${DEMO_LIBRARY}" ]] && [[ ! -e "${mnt}/library/Demo" ]]; then
+    log "Copying demo tracks to ${mnt}/library/Demo"
+    rm -rf "${mnt}/library/Demo.partial"
+    cp -r "${DEMO_LIBRARY}" "${mnt}/library/Demo.partial"
+    chown -R "${STORAGE_USER}:${STORAGE_USER}" "${mnt}/library/Demo.partial"
+    mv "${mnt}/library/Demo.partial" "${mnt}/library/Demo"
+    touch "${mnt}/config/mixxx/demo-crates.pending"
+    chown "${STORAGE_USER}:${STORAGE_USER}" "${mnt}/config/mixxx/demo-crates.pending"
+  fi
   umount "${mnt}"
   rmdir "${mnt}"
   POPULATE_MNT=""

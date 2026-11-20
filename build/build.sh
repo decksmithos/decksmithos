@@ -23,7 +23,9 @@ PI_GEN_BRANCH="${PI_GEN_BRANCH:-arm64}"
 
 POSTPROCESS_SCRIPT="${BUILD_DIR}/postprocess.sh"
 BUILD_STARTED=""
-COMPRESS_OUTPUT="${COMPRESS_OUTPUT:-0}"
+# Compressed image for distribution (.img.xz + .sha256; the .img and .bmap stay).
+# Default: on for release, off for dev (saves time on every dev build).
+COMPRESS_OUTPUT="${COMPRESS_OUTPUT:-}"
 
 export DECKSMITHOS_PROFILE="${DECKSMITHOS_PROFILE:-release}"
 
@@ -155,6 +157,10 @@ sync_decksmithos_files() {
   rsync -a --delete "${BUILD_DIR}/../mixxx/skins/" \
     "${PI_GEN_DIR}/stage-decksmithos/02-install-session-files/files/skins/"
   fetch_mixxx_debs "${PI_GEN_DIR}/stage-decksmithos/00-install-packages/files/mixxx"
+  # Demo tracks for the full image (stage 05; never part of an update file).
+  if [[ "${DECKSMITHOS_DEMO_MUSIC:-1}" != 0 ]]; then
+    "${BUILD_DIR}/demo-music/fetch.sh" "${PI_GEN_DIR}/stage-decksmithos/05-demo-music/files/demo-library"
+  fi
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos-dev" "${PI_GEN_DIR}/"
   rsync -a --delete "${BUILD_DIR}/stage-decksmithos-release" "${PI_GEN_DIR}/"
 
@@ -212,16 +218,20 @@ compress_final_image() {
     die "Final image not found: ${final_image}"
   fi
 
-  if [[ "${COMPRESS_OUTPUT}" != "1" ]]; then
-    log "Skipping compression (COMPRESS_OUTPUT=${COMPRESS_OUTPUT})"
+  local compress="${COMPRESS_OUTPUT}"
+  [[ -n "${compress}" ]] || compress="$([[ "${DECKSMITHOS_PROFILE}" == release ]] && echo 1 || echo 0)"
+  if [[ "${compress}" != "1" ]]; then
+    log "Skipping compression (COMPRESS_OUTPUT=${compress})"
     return
   fi
 
-  log "Compressing final image with xz"
-  sudo xz -T0 -z -f -9 "${final_image}"
+  log "Compressing final image with xz (keeping the .img and .bmap)"
+  sudo xz -T0 -k -f -9 "${final_image}"
+  (cd "$(dirname "${final_image}")" && sha256sum "$(basename "${final_image}").xz" \
+    | sudo tee "$(basename "${final_image}").xz.sha256" >/dev/null)
 
   log "Compressed artifact:"
-  log "  ${final_image}.xz"
+  log "  ${final_image}.xz ($(du -h "${final_image}.xz" | cut -f1))"
 }
 
 main() {

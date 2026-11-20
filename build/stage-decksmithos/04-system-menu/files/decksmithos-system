@@ -75,9 +75,21 @@ bootloader_update() {
   [[ "${cur}" =~ ^[0-9]+$ && "${lat}" =~ ^[0-9]+$ ]] || die "cannot read the bootloader versions"
   (( lat > cur )) || die "the included bootloader is not newer than the installed one; nothing to do"
   log "updating the bootloader EEPROM: ${cur} -> ${lat}"
-  # Immediate update only (AB EEPROM or flashrom). /boot/firmware stays read-only,
-  # so the older recovery.bin method cannot run half-way; it fails instead.
-  RPI_EEPROM_IMMEDIATE_UPDATE=1 rpi-eeprom-update -a
+  # Immediate update only (AB EEPROM or flashrom). rpi-eeprom-update always stages
+  # pieeprom.upd/.sig in BOOTFS (flashrom reads the image from there), but
+  # /boot/firmware is read-only, so it stages them in a tmpfs directory instead.
+  # The ROM never looks there, so the recovery.bin fallback (used when the
+  # immediate path is not available) cannot start at the next boot: only an
+  # "UPDATE SUCCESSFUL" from the immediate path counts as success.
+  local stage out rc=0
+  stage="$(mktemp -d /run/decksmithos-eeprom.XXXXXX)"
+  cp /boot/firmware/config.txt "${stage}/config.txt"
+  out="$(BOOTFS="${stage}" RPI_EEPROM_IMMEDIATE_UPDATE=1 rpi-eeprom-update -a 2>&1)" || rc=$?
+  rm -rf "${stage}"
+  printf '%s\n' "${out}"
+  logger -t decksmithos-system -- "${out}" 2>/dev/null || true
+  (( rc == 0 )) && grep -q "UPDATE SUCCESSFUL" <<< "${out}" \
+    || die "bootloader update failed (exit ${rc}); do not power off before checking the messages above"
   log "bootloader written; it is used from the next restart"
 }
 

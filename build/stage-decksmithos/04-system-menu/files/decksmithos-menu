@@ -102,15 +102,24 @@ def epoch_date(value):
         return "unknown"
 
 
+def ipv4_text():
+    """Global IPv4 addresses ("IP 192.168.1.20"), or why there is none yet."""
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "IP unknown"
+    ips = [f.split("/")[0] for line in out.splitlines() for f in line.split()[3:4]]
+    if ips:
+        return "IP " + ", ".join(ips)
+    carrier = read_file("/sys/class/net/eth0/carrier")
+    return "no IP yet (waiting for DHCP)" if carrier == "1" else "no IP (no network cable)"
+
+
 def system_info():
     parts = [socket.gethostname()]
     if PROFILE == "dev":
-        try:
-            ips = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=3).stdout.split()
-            if ips:
-                parts.append(ips[0])
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        parts.append(ipv4_text())
     temp = read_file("/sys/class/thermal/thermal_zone0/temp")
     if temp.isdigit():
         parts.append(f"{int(temp) / 1000:.0f} °C")

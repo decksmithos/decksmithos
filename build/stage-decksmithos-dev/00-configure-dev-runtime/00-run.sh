@@ -26,7 +26,14 @@ on_chroot <<EOF
 echo "${FIRST_USER_NAME}:${DEV_PASSWORD}" | chpasswd
 echo "root:${DEV_PASSWORD}" | chpasswd
 systemctl enable ssh
-# eth0 DHCP comes from ifupdown (networking.service, base stage) using dhcpcd-base.
+EOF
+
+# eth0 DHCP in the background (dhcpcd-base). Not through ifupdown: "auto eth0"
+# held network.target, and with it systemd-user-sessions, nodm and Mixxx, until
+# a lease arrived (or dhcpcd gave up). The release image has no eth0 config.
+install -m 644 files/decksmithos-dhcp.service "${ROOTFS_DIR}/etc/systemd/system/decksmithos-dhcp.service"
+on_chroot <<EOF
+systemctl enable decksmithos-dhcp.service
 EOF
 
 # Trusted SSH key for dj and root (debugging over the wired LAN).

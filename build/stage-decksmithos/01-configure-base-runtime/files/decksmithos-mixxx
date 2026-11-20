@@ -63,6 +63,38 @@ if [[ ! -e "${DB}" ]]; then
   fi
 fi
 
+# --- Demo crates --------------------------------------------------------------------
+# A freshly flashed image copies demo tracks to /storage/library/Demo/<Genre>/
+# (decksmithos-init-storage) and leaves demo-crates.pending. Mixxx finds the
+# tracks with its startup rescan; from the next start on, they are in the
+# database, and one crate per genre folder is created here, while Mixxx is not
+# running. Done once: the marker is removed.
+DEMO_DIR="${STORAGE}/library/Demo"
+DEMO_MARKER="${SETTINGS}/demo-crates.pending"
+sql_quote() { printf "'%s'" "${1//\'/\'\'}"; }
+if [[ -e "${DEMO_MARKER}" && -e "${DB}" && -d "${DEMO_DIR}" ]]; then
+  found="$(sqlite3 "${DB}" "SELECT count(*) FROM track_locations WHERE directory LIKE $(sql_quote "${DEMO_DIR}/%");" 2>/dev/null || echo 0)"
+  if [[ "${found}" =~ ^[0-9]+$ ]] && (( found > 0 )); then
+    sql="BEGIN;"
+    for genre_dir in "${DEMO_DIR}"/*/; do
+      genre="$(basename "${genre_dir}")"
+      sql+="INSERT OR IGNORE INTO crates (name) VALUES ($(sql_quote "${genre}"));"
+      sql+="INSERT OR IGNORE INTO crate_tracks (crate_id, track_id)
+              SELECT c.id, l.id FROM library l
+              JOIN track_locations t ON l.location = t.id
+              JOIN crates c ON c.name = $(sql_quote "${genre}")
+              WHERE t.directory = $(sql_quote "${DEMO_DIR}/${genre}") AND l.mixxx_deleted = 0;"
+    done
+    sql+="COMMIT;"
+    if sqlite3 "${DB}" "${sql}"; then
+      rm -f "${DEMO_MARKER}"
+      log "created demo crates for ${found} tracks in ${DEMO_DIR}"
+    else
+      log "WARNING: could not create the demo crates; trying again at the next start"
+    fi
+  fi
+fi
+
 # --- Controller audio ----------------------------------------------------------------
 # First ALSA card with a USB playback stream: prints "<card id> <max channels> <rates>".
 find_usb_playback_card() {

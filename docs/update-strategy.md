@@ -90,6 +90,10 @@ Allowed: older versions (rolling back a regression), the same build, and
 switching between dev and release. `/storage` is shared by both slots,
 so Mixxx settings, the library database and the touch calibration stay.
 
+Update files never carry the demo tracks
+(`/usr/share/decksmithos/demo-library`, full image only): an update
+neither adds them nor puts back deleted ones.
+
 ---
 
 ## Bootloader (EEPROM) Updates
@@ -101,9 +105,14 @@ installed bootloader date and offers "Update bootloader" only when the
 included one is newer; it never downgrades. It asks for two taps, warns
 not to power off, and uses only the immediate update path of
 `rpi-eeprom-update` on BCM2712 (A/B EEPROM partitions if the running
-bootloader supports them, otherwise `flashrom`). `/boot/firmware` stays
-read-only, so the old `recovery.bin` method cannot start half-way. The
-new bootloader is used from the next restart.
+bootloader supports them, otherwise `flashrom`). `rpi-eeprom-update`
+always stages `pieeprom.upd`/`.sig` in its `BOOTFS`; `/boot/firmware`
+stays read-only, so `decksmithos-system` points `BOOTFS` at a directory
+in `/run` instead. The boot ROM never looks there, so the old
+`recovery.bin` method (the fallback when neither immediate path is
+available) cannot start at the next boot; the menu reports success only
+when `rpi-eeprom-update` prints "UPDATE SUCCESSFUL". The new bootloader
+is used from the next restart.
 
 A failed EEPROM write is not covered by the system's A/B slots; recovery
 then needs `rpiboot` from another computer. Do not update it without a

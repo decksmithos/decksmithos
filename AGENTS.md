@@ -236,6 +236,13 @@ missing. Its session log goes to `/storage/logs/mixxx/`. Mixxx must not
 write tags or Serato markers into audio files
 (`SyncTrackMetadataExport 0`, `SeratoMetadataExport 0`).
 
+The journal is persistent (`journald.conf.d/50-decksmithos.conf`,
+both profiles) in `/storage/logs/journal` through the `/var/log` bind
+mount. A freshly flashed full image also brings demo tracks
+(`build/demo-music/`, CC0/CC BY/CC BY-SA, credits in `CREDITS.txt`),
+copied once to `/storage/library/Demo/<Genre>/` when `/storage` is
+created, with one Mixxx crate per genre; update files never carry them.
+
 Use ext4. Consider periodic `fstrim` where supported; do not assume
 continuous `discard` is always preferable. Ensure ownership and
 permissions are explicit, with user data accessible to `dj`.
@@ -386,6 +393,10 @@ commands on the build host instead of inside the target rootfs.
     (first mountable partition). The system disk is never mounted.
     Not by label/UUID: Mixxx keys tracks by path, so a collection copied
     to another stick keeps its cues when it lands in the same slot.
+    The rule matches any block device with a USB ancestor
+    (`SUBSYSTEMS=="usb"`), not `ID_BUS=="usb"`: NVMe/SATA enclosures
+    with a SAT bridge report `ID_BUS=ata` (found on the user's NVMe
+    enclosure, which then was not mounted).
     Implemented by `99-decksmithos-usb-storage.rules` →
     `decksmithos-usb-mount@.service` → `decksmithos-usb-mount`.
     Supported: vfat, exfat, ext2/3/4 (`noload`), hfsplus, ntfs (ntfs3).
@@ -531,7 +542,10 @@ rewrites the slot's cmdline/fstab PARTUUIDs and writes
 Older versions and dev/release switches are allowed (decided). The
 menu's "Update bootloader" (both profiles, decided) writes the
 `rpi-eeprom` default release only if newer, via the immediate path
-(AB EEPROM or `flashrom`); never downgrades.
+(AB EEPROM or `flashrom`); never downgrades. `rpi-eeprom-update` stages
+its files in `BOOTFS`, so it runs with `BOOTFS` in `/run` (the first
+hardware try failed on the read-only `/boot/firmware`); success only on
+"UPDATE SUCCESSFUL".
 
 Touch tools (`decksmithos-touch`): `calibrate` runs `xinput_calibrator`
 and stores the evdev axis calibration in
@@ -600,7 +614,11 @@ Implemented (dev profile only): password `decksmithos` for `dj` and
 for both `dj` and `root`; root autologin on tty1; `x11vnc` sharing the
 running X display `:0` on port 5900 (`decksmithos-x11vnc.service`, VNC
 password = first 8 characters of the dev password, i.e. `decksmit`).
-Dev mode exists only in the dev image (decided): every session starts
+eth0 DHCP runs in the background (`decksmithos-dhcp.service`, dhcpcd,
+dev only; no ifupdown `auto eth0`, which held `network.target` and with
+it nodm/Mixxx until a lease arrived); the address is shown in the dev
+notice and the system menu. The release image has no eth0
+configuration. Dev mode exists only in the dev image (decided): every session starts
 the touch overlay with its compositor and shows an English
 "DEVELOPMENT MODE" notice (`decksmithos-dev-banner`). Runtime tools read
 the profile from `/etc/decksmithos/profile` (written by
@@ -718,36 +736,83 @@ Keep documentation synchronized with implementation.
 
 ## 13. Open decisions
 
-Verify or decide explicitly: 1. Exact CM5 carrier and USB
-topology/power. 2. NVMe model, capacity, thermals, and boot
-configuration. 3. Exact Waveshare display and touch controller/overlay.
-4. Final 7-inch display interface (DSI/HDMI). 5. Raspberry Pi OS release
-and pinned pi-gen revision. 6. Mixxx version and skin schema. 7. `nodm`
-suitability on selected OS. 8. Plymouth support on selected SPI panel.
-9. ~~A/B boot selection and rollback mechanism~~ — decided: tryboot
-(§5); updater implemented (`decksmithos-update`, signed
-`decksmithos.update` from USB via the system menu, see
-`docs/update-strategy.md`); automatic health check still open. 10. Partition sizes and
-15% reserve policy. 11. Whether eMMC is unused, used for rescue, or
-otherwise. 12. Whether package management is removed from final image.
-13. Standard versus low-latency/RT kernel based on measurement. 14.
-Final source license and trademark/logo policy. 15. Whether a second
-DecksmithOS-owned Git repository is needed. 16. Primary display target
-for current development (3.5-inch SPI vs Touch Display 2). 17. ~~Whether
-touch input is used at all on the 7-inch display~~ — decided: yes (§7). 18. Pinned Mixxx version
-and whether the TinyDeck 480 draft is kept, reworked, or discarded.
-19. ~~Bluetooth speakers as audio output~~ — decided: no (2026-11-19).
-A2DP adds about 150--250 ms of variable latency (low-latency codecs
-such as aptX LL are rare on speakers and poorly supported on Linux), so
-the master on the speakers lags the headphone cue on the controller and
+Status legend: **Open** = nobody decided yet; **Measure** = decided
+direction, needs a measurement on the hardware; **Decided** = done,
+kept here for the reasoning. Update the status when something changes.
+
+### Hardware
+
+| # | Question | Status |
+|---|---|---|
+| 1 | Exact CM5 carrier, USB topology and power budget | Open (CM5 IO board in use) |
+| 2 | NVMe model, capacity, thermals; PCIe Gen 3 (`pciex1_gen=3` is on) | Measure (§12) |
+| 3 | Exact Waveshare 3.5" display, touch controller and overlay | Open |
+| 4 | Final 7" display interface (DSI/HDMI) | Open (Touch Display 2 on DSI works, §15) |
+| 16 | Primary display for development: 3.5" SPI or Touch Display 2 | Open |
+| 11 | eMMC: unused, rescue system, or other | Open |
+
+### OS, build and updates
+
+| # | Question | Status |
+|---|---|---|
+| 5 | Raspberry Pi OS release and pinned pi-gen revision | Open |
+| 7 | `nodm` on the selected OS | Works in the current images; keep unless a problem appears |
+| 8 | Plymouth on the SPI panel | Open |
+| 9 | A/B boot and rollback | **Decided:** tryboot (§5); signed `decksmithos.update` from USB (`docs/update-strategy.md`). Still open: automatic health check before keeping a slot |
+| 10 | Partition sizes and the 15% reserve | Open (rootfs 4 GiB per slot now) |
+| 12 | Package management in the final image | Release removes apt (§6); dev keeps it |
+| 13 | Standard vs. low-latency/RT kernel | Measure (xruns, latency) |
+| 15 | A second DecksmithOS-owned Git repository | Open (none so far) |
+
+### Mixxx and user interface
+
+| # | Question | Status |
+|---|---|---|
+| 6, 18 | Mixxx version and skin schema; fate of the TinyDeck 480 draft | Mixxx pinned at 2.5.6 (§7); TinyDeck 480 open |
+| 17 | Touch input on the 7" display | **Decided:** yes (§7) |
+
+### Product, licensing
+
+| # | Question | Status |
+|---|---|---|
+| 14 | Source license and trademark/logo policy | Open (needs legal advice, §10) |
+| 19 | Bluetooth speakers as audio output | **Decided: no** (2026-11-19), see below |
+
+**Why no Bluetooth speakers (#19).** A2DP adds about 150--250 ms of
+variable latency (aptX LL is rare on speakers and poorly supported on
+Linux), so the master on the speakers lags the headphone cue and
 beatmatching by ear breaks; compensating with Mixxx's headphone delay
-makes jog/cue/scratch feel late. Main on Bluetooth plus headphones on the
-controller's USB audio means two audio clocks drifting apart (xruns or
-desync). It would also bring back BlueZ/bluez-alsa, a pairing UI and a
-radio in release (Bluetooth is disabled on purpose, §4), and 2.4 GHz is
-unreliable in crowded venues. For practice at home, use an external
-Bluetooth transmitter on the controller's Master (RCA) output: no
-system change. Revisit only if a measured low-latency path exists.
+makes jog/cue/scratch feel late. Speakers on Bluetooth plus headphones
+on the controller's USB audio means two clocks drifting apart (xruns or
+desync). It would bring back BlueZ, a pairing UI and a radio in release
+(Bluetooth is disabled on purpose, §4), and 2.4 GHz is unreliable in
+crowded venues. For practice at home, put an external Bluetooth
+transmitter on the controller's master output. Revisit only if a
+measured low-latency path exists.
+
+### Feature gaps vs. club and standalone gear
+
+From the comparison with CDJ-3000/3000X, XDJ-RX3, XDJ-AZ, OPUS-QUAD,
+Denon Prime 4 G2, SC6000, Rane System One and others
+(`docs/feature-comparison.md`, research of 2026-11-20). Much of what
+the flagships do is already in Mixxx 2.5 (keylock, sync, quantize, key
+sync/shift, hot cues and saved loops, slip, loops, beat jump, effects,
+samplers, recording, on-device analysis, reading rekordbox USB exports);
+these are not yet tested on DecksmithOS. The gaps:
+
+| # | Feature (who has it) | DecksmithOS now | Status / proposal |
+|---|---|---|---|
+| 20 | Touch library browsing: big rows, finger scroll, BPM/key filter buttons, playlist editing on the unit (all flagships) | Mixxx library, small rows; search filters by typing | Open -- likely the most visible gap on the 7" screen |
+| 21 | Playback survives pulling the USB stick: whole track in RAM (CDJ-3000/X) | Unknown; Mixxx reads in chunks | Measure first (checklist §8), then decide |
+| 22 | rekordbox USB sticks as the main workflow: playlists, cues, grids (all AlphaTheta) | Mixxx's Rekordbox library feature (`/media/usb*` links exist) | Measure with the user's sticks; key for Pioneer users |
+| 23 | Phrase display (rekordbox PHRASE) and a touch beatgrid editor (Engine) | Basic grid adjust; no phrases | Open |
+| 24 | Stems: on-device separation (Prime 4 G2, System One) or stem files (Engine) | No | Open; on-device separation only with measured CPU headroom (no xruns) |
+| 25 | Smart Cue / Gate Cue cue modes (CDJ-3000X, XDJ-RX3/AZ) | Hot cue preview exists in Mixxx; no Smart Cue | Open; must stay controller-agnostic |
+| 26 | Streaming and cloud libraries: Beatport, TIDAL, Apple Music, Dropbox (most 2023+ units) | No | Proposal: no for release (no network by design); revisit only with an offline-cache design |
+| 27 | Link between units: Pro DJ Link / StageLinQ, shared library, sync | No | Open; probably out of scope |
+| 28 | Lighting: DMX, Hue, SoundSwitch, phrase-aware lights (Prime 4 G2, CDJ-3000/X) | No | Proposal: out of scope for now |
+| 29 | Boot time and power-loss behaviour (no flagship publishes them) | Unmeasured; read-only root and A/B slots | Measure and publish: could become a DecksmithOS strength |
+| 30 | Zone output, 10-band room EQ, multiple mic inputs (all-in-ones) | Depends on the controller's audio interface | Open; controller-agnostic, so only via what Mixxx supports |
 
 ## 14. Instructions for coding agents
 
