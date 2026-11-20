@@ -25,7 +25,10 @@ TOUCH_DEVICE=""
 
 touch_id() {
   [[ -n "${TOUCH_DEVICE}" ]] || return 1
-  xinput list --id-only "${TOUCH_DEVICE}" 2>/dev/null | head -n1
+  # Substring match: the kernel may prefix the name (e.g. "10-005d Goodix ...").
+  local name
+  name="$(xinput list --name-only 2>/dev/null | grep -F -m1 -- "${TOUCH_DEVICE}")" || return 1
+  xinput list --id-only "${name}" 2>/dev/null | head -n1
 }
 
 apply_calibration() {

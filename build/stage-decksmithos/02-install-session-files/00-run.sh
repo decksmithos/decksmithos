@@ -86,3 +86,7 @@ mkdir -p ${ROOTFS_DIR}/etc/X11/xorg.conf.d
 install -v -m 644 files/45-evdev.conf "${ROOTFS_DIR}/etc/X11/xorg.conf.d/45-evdev.conf"
 
 # Display-specific Xorg configuration is installed by ../03-display-profile.
+
+# Fast, clean stop of the X session at power off / restart (see the file).
+install -v -d -m 755 "${ROOTFS_DIR}/etc/systemd/system/nodm.service.d"
+install -v -m 644 files/nodm-decksmithos-stop.conf "${ROOTFS_DIR}/etc/systemd/system/nodm.service.d/decksmithos-stop.conf"

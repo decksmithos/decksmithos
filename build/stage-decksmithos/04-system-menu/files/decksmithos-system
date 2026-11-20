@@ -59,22 +59,40 @@ update_path() {
   echo "${p}"
 }
 
-# "current=<epoch> latest=<epoch>" from rpi-eeprom-update (exit 1 = update available).
+BOOTLOADER_CONF="/etc/decksmithos/bootloader.conf"
+
+# Settings without comments and blank lines, sorted, for comparing.
+conf_lines() { sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort; }
+
+# "current=<epoch> latest=<epoch> settings=ok|differ|unknown"
 bootloader_status() {
-  local out cur lat
+  local out cur lat settings=unknown now
   out="$(rpi-eeprom-update 2>/dev/null || true)"
   cur="$(sed -n 's/^ *CURRENT:.*(\([0-9]\+\)).*/\1/p' <<< "${out}" | head -n1)"
   lat="$(sed -n 's/^ *LATEST:.*(\([0-9]\+\)).*/\1/p' <<< "${out}" | head -n1)"
-  echo "current=${cur:-unknown} latest=${lat:-unknown}"
+  if [[ -r "${BOOTLOADER_CONF}" ]] && now="$(rpi-eeprom-config 2>/dev/null)"; then
+    if [[ "$(conf_lines <<< "${now}")" == "$(conf_lines < "${BOOTLOADER_CONF}")" ]]; then
+      settings=ok
+    else
+      settings=differ
+    fi
+  fi
+  echo "current=${cur:-unknown} latest=${lat:-unknown} settings=${settings}"
 }
 
+# Write the included bootloader with the DecksmithOS settings (one EEPROM write):
+# when it is newer than the installed one, or when it is the same release and
+# only the settings differ. Never writes an older bootloader.
 bootloader_update() {
-  local cur lat
-  read -r cur lat <<< "$(bootloader_status)"
-  cur="${cur#current=}" lat="${lat#latest=}"
+  local cur lat settings
+  read -r cur lat settings <<< "$(bootloader_status)"
+  cur="${cur#current=}" lat="${lat#latest=}" settings="${settings#settings=}"
   [[ "${cur}" =~ ^[0-9]+$ && "${lat}" =~ ^[0-9]+$ ]] || die "cannot read the bootloader versions"
-  (( lat > cur )) || die "the included bootloader is not newer than the installed one; nothing to do"
-  log "updating the bootloader EEPROM: ${cur} -> ${lat}"
+  [[ -r "${BOOTLOADER_CONF}" ]] || die "${BOOTLOADER_CONF} missing"
+  (( lat >= cur )) || die "the installed bootloader is newer than the included one; not downgrading"
+  (( lat > cur )) || [[ "${settings}" == differ ]] \
+    || die "bootloader and settings are up to date; nothing to do"
+  log "updating the bootloader EEPROM: ${cur} -> ${lat}, settings ${settings} -> ${BOOTLOADER_CONF}"
   # Immediate update only (AB EEPROM or flashrom). rpi-eeprom-update always stages
   # pieeprom.upd/.sig in BOOTFS (flashrom reads the image from there), but
   # /boot/firmware is read-only, so it stages them in a tmpfs directory instead.
@@ -84,7 +102,9 @@ bootloader_update() {
   local stage out rc=0
   stage="$(mktemp -d /run/decksmithos-eeprom.XXXXXX)"
   cp /boot/firmware/config.txt "${stage}/config.txt"
-  out="$(BOOTFS="${stage}" RPI_EEPROM_IMMEDIATE_UPDATE=1 rpi-eeprom-update -a 2>&1)" || rc=$?
+  # rpi-eeprom-config --apply puts the settings into the latest included image
+  # and runs rpi-eeprom-update -d -i -f on it (same immediate path).
+  out="$(BOOTFS="${stage}" RPI_EEPROM_IMMEDIATE_UPDATE=1 rpi-eeprom-config --apply "${BOOTLOADER_CONF}" 2>&1)" || rc=$?
   rm -rf "${stage}"
   printf '%s\n' "${out}"
   logger -t decksmithos-system -- "${out}" 2>/dev/null || true

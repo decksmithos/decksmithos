@@ -1,4 +1,8 @@
 # DecksmithOS hardware profile
+# Load the initramfs (initramfs_2712 / initramfs8 next to the kernel). Required:
+# overlayroot (read-only root) runs in the initramfs; without this line the
+# firmware boots the kernel alone and the root stays writable.
+auto_initramfs=1
 disable_overscan=1
 usb_max_current_enable=1
 # PCIe Gen 3 is not officially certified on Pi 5 / CM5 (Gen 2 is).

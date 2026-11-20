@@ -14,16 +14,22 @@ it would black out the screen, so the program refuses to start.
 Event sources:
   - X RECORD: pointer position and the buttons X actually delivers, i.e.
     what Mixxx sees (right click = button 3).
-  - The touch device itself (BTN_TOUCH, read-only, no grab), because with
-    long-press emulation X delivers no button press while the finger is
-    held still. Optional: without access, X button 1 is used instead.
+  - The touch device itself (read-only, no grab): BTN_TOUCH and ABS_X/ABS_Y,
+    mapped to the screen like the evdev X driver does (axis calibration,
+    swap, inversion, read from the device's X properties). Needed because
+    Mixxx (Qt) takes touches as XInput2 touch events, which X RECORD does not
+    see as pointer events, and because with long-press emulation X delivers
+    no button press while the finger is held still. Without access to the
+    device, X button 1 is used instead (mouse only).
 """
 
+import fcntl
 import glob
 import os
 import queue
 import select
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -41,8 +47,14 @@ GROW_SECONDS = 0.8          # matches EmulateThirdButtonTimeout
 COLOR_TOUCH = (90, 200, 255)
 COLOR_RIGHT = (255, 150, 40)
 
-EV_KEY, BTN_TOUCH = 1, 330
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+SYN_REPORT, BTN_TOUCH, ABS_X, ABS_Y = 0, 330, 0, 1
 EVENT = struct.Struct("llHHi")
+ABSINFO = struct.Struct("6i")  # value, minimum, maximum, fuzz, flat, resolution
+
+
+def eviocgabs(code):
+    return (2 << 30) | (ABSINFO.size << 16) | (ord("E") << 8) | (0x40 + code)
 
 
 def premultiplied(rgb, alpha):
@@ -52,6 +64,7 @@ def premultiplied(rgb, alpha):
 
 
 def touch_device_path():
+    """(/dev/input/eventN, full device name) of the touch screen, or None."""
     name = ""
     try:
         with open("/etc/decksmithos/touch.conf") as f:
@@ -62,19 +75,71 @@ def touch_device_path():
         return None
     for name_file in sorted(glob.glob("/sys/class/input/event*/device/name")):
         with open(name_file) as f:
-            if name and f.read().strip() == name:
-                return "/dev/input/" + name_file.split("/")[4]
+            full = f.read().strip()
+            if name and name in full:  # substring: "10-005d Goodix ..."
+                return "/dev/input/" + name_file.split("/")[4], full
     return None
 
 
-def touch_reader(path, events):
+class TouchMap:
+    """Device coordinates -> screen pixels, as xf86-input-evdev maps them:
+    axis calibration, then axis swap, then inversion, then scaling."""
+
+    def __init__(self, fd, name, width, height):
+        self.name, self.w, self.h = name, width, height
+        self.rx = ABSINFO.unpack(fcntl.ioctl(fd, eviocgabs(ABS_X), bytes(ABSINFO.size)))[1:3]
+        self.ry = ABSINFO.unpack(fcntl.ioctl(fd, eviocgabs(ABS_Y), bytes(ABSINFO.size)))[1:3]
+        self.loaded = 0.0
+        self.refresh()
+
+    def refresh(self):
+        self.swap, self.inv, self.cal = False, (False, False), None
+        try:
+            out = subprocess.run(["xinput", "list-props", self.name], capture_output=True,
+                                 text=True, timeout=3).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            out = ""
+        for line in out.splitlines():
+            key, _, val = line.strip().partition(":")
+            nums = [int(v) for v in val.replace(",", " ").split() if v.lstrip("-").isdigit()]
+            if key.startswith("Evdev Axes Swap") and nums:
+                self.swap = bool(nums[0])
+            elif key.startswith("Evdev Axis Inversion") and len(nums) == 2:
+                self.inv = (bool(nums[0]), bool(nums[1]))
+            elif key.startswith("Evdev Axis Calibration") and len(nums) == 4:
+                self.cal = nums
+        self.loaded = time.monotonic()
+
+    def screen(self, x, y):
+        if time.monotonic() - self.loaded > 5:  # pick up a new calibration
+            self.refresh()
+        (x0, x1), (y0, y1) = self.rx, self.ry
+        if self.cal:
+            x0, x1, y0, y1 = self.cal
+        nx = (x - x0) / ((x1 - x0) or 1)
+        ny = (y - y0) / ((y1 - y0) or 1)
+        if self.swap:
+            nx, ny = ny, nx
+        if self.inv[0]:
+            nx = 1 - nx
+        if self.inv[1]:
+            ny = 1 - ny
+        clamp = lambda v: min(1.0, max(0.0, v))
+        return int(clamp(nx) * (self.w - 1)), int(clamp(ny) * (self.h - 1))
+
+
+def touch_reader(dev, size, events):
+    path, name = dev
     try:
         fd = os.open(path, os.O_RDONLY)
+        tmap = TouchMap(fd, name, *size)
     except OSError:
         events.put(("no-touch-device",))
         return
     events.put(("touch-device",))
     buf = b""
+    x = y = None
+    down = pending = moved = False
     while True:
         select.select([fd], [], [])
         buf += os.read(fd, EVENT.size * 32)
@@ -82,7 +147,24 @@ def touch_reader(path, events):
             _, _, etype, code, value = EVENT.unpack_from(buf)
             buf = buf[EVENT.size:]
             if etype == EV_KEY and code == BTN_TOUCH and value in (0, 1):
-                events.put(("down",) if value else ("up",))
+                if value:
+                    pending = True
+                else:
+                    down = pending = False
+                    events.put(("up",))
+            elif etype == EV_ABS and code in (ABS_X, ABS_Y):
+                if code == ABS_X:
+                    x = value
+                else:
+                    y = value
+                moved = True
+            elif etype == EV_SYN and code == SYN_REPORT and x is not None and y is not None:
+                if pending:  # the frame with BTN_TOUCH also carries the position
+                    pending, down, moved = False, True, False
+                    events.put(("down",) + tmap.screen(x, y))
+                elif down and moved:
+                    moved = False
+                    events.put(("tmotion",) + tmap.screen(x, y))
 
 
 def record_reader(events):
@@ -185,6 +267,18 @@ class Overlay:
             self.discs.append(self.active)
             self.active = None
 
+    def motion(self, now, x, y):
+        self.pointer = (x, y)
+        a = self.active
+        if a:
+            lx, ly = self.last_trail
+            if abs(x - lx) + abs(y - ly) >= TRAIL_SPACING:
+                trail = Disc(lx, ly, now, a.radius, a.alpha, a.color)
+                trail.fade(now)
+                self.discs.append(trail)
+                self.last_trail = (x, y)
+            a.x, a.y = x, y
+
     def handle(self, ev, now):
         kind = ev[0]
         if kind == "touch-device":
@@ -192,20 +286,13 @@ class Overlay:
         elif kind == "no-touch-device":
             self.touch_device = False
         elif kind == "down":
-            self.finger_down(now)
+            self.finger_down(now, (ev[1], ev[2]) if len(ev) == 3 else None)
+        elif kind == "tmotion":
+            self.motion(now, ev[1], ev[2])
         elif kind == "up":
             self.finger_up(now)
         elif kind == "motion":
-            self.pointer = (ev[1], ev[2])
-            a = self.active
-            if a:
-                lx, ly = self.last_trail
-                if abs(ev[1] - lx) + abs(ev[2] - ly) >= TRAIL_SPACING:
-                    trail = Disc(lx, ly, now, a.radius, a.alpha, a.color)
-                    trail.fade(now)
-                    self.discs.append(trail)
-                    self.last_trail = (ev[1], ev[2])
-                a.x, a.y = ev[1], ev[2]
+            self.motion(now, ev[1], ev[2])
         elif kind == "press":
             button, x, y = ev[1], ev[2], ev[3]
             if button == 3:
@@ -256,9 +343,10 @@ class Overlay:
         return bool(shapes) or bool(self.dirty)
 
     def run(self):
-        path = touch_device_path()
-        if path:
-            threading.Thread(target=touch_reader, args=(path, self.events), daemon=True).start()
+        dev = touch_device_path()
+        if dev:
+            threading.Thread(target=touch_reader, args=(dev, (self.w, self.h), self.events),
+                             daemon=True).start()
         threading.Thread(target=record_reader, args=(self.events,), daemon=True).start()
         animating = False
         while True:

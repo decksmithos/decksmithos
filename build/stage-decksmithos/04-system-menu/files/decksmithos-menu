@@ -262,11 +262,13 @@ class Menu:
     def bootloader_action(self, cur, lat):
         if not (cur or "").isdigit() or not (lat or "").isdigit():
             return ("Bootloader: version unknown", None, PANEL, False)
-        if int(lat) <= int(cur):
-            return (f"Bootloader up to date\n{epoch_date(cur)}", None, PANEL, False)
-        return (f"Update bootloader\n{epoch_date(cur)} → {epoch_date(lat)}",
-                lambda b: self.confirm(b, "Tap again. Do not power off during the update",
-                                       self.update_bootloader), WARN, True)
+        confirm = lambda b: self.confirm(b, "Tap again. Do not power off during the update",
+                                         self.update_bootloader)
+        if int(lat) > int(cur):
+            return (f"Update bootloader\n{epoch_date(cur)} → {epoch_date(lat)}", confirm, WARN, True)
+        if int(lat) == int(cur) and self.bootloader.get("settings") == "differ":
+            return (f"Apply bootloader settings\n{epoch_date(cur)}", confirm, WARN, True)
+        return (f"Bootloader up to date\n{epoch_date(cur)}", None, PANEL, False)
 
     def running_slot(self):
         return next((s for s, i in self.slots.items() if i.get("running") == "yes"), None)

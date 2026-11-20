@@ -14,6 +14,7 @@ install -v -m 755 files/decksmithos-system "${ROOTFS_DIR}/usr/local/sbin/decksmi
 install -v -m 755 files/decksmithos-update "${ROOTFS_DIR}/usr/local/sbin/decksmithos-update"
 install -v -d -m 755 "${ROOTFS_DIR}/etc/decksmithos"
 install -v -m 644 files/update-signers "${ROOTFS_DIR}/etc/decksmithos/update-signers"
+install -v -m 644 files/bootloader.conf "${ROOTFS_DIR}/etc/decksmithos/bootloader.conf"
 install -v -m 755 files/decksmithos-menu "${ROOTFS_DIR}/usr/local/bin/decksmithos-menu"
 install -v -m 755 files/decksmithos-touch "${ROOTFS_DIR}/usr/local/bin/decksmithos-touch"
 install -v -m 755 files/decksmithos-touch-overlay "${ROOTFS_DIR}/usr/local/bin/decksmithos-touch-overlay"

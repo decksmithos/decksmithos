@@ -189,7 +189,10 @@ CM5 hardware until the checklist item passes.
 ### A/B root filesystems
 
 -   `rootfsA` and `rootfsB` are separate system slots.
--   Runtime root is read-only (implemented, both profiles): `overlayroot`
+-   Runtime root is read-only (implemented, both profiles; verified on
+    the CM5 2026-11-20 after adding `auto_initramfs=1` to `config.txt` --
+    without it the firmware never loaded the initramfs and the root
+    stayed writable): `overlayroot`
     in the initramfs (`overlayroot=tmpfs:swap=1,recurse=0` in each
     slot's `cmdline.txt`, written by `build/postprocess.sh`) mounts the
     slot read-only with a tmpfs overlay; everything outside `/storage`
@@ -545,15 +548,24 @@ menu's "Update bootloader" (both profiles, decided) writes the
 (AB EEPROM or `flashrom`); never downgrades. `rpi-eeprom-update` stages
 its files in `BOOTFS`, so it runs with `BOOTFS` in `/run` (the first
 hardware try failed on the read-only `/boot/firmware`); success only on
-"UPDATE SUCCESSFUL".
+"UPDATE SUCCESSFUL". Verified on the CM5 IO board (2026-11-20): flashrom
+path (Winbond W25Q16), 2025-12-08 -> 2026-10-30. The same write applies
+the DecksmithOS EEPROM settings (`/etc/decksmithos/bootloader.conf`:
+NVMe first, no UART log, no net-install or HDMI diagnostics screen); the
+menu offers "Apply bootloader settings" when only those differ. Boot
+time measurements: `docs/boot-time.md`.
 
 Touch tools (`decksmithos-touch`): `calibrate` runs `xinput_calibrator`
 and stores the evdev axis calibration in
 `/storage/config/touch/evdev-axis-calibration`, applied by `.xsession`;
 `overlay on|off` starts `xcompmgr` plus `decksmithos-touch-overlay`
 (click-through ARGB window: fading discs for taps, trails for drags,
-growing disc while held, orange on right click; reads X RECORD and the
-touch device's BTN_TOUCH). The overlay refuses to start without a
+growing disc while held, orange on right click; reads X RECORD for the
+mouse and the touch device itself (BTN_TOUCH, ABS_X/Y mapped like
+xf86-input-evdev), because Mixxx/Qt takes touches as XInput2 touch
+events, which X RECORD does not show as pointer events). The touch
+device name in `touch.conf` is a substring: kernel 6.18 reports
+"10-005d Goodix Capacitive TouchScreen". The overlay refuses to start without a
 compositor. The touch device name comes from
 `/etc/decksmithos/touch.conf` (display profile).
 
@@ -756,7 +768,7 @@ kept here for the reasoning. Update the status when something changes.
 | # | Question | Status |
 |---|---|---|
 | 5 | Raspberry Pi OS release and pinned pi-gen revision | Open |
-| 7 | `nodm` on the selected OS | Works in the current images; keep unless a problem appears |
+| 7 | `nodm` on the selected OS | Works; quirk: it restarts the session on SIGTERM, so `nodm.service.d/decksmithos-stop.conf` stops Mixxx and then SIGKILLs the rest (shutdown 10.5 s -> 0.7 s, `docs/boot-time.md`). A plain systemd unit running `xinit` would avoid the quirk |
 | 8 | Plymouth on the SPI panel | Open |
 | 9 | A/B boot and rollback | **Decided:** tryboot (§5); signed `decksmithos.update` from USB (`docs/update-strategy.md`). Still open: automatic health check before keeping a slot |
 | 10 | Partition sizes and the 15% reserve | Open (rootfs 4 GiB per slot now) |

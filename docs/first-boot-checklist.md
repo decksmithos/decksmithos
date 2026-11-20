@@ -184,7 +184,8 @@ less /storage/logs/mixxx/mixxx.log
       "Restart into slot B" boots B once; "Keep slot B as default" there
       works; "Restart into slot A" from an uncommitted B goes back to A.
 - [ ] Dev: "DEVELOPMENT MODE" notice appears after Mixxx starts; touches
-      are shown as fading discs; "Restart writable" / "Restart read-only"
+      are shown as fading discs (verified on the CM5 2026-11-20 with the
+      evdev-reading overlay); "Restart writable" / "Restart read-only"
       switch the root filesystem.
 - [ ] Calibrate touchscreen: the result survives a reboot
       (`/storage/config/touch/evdev-axis-calibration`).
