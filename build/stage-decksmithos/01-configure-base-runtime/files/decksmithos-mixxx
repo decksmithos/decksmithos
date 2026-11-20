@@ -21,7 +21,7 @@ SETTINGS="${STORAGE}/config/mixxx"
 LOG_DIR="${STORAGE}/logs/mixxx"
 FALLBACK="/tmp/decksmithos-mixxx"
 LIBRARY_DIRS=(/usb /usb2 /storage/library)
-AUDIO_WAIT_SECONDS="${DECKSMITHOS_AUDIO_WAIT:-5}"
+AUDIO_WAIT_SECONDS="${DECKSMITHOS_AUDIO_WAIT:-1}"
 
 warn=""
 if ! mountpoint -q "${STORAGE}" || ! mkdir -p "${SETTINGS}" 2>/dev/null || [[ ! -w "${SETTINGS}" ]]; then

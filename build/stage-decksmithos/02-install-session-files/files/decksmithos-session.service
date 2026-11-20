@@ -31,14 +31,18 @@ UnsetEnvironment=TERM
 UtmpIdentifier=tty1
 UtmpMode=user
 WorkingDirectory=~
-# Plymouth stops drawing and releases the display; its image stays on screen.
-ExecStartPre=+-/usr/bin/plymouth deactivate
+# Plymouth quits and leaves its image on screen (--retain-splash). Not just
+# "deactivate": the still running Plymouth then drew its text-mode progress
+# (three small squares, top left) until X took over.
+ExecStartPre=+-/usr/bin/plymouth quit --retain-splash
 # Xorg.wrap (xserver-xorg-legacy, allowed_users=console) starts the server
 # because this process owns the console tty1.
 # The Plymouth image does not survive the start of X here (rotated DSI panel,
 # also with -background none); ~/.xsession sets the same logo as the X
 # background (hsetroot) first thing.
-ExecStart=/usr/bin/xinit /etc/X11/Xsession -- :0 vt1 -nolisten tcp -keeptty -novtswitch
+# -nocursor: touch appliance; at every X start the hardware cursor plane showed
+# a few stray squares (top left) until something set a cursor.
+ExecStart=/usr/bin/xinit /etc/X11/Xsession -- :0 vt1 -nolisten tcp -keeptty -novtswitch -nocursor
 # Ends the splash once Mixxx's window is up (or after 120 s); in the background
 # so that the unit is "started" at once.
 ExecStartPost=+/bin/sh -c "/usr/local/sbin/decksmithos-splash-done > /dev/null 2>&1 &"

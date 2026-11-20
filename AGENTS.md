@@ -560,8 +560,11 @@ that an appliance cannot answer). Published as
 "DecksmithOS Standalone" gear panel has a MIXXX / SETTINGS button on
 `[App],show_preferences`.
 `0003-decksmithos-sound-controller-hotplug.patch` (published as
-`~deb13decksmithos3`, unverified on hardware until the controller is
-plugged in and out while Mixxx runs): with
+`~deb13decksmithos3`; verified on the CM5 2026-11-20 with the Mixtrack
+Pro 3: Mixxx started without it in 1 s with no dialog; plugging it in
+gave sound and an auto-enabled, opened controller ~5 s later; unplugging
+closed the outputs (the device query blocks the GUI ~6 s); plugging it
+in again restored both in 0.1 s; same Mixxx process throughout): with
 `DECKSMITHOS_SOUND_HOTPLUG_HOOK` (set by `decksmithos-mixxx` to
 `decksmithos-soundconfig`), Mixxx checks `/proc/asound/cards` every
 second; on a change it runs the hook (writes `soundconfig.xml`, prints
@@ -570,7 +573,7 @@ the ALSA PCM `decksmithos`), queries the sound devices again, sets them
 up from `soundconfig.xml` and enumerates the controllers again
 (PortMidi restarted). Not while the preferences are open. A start
 without the output device no longer writes an empty `soundconfig.xml`.
-`decksmithos-mixxx` therefore waits only 5 s (was 20) for the
+`decksmithos-mixxx` therefore waits only 1 s (was 20) for the
 controller at start. `decksmithos-soundconfig` rewrites
 `soundconfig.xml` when it is missing, unchanged since it wrote it, or
 has no output (the old checksum test ran in the wrong directory and
@@ -702,8 +705,12 @@ Verified behavior (Touch Display 2, rotated, see §15):
     `splash.png` logo band as the X root background (`hsetroot -full
     /usr/share/decksmithos/splash-band.png`, first command in
     `.xsession`); Mixxx starts over it (and it shows while Mixxx
-    restarts). `decksmithos-splash-done` quits Plymouth (`--retain-splash`)
-    once Mixxx's window is viewable. Both show the logo band of the 768x1024 canvas
+    restarts). Plymouth quits (`--retain-splash`) just before X starts
+    (`ExecStartPre`; with only `deactivate` it drew its text-mode
+    progress). X runs with `-nocursor`: the hardware cursor plane showed a
+    few stray squares at every X start (touch appliance; a USB mouse has
+    no pointer either). `decksmithos-splash-done` is a fallback quit once
+    Mixxx's window is viewable. Both show the logo band of the 768x1024 canvas
     (full width, 420 px around the centre) scaled proportionally to the
     screen width (5/3 on the 7" panel), so the logo keeps its size from
     Plymouth to X.

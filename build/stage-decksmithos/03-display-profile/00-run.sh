@@ -77,6 +77,12 @@ fi
 
 # --- Touch device name for decksmithos-touch / the touch overlay ---------------------
 mkdir -p "${ROOTFS_DIR}/etc/decksmithos"
+if [[ -f "${PROFILE_DIR}/plymouth-start-wait-display.conf" ]]; then
+  install -v -d -m 755 "${ROOTFS_DIR}/etc/systemd/system/plymouth-start.service.d"
+  install -v -m 644 "${PROFILE_DIR}/plymouth-start-wait-display.conf" \
+    "${ROOTFS_DIR}/etc/systemd/system/plymouth-start.service.d/decksmithos-wait-display.conf"
+fi
+
 if [[ -f "${PROFILE_DIR}/display.conf" ]]; then
   install -v -d -m 755 "${ROOTFS_DIR}/etc/decksmithos"
   install -v -m 644 "${PROFILE_DIR}/display.conf" "${ROOTFS_DIR}/etc/decksmithos/display.conf"
