@@ -1,8 +1,7 @@
 # DecksmithOS hardware profile
-# Load the initramfs (initramfs_2712 / initramfs8 next to the kernel). Required:
-# overlayroot (read-only root) runs in the initramfs; without this line the
-# firmware boots the kernel alone and the root stays writable.
-auto_initramfs=1
+# No initramfs: the kernel mounts the root (NVMe and ext4 are built in) and
+# decksmithos-overlay-init (init= in cmdline.txt) sets up the read-only root.
+# Do not add auto_initramfs=1: the initramfs would run first and add ~1.3 s.
 disable_overscan=1
 usb_max_current_enable=1
 # PCIe Gen 3 is not officially certified on Pi 5 / CM5 (Gen 2 is).
@@ -10,6 +9,10 @@ usb_max_current_enable=1
 # no AER/NVMe errors in dmesg under sustained load. Otherwise remove
 # this line to fall back to Gen 2. See AGENTS.md section 12.
 dtparam=pciex1_gen=3
+
+# RTC battery: charging stays off (firmware default). The development board
+# has a CR2032, which must never be charged. Add dtparam=rtc_bbat_vchg=3000000
+# only on a board fitted with a rechargeable cell (official ML-2020 Li-Mn).
 
 # disable onboard wifi
 dtoverlay=disable-wifi

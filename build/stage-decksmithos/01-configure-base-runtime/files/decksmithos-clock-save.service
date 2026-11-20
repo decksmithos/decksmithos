@@ -1,0 +1,7 @@
+[Unit]
+Description=Save the clock on /storage
+ConditionPathIsMountPoint=/storage
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/decksmithos-clock save

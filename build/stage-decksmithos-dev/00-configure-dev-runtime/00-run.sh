@@ -36,6 +36,13 @@ on_chroot <<EOF
 systemctl enable decksmithos-dhcp.service
 EOF
 
+# NTP once the lease arrives (dhcpcd's timesyncd hook passes DHCP NTP servers).
+# A synchronized clock is written to the RTC by the kernel every 11 minutes.
+# The release image has no network and keeps timesyncd disabled.
+on_chroot <<EOF
+systemctl enable systemd-timesyncd.service
+EOF
+
 # Trusted SSH key for dj and root (debugging over the wired LAN).
 for home in "/home/${FIRST_USER_NAME}" /root; do
   install -d -m 700 "${ROOTFS_DIR}${home}/.ssh"

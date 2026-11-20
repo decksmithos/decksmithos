@@ -39,7 +39,7 @@ die() {
 
 ROOT_DISK=""
 
-# Block device of the running root filesystem. With overlayroot, / is an
+# Block device of the running root filesystem. With the read-only overlay, / is an
 # overlay, so take the root= PARTUUID from the kernel command line.
 root_device() {
   local partuuid

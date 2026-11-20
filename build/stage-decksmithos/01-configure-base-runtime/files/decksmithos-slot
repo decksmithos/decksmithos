@@ -25,7 +25,7 @@ boot_partnum() { case "$1" in A) echo 2 ;; B) echo 3 ;; *) return 1 ;; esac; }
 other_slot()   { case "$1" in A) echo B ;; B) echo A ;; *) return 1 ;; esac; }
 slot_of_bootpart() { case "$1" in 2) echo A ;; 3) echo B ;; *) echo "?" ;; esac; }
 
-# Block device of the running root filesystem. With overlayroot, / is an
+# Block device of the running root filesystem. With the read-only overlay, / is an
 # overlay, so take the root= PARTUUID from the kernel command line.
 root_device() {
   local partuuid

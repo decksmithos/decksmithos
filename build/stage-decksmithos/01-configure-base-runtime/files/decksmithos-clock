@@ -1,0 +1,33 @@
+#!/bin/sh
+# Keep the clock from starting over at every boot (like fake-hwclock).
+#
+#   decksmithos-clock save      write the current time to /storage/state/clock
+#   decksmithos-clock restore   set the clock to the saved time if it is behind
+#
+# Order of sources at boot: the RTC (battery backed on the CM5 IO board; the
+# kernel reads it at boot and, while NTP is synchronized, writes it back every
+# 11 minutes), then this saved time, which only ever moves the clock forward,
+# then NTP (dev profile, systemd-timesyncd). Saved at shutdown and every
+# 15 minutes (decksmithos-clock.service, decksmithos-clock-save.timer).
+STATE=/storage/state/clock
+
+case "$1" in
+  save)
+    mkdir -p "$(dirname "${STATE}")"
+    date +%s > "${STATE}.new" && mv -f "${STATE}.new" "${STATE}"
+    ;;
+  restore)
+    [ -r "${STATE}" ] || exit 0
+    saved="$(cat "${STATE}")"
+    now="$(date +%s)"
+    case "${saved}" in ''|*[!0-9]*) echo "decksmithos-clock: ignoring ${STATE}: '${saved}'"; exit 0 ;; esac
+    if [ "${saved}" -gt "${now}" ]; then
+      date -u -s "@${saved}" > /dev/null
+      echo "decksmithos-clock: clock was behind; set to the time saved at shutdown: $(date -u '+%F %T') UTC"
+    fi
+    ;;
+  *)
+    echo "usage: decksmithos-clock save|restore" >&2
+    exit 2
+    ;;
+esac

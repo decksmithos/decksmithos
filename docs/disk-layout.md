@@ -119,16 +119,19 @@ Mount options prioritize reliability over performance.
 
 ### Read-only at runtime
 
-The running slot is never written. `overlayroot` (initramfs) mounts the
-slot's rootfs read-only under `/media/root-ro` and puts a tmpfs overlay
-on `/`: programs can still write, but those changes live in RAM and are
+The running slot is never written. The kernel mounts the slot's rootfs
+read-only and `decksmithos-overlay-init` (started as `init=`, no
+initramfs) moves it to `/media/root-ro` and puts a tmpfs overlay on
+`/` before systemd starts: programs can still write, but those changes live in RAM and are
 gone after a reboot. Persistent data belongs on `/storage` (Mixxx
 settings and database, logs via the `/var/log` bind mount, dev SSH host
 keys). `/boot/firmware` is mounted read-only as well.
 
 The overlay is switched on by
-`overlayroot=tmpfs:swap=1,recurse=0` in the slot's `cmdline.txt`
-(`recurse=0` leaves `/storage` alone, `swap=1` keeps the swap partition).
+`init=/usr/local/sbin/decksmithos-overlay-init` in the slot's
+`cmdline.txt`. Only the root is overlaid; `/storage`, `/boot/firmware`
+and swap are mounted from fstab as usual. If the overlay cannot be set
+up, the slot boots with a writable root rather than not at all.
 `/etc/machine-id` is empty, so systemd uses a transient machine ID.
 
 `decksmithos-rootfs` (on the device, as root):
@@ -138,7 +141,7 @@ The overlay is switched on by
 | `decksmithos-rootfs` | is the overlay active now / configured for the next boot |
 | `decksmithos-rootfs rw` | next boot of this slot is writable (overlay off) |
 | `decksmithos-rootfs ro` | next boot of this slot is read-only again |
-| `overlayroot-chroot` | shell in the real rootfs mounted writable, no reboot needed |
+| `decksmithos-rootfs chroot [cmd]` | shell (or command) in the real rootfs mounted writable; restart afterwards |
 
 These are meant for the dev profile; the release image has no login.
 

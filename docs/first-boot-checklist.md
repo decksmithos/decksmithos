@@ -98,8 +98,13 @@ findmnt /boot/firmware         # options start with ro
 - [ ] `sudo decksmithos-rootfs rw`, reboot: `findmnt /` shows ext4 and
       `/etc/decksmithos-test` survives a reboot; remove it,
       `sudo decksmithos-rootfs ro`, reboot: overlay again.
-- [ ] `sudo overlayroot-chroot` opens a shell in the real rootfs; exit
-      leaves it read-only again.
+- [ ] `sudo decksmithos-rootfs chroot` opens a shell in the real rootfs;
+      a change made there is present after a restart.
+- [ ] Clock (dev): `timedatectl` shows "System clock synchronized: yes"
+      after the DHCP lease; a few minutes later
+      `cat /sys/class/rtc/rtc0/since_epoch` matches `date +%s`; after a
+      power-off of a few minutes (RTC battery fitted) the time is right
+      before the network is up. `/storage/state/clock` is written.
 - [ ] `swapon --show` lists the swap partition.
 
 ## 4. A/B slots

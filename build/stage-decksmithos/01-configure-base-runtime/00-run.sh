@@ -26,7 +26,10 @@ install -v -m 755 files/decksmithos-init-storage "${ROOTFS_DIR}/usr/local/sbin/d
 install -v -m 755 files/decksmithos-mixxx "${ROOTFS_DIR}/usr/local/bin/decksmithos-mixxx"
 # A/B slot selection via the bootloader's tryboot mode (autoboot.txt on p1).
 install -v -m 755 files/decksmithos-slot "${ROOTFS_DIR}/usr/local/sbin/decksmithos-slot"
-# Read-only root (overlayroot, enabled in cmdline.txt by build/postprocess.sh).
+# Read-only root: decksmithos-overlay-init runs as init= (cmdline.txt written by
+# build/postprocess.sh) and needs these two mount points in the image.
+install -v -m 755 files/decksmithos-overlay-init "${ROOTFS_DIR}/usr/local/sbin/decksmithos-overlay-init"
+install -v -d -m 755 "${ROOTFS_DIR}/media/root-ro" "${ROOTFS_DIR}/media/root-rw"
 install -v -m 755 files/decksmithos-rootfs "${ROOTFS_DIR}/usr/local/sbin/decksmithos-rootfs"
 
 # Read-only USB storage in two slots (/usb, /usb2), mounted in order of insertion.
@@ -96,3 +99,12 @@ rm -fr ${ROOTFS_DIR}/var/log/*
 # Persistent journal on /storage (journalctl -b -1 after a restart or power off).
 install -v -d -m 755 "${ROOTFS_DIR}/etc/systemd/journald.conf.d"
 install -v -m 644 files/journald-decksmithos.conf "${ROOTFS_DIR}/etc/systemd/journald.conf.d/50-decksmithos.conf"
+
+# Clock: saved on /storage at shutdown and every 15 minutes, restored at boot if
+# the clock is behind (no RTC battery, or a battery that ran flat).
+install -v -m 755 files/decksmithos-clock "${ROOTFS_DIR}/usr/local/sbin/decksmithos-clock"
+install -v -m 644 files/decksmithos-clock.service files/decksmithos-clock-save.service \
+  files/decksmithos-clock-save.timer "${ROOTFS_DIR}/etc/systemd/system/"
+on_chroot <<CHROOT
+systemctl enable decksmithos-clock.service decksmithos-clock-save.timer
+CHROOT

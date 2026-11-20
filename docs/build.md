@@ -217,7 +217,7 @@ A/B image layout and tryboot slot switching
 
 Phase 3
 
-Read-only rootfs (done: overlayroot) and full writable path migration to /storage
+Read-only rootfs (done: decksmithos-overlay-init) and full writable path migration to /storage
 
 Phase 4
 

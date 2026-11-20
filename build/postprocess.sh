@@ -18,8 +18,8 @@
 # version record, so it is never tried); the first update fills it. This keeps
 # the image small: with bmaptool only slot A's data is written when flashing.
 #
-# The root filesystem runs read-only: overlayroot (initramfs) puts a tmpfs
-# overlay on top of it, so runtime writes outside /storage are lost at reboot.
+# The root filesystem runs read-only: decksmithos-overlay-init (init=, no
+# initramfs) puts a tmpfs overlay on top of it, so runtime writes outside /storage are lost at reboot.
 # /boot/firmware is mounted read-only. See decksmithos-rootfs.
 set -Eeuo pipefail
 
@@ -167,7 +167,7 @@ echo "[5/6] Writing fstab and cmdline.txt of slot A"
 # Drop what this script sets itself, and Raspberry Pi OS first-boot actions:
 # "resize" would grow the root partition, which is not the last one here.
 BASE_CMDLINE="$(tr -s ' \n' '\n\n' < "${SRC_BOOT}/cmdline.txt" \
-  | grep -vE '^(root=|rootfstype=|rootwait$|panic=|quiet$|splash$|resize$|overlayroot=.*|init=.*firstboot|systemd\.run.*firstboot|$)' \
+  | grep -vE '^(root=|rootfstype=|rootwait$|panic=|quiet$|splash$|resize$|overlayroot=.*|init=.*|systemd\.run.*firstboot|$)' \
   | paste -sd' ')"
 
 if [[ "${PROFILE}" == "dev" ]]; then
@@ -176,9 +176,10 @@ else
   QUIET="quiet splash vt.global_cursor_default=0"
 fi
 FB="$(tr -d '\n' < "${DISPLAY_CMDLINE_FILE}")"
-# Read-only root with a RAM overlay. recurse=0: leave /storage and the other
-# fstab mounts alone; swap=1: keep the swap partition (overlayroot drops it by default).
-OVERLAYROOT="overlayroot=tmpfs:swap=1,recurse=0"
+# Read-only root with a RAM overlay, set up by decksmithos-overlay-init before
+# systemd starts (the kernel mounts the root read-only by default). Replaces
+# overlayroot in an initramfs, which cost ~1.3 s of boot time.
+OVERLAYROOT="init=/usr/local/sbin/decksmithos-overlay-init"
 
 partuuid() { blkid -p -o value -s PART_ENTRY_UUID "$1"; }
 

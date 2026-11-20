@@ -55,7 +55,7 @@ on_chroot <<'EOF'
 set -e
 missing=""
 for p in mixxx mixxx-data xserver-xorg-core nodm openbox plymouth udev udisks2 \
-         sqlite3 parted fdisk e2fsprogs dosfstools rpi-eeprom raspi-utils python3 overlayroot \
+         sqlite3 parted fdisk e2fsprogs dosfstools rpi-eeprom raspi-utils python3 kmod \
          sudo python3-tk python3-xlib xcompmgr xinput unclutter-xfixes xinput-calibrator \
          zstd openssh-client flashrom; do
   # "ii" installed, "hi" installed and held (mixxx, mixxx-data).

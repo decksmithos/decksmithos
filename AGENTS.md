@@ -190,18 +190,24 @@ CM5 hardware until the checklist item passes.
 
 -   `rootfsA` and `rootfsB` are separate system slots.
 -   Runtime root is read-only (implemented, both profiles; verified on
-    the CM5 2026-11-20 after adding `auto_initramfs=1` to `config.txt` --
-    without it the firmware never loaded the initramfs and the root
-    stayed writable): `overlayroot`
-    in the initramfs (`overlayroot=tmpfs:swap=1,recurse=0` in each
-    slot's `cmdline.txt`, written by `build/postprocess.sh`) mounts the
-    slot read-only with a tmpfs overlay; everything outside `/storage`
-    is lost at reboot. `/boot/firmware` is mounted `ro`.
+    the CM5 2026-11-20): no initramfs; the kernel mounts the slot
+    read-only and `decksmithos-overlay-init` (`init=` in each slot's
+    `cmdline.txt`, written by `build/postprocess.sh`) puts a tmpfs
+    overlay on top (ext4 at `/media/root-ro`, tmpfs at `/media/root-rw`),
+    comments the root out of the overlay's fstab and execs systemd; on
+    any failure it boots the plain root instead. It replaced Debian's
+    `overlayroot` in an initramfs, which cost ~1.3 s (40 ms now). Do not
+    add `auto_initramfs=1` (the first image lacked it, so overlayroot
+    never ran; with it, the initramfs would run before our init).
+    Everything outside `/storage` is lost at reboot. `/boot/firmware` is
+    mounted `ro`.
     `/etc/machine-id` is empty (transient ID, no "first boot" on every
     boot). Tools must find the root device from `root=PARTUUID=` in
     `/proc/cmdline`, because `/` is an overlay. Dev: `decksmithos-rootfs
     rw|ro` toggles the overlay for the next boot of the running slot,
-    `overlayroot-chroot` makes one-off changes without rebooting; dev SSH
+    `decksmithos-rootfs chroot` changes the real root (restart afterwards:
+    an overlay's lower layer changed underneath is not guaranteed to show
+    through, and the ext4 often stays busy/writable until then); dev SSH
     host keys persist in `/storage/dev/ssh-host-keys`.
 -   Firmware update writes the inactive slot, validates it, then
     switches boot selection.
@@ -238,6 +244,17 @@ Implemented: Mixxx runs with `--settings-path /storage/config/mixxx/`
 missing. Its session log goes to `/storage/logs/mixxx/`. Mixxx must not
 write tags or Serato markers into audio files
 (`SyncTrackMetadataExport 0`, `SeratoMetadataExport 0`).
+
+Clock: the CM5 RTC (battery on the IO board) is read by the kernel at
+boot and written back every 11 minutes while NTP is synchronized
+(verified 2026-11-20). `decksmithos-clock` saves the time to
+`/storage/state/clock` at shutdown and every 15 minutes and restores it
+at boot only if the clock is behind (both profiles). Dev runs
+`systemd-timesyncd`; release has no network. RTC battery charging
+(`dtparam=rtc_bbat_vchg=...`) is off and must stay off on the
+development board: it has a CR2032 (not rechargeable; user, 2026-11-20).
+Enable charging only on a board with a rechargeable cell (e.g. the
+official ML-2020 Li-Mn).
 
 The journal is persistent (`journald.conf.d/50-decksmithos.conf`,
 both profiles) in `/storage/logs/journal` through the `/var/log` bind

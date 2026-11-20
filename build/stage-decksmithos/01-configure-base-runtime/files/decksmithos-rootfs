@@ -1,27 +1,33 @@
 #!/bin/bash
 # DecksmithOS read-only root filesystem control.
 #
-# The root filesystem of each slot is mounted read-only by overlayroot
-# (initramfs) with a tmpfs overlay on top: the system can write anywhere, but
-# everything outside /storage is lost at reboot. The overlay is enabled by
-# "overlayroot=..." in the running slot's cmdline.txt (/boot/firmware).
+# The root filesystem of each slot is mounted read-only with a tmpfs overlay on
+# top (decksmithos-overlay-init, started by the kernel instead of systemd): the
+# system can write anywhere, but everything outside /storage is lost at reboot.
+# The overlay is enabled by "init=/usr/local/sbin/decksmithos-overlay-init" in
+# the running slot's cmdline.txt (/boot/firmware).
 #
 # Usage:
 #   decksmithos-rootfs [status]  show whether the overlay is active / configured
 #   decksmithos-rootfs rw        boot this slot writable from the next reboot on
 #   decksmithos-rootfs ro        boot this slot read-only again (default)
-#
-# For a single change without rebooting, use `overlayroot-chroot`: it opens a
-# shell in the real (lower) root filesystem mounted writable.
+#   decksmithos-rootfs chroot [command...]
+#                                change the real root: a shell (or the
+#                                command) in the slot's ext4, mounted writable
+#                                for that time. Restart afterwards: the running
+#                                overlay may not show the changes, and after a
+#                                file was replaced or deleted the kernel keeps
+#                                the ext4 writable until the restart.
 set -Eeuo pipefail
 
 CMDLINE="/boot/firmware/cmdline.txt"
-OVERLAY_ARG="overlayroot=tmpfs:swap=1,recurse=0"
+OVERLAY_ARG="init=/usr/local/sbin/decksmithos-overlay-init"
+LOWER="/media/root-ro"
 
 die() { echo "decksmithos-rootfs: $*" >&2; exit 1; }
 
 overlay_active() { [[ "$(findmnt -n -o FSTYPE /)" == overlay ]]; }
-configured_arg() { tr ' ' '\n' < "${CMDLINE}" | grep '^overlayroot=' || true; }
+configured_arg() { tr ' ' '\n' < "${CMDLINE}" | grep -x -- "${OVERLAY_ARG}" || true; }
 
 BOOT_REMOUNTED=0
 restore_boot() {
@@ -31,11 +37,12 @@ restore_boot() {
 }
 trap restore_boot EXIT
 
-# Replace cmdline.txt atomically (single line) with the overlayroot argument
-# removed, then appended again if $1 is non-empty.
+# Replace cmdline.txt atomically (single line) with the overlay argument (and
+# the overlayroot= argument of older images) removed, then appended again if
+# $1 is non-empty.
 write_cmdline() {
   local arg="$1" line
-  line="$(tr ' ' '\n' < "${CMDLINE}" | grep -v -e '^overlayroot=' -e '^$' | paste -sd' ')"
+  line="$(tr ' ' '\n' < "${CMDLINE}" | grep -v -e "^${OVERLAY_ARG}\$" -e '^overlayroot=' -e '^$' | paste -sd' ')"
   [[ -n "${arg}" ]] && line="${line} ${arg}"
   if findmnt -n -o OPTIONS /boot/firmware | tr ',' '\n' | grep -qx ro; then
     mount -o remount,rw /boot/firmware
@@ -59,6 +66,40 @@ show_status() {
   echo "cmdline:    ${CMDLINE}"
 }
 
+# A shell in the real root, writable while it runs. Changing an overlay's lower
+# layer while it is mounted is not guaranteed to show through, so restart
+# afterwards; files the overlay still references keep the ext4 busy, in which
+# case it stays writable until then.
+CHROOT_MOUNTS=()
+cleanup_chroot() {
+  local i
+  for ((i = ${#CHROOT_MOUNTS[@]} - 1; i >= 0; i--)); do umount -l "${CHROOT_MOUNTS[i]}" || true; done
+  sync
+  if mount -o remount,ro "${LOWER}" 2>/dev/null; then
+    echo "decksmithos-rootfs: done; restart to use the changes" >&2
+  else
+    echo "decksmithos-rootfs: done; ${LOWER} stays writable until the restart, restart now" >&2
+  fi
+}
+
+chroot_lower() {
+  overlay_active || die "the root is not an overlay; it is already writable"
+  mountpoint -q "${LOWER}" || die "${LOWER} is not mounted"
+  local d
+  trap 'cleanup_chroot; restore_boot' EXIT
+  mount -o remount,rw "${LOWER}"
+  for d in proc sys dev dev/pts run; do
+    mount --bind "/${d}" "${LOWER}/${d}"
+    CHROOT_MOUNTS+=("${LOWER}/${d}")
+  done
+  echo "Real root of this slot, writable. Changes are permanent; 'exit' when done, then restart." >&2
+  if (( $# )); then
+    chroot "${LOWER}" "$@"
+  else
+    chroot "${LOWER}" /bin/bash -l
+  fi
+}
+
 [[ "${EUID}" -eq 0 ]] || die "run as root"
 [[ -f "${CMDLINE}" ]] || die "${CMDLINE} not found (is /boot/firmware mounted?)"
 
@@ -73,5 +114,9 @@ case "${1:-status}" in
     write_cmdline "${OVERLAY_ARG}"
     echo "This slot boots read-only from the next reboot on."
     ;;
-  *) die "usage: decksmithos-rootfs [status|rw|ro]" ;;
+  chroot)
+    shift
+    chroot_lower "$@"
+    ;;
+  *) die "usage: decksmithos-rootfs [status|rw|ro|chroot [command...]]" ;;
 esac

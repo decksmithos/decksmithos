@@ -1,0 +1,66 @@
+#!/bin/sh
+# DecksmithOS read-only root: runs as PID 1 before systemd, instead of an
+# initramfs (overlayroot cost ~1.3 s of boot time on the CM5).
+#
+#   cmdline.txt: root=PARTUUID=... rootwait init=/usr/local/sbin/decksmithos-overlay-init
+#
+# The kernel mounts the slot's ext4 read-only. This script puts a tmpfs overlay
+# on top of it and starts systemd on the overlay:
+#   /media/root-ro   the slot's ext4, read-only (lower layer)
+#   /media/root-rw   tmpfs with the overlay's upper and work directories
+# Every write outside /storage goes to RAM and is lost at reboot.
+#
+# On any failure it starts systemd on the plain root instead (systemd then
+# remounts it as fstab says, i.e. writable): a boot that works matters more
+# than the overlay. It never exits, so PID 1 cannot die here.
+# `decksmithos-rootfs` turns this on and off; `decksmithos-rootfs chroot`
+# changes the real root without rebooting.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+RO=/media/root-ro
+RW=/media/root-rw
+# Arguments the kernel passes to init (cmdline words it does not know).
+INIT_ARGS="$*"
+
+log() { echo "decksmithos-overlay-init: $*" > /dev/kmsg 2>/dev/null || echo "decksmithos-overlay-init: $*"; }
+
+plain_boot() {
+  log "$*; booting without the read-only overlay"
+  exec /sbin/init ${INIT_ARGS}
+}
+
+mount -t proc proc /proc 2>/dev/null || plain_boot "cannot mount /proc"
+grep -qw overlay /proc/filesystems || modprobe overlay 2>/dev/null
+grep -qw overlay /proc/filesystems || plain_boot "no overlay filesystem in the kernel"
+
+mount -t tmpfs -o mode=0755 tmpfs "${RW}" || plain_boot "cannot mount a tmpfs on ${RW}"
+mkdir -p "${RW}/overlay" "${RW}/overlay-workdir" "${RW}/newroot"
+# lowerdir=/ is only the slot's ext4: overlayfs does not descend into the
+# mounts below it (/proc, /media/root-rw).
+if ! mount -t overlay -o "lowerdir=/,upperdir=${RW}/overlay,workdir=${RW}/overlay-workdir" \
+     overlay "${RW}/newroot"; then
+  umount "${RW}"
+  plain_boot "cannot mount the overlay"
+fi
+
+# Switch: the overlay becomes /, the ext4 moves to /media/root-ro.
+cd "${RW}/newroot" || plain_boot "cannot enter the overlay"
+if ! pivot_root . "${RO#/}"; then
+  cd /
+  umount "${RW}/newroot"
+  umount "${RW}"
+  plain_boot "pivot_root failed"
+fi
+# The tmpfs, /proc and the kernel's devtmpfs on /dev were mounted on the old
+# root; move them across.
+mount --move "${RO}${RW}" "${RW}"
+mount --move "${RO}/proc" /proc
+mountpoint -q "${RO}/dev" && mount --move "${RO}/dev" /dev
+
+# The root is not in fstab any more: no fsck of a read-only filesystem, no
+# remount of / by systemd. Only the overlay's copy of fstab changes.
+sed -i -E 's|^([^#[:space:]]+[[:space:]]+/[[:space:]].*)$|# read-only root, see decksmithos-overlay-init: \1|' /etc/fstab
+
+log "root is a RAM overlay on top of ${RO}"
+exec /sbin/init ${INIT_ARGS} < /dev/console > /dev/console 2>&1

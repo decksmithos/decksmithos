@@ -19,7 +19,6 @@ unclutter-xfixes
 plymouth
 plymouth-themes
 udisks2
-overlayroot
 sudo
 python3-tk
 python3-xlib
