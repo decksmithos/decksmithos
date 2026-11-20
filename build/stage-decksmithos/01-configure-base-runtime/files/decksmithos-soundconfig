@@ -1,0 +1,78 @@
+#!/bin/bash
+# Sound configuration for the controller's USB audio interface.
+#
+#   decksmithos-soundconfig [settings dir]   (default /storage/config/mixxx)
+#
+# Finds the first ALSA card with a USB playback stream and writes Mixxx's
+# soundconfig.xml for the ALSA PCM "decksmithos" (/etc/asound.conf): Main on
+# channels 1-2, Headphones on 3-4 if the card has them. Prints
+# "DECKSMITHOS_ALSA_CARD=<card id>" on stdout (the PCM selects the card through
+# that variable); messages go to stderr. Exit 1 if there is no such card.
+#
+# Run by decksmithos-mixxx before Mixxx starts, and by Mixxx itself when the
+# ALSA cards change (DECKSMITHOS_SOUND_HOTPLUG_HOOK, build/mixxx/patches/0003),
+# so a controller plugged in later is picked up without a restart.
+#
+# soundconfig.xml is rewritten only if it does not exist, is still the one
+# written here (checksum), or configures no output at all (what Mixxx saves
+# after running without a sound device): sound settings changed in Mixxx's
+# preferences are kept.
+set -u
+
+SETTINGS="${1:-/storage/config/mixxx}"
+SOUNDCONFIG="${SETTINGS}/soundconfig.xml"
+SOUNDCONFIG_STAMP="${SETTINGS}/.decksmithos-soundconfig.sha256"
+
+log() { echo "[$(date '+%F %T')] decksmithos-soundconfig: $*" >&2; }
+
+# First ALSA card with a USB playback stream: prints "<card id> <max channels> <rates>".
+find_usb_playback_card() {
+  local card stream
+  for card in /proc/asound/card[0-9]*; do
+    stream="${card}/stream0"
+    [[ -r "${stream}" ]] || continue
+    awk -v id="$(cat "${card}/id")" '
+      /^Playback:/ { pb = 1; next }
+      /^Capture:/  { pb = 0 }
+      pb && /Channels:/ { if ($2 > ch) ch = $2 }
+      pb && /Rates:/    { sub(/^[^:]*: */, ""); gsub(/ /, ""); rates = rates "," $0 }
+      END { if (ch > 0) { print id, ch, rates; exit 0 } exit 1 }
+    ' "${stream}" && return 0
+  done
+  return 1
+}
+
+card_info="$(find_usb_playback_card)" || { log "no USB playback device"; exit 1; }
+read -r card_id channels rates <<< "${card_info}"
+echo "DECKSMITHOS_ALSA_CARD=${card_id}"
+log "controller audio: card '${card_id}', ${channels} playback channels, rates ${rates#,}"
+
+ours=0
+if [[ ! -e "${SOUNDCONFIG}" ]]; then
+  ours=1
+elif [[ -e "${SOUNDCONFIG_STAMP}" ]] && (cd "${SETTINGS}" && sha256sum --status -c "${SOUNDCONFIG_STAMP}" 2>/dev/null); then
+  ours=1
+elif ! grep -q "<output" "${SOUNDCONFIG}"; then
+  ours=1  # no output configured: saved by Mixxx while no sound device was present
+fi
+if (( ! ours )); then
+  log "keeping user-modified ${SOUNDCONFIG}"
+  exit 0
+fi
+
+mkdir -p "${SETTINGS}"
+samplerate=44100
+[[ ",${rates}," == *",44100,"* ]] || samplerate=48000
+{
+  echo '<!DOCTYPE SoundManagerConfig>'
+  echo "<SoundManagerConfig api=\"ALSA\" samplerate=\"${samplerate}\" latency=\"5\" sync_buffers=\"2\" force_network_clock=\"0\" deck_count=\"4\">"
+  echo ' <SoundDevice name="decksmithos" portAudioIndex="0" alsaHwDevice="">'
+  echo '  <output type="Master" index="0" channel="0" channel_count="2"/>'
+  if (( channels >= 4 )); then
+    echo '  <output type="Headphones" index="0" channel="2" channel_count="2"/>'
+  fi
+  echo ' </SoundDevice>'
+  echo '</SoundManagerConfig>'
+} > "${SOUNDCONFIG}.tmp" && mv -f "${SOUNDCONFIG}.tmp" "${SOUNDCONFIG}"
+(cd "${SETTINGS}" && sha256sum "$(basename "${SOUNDCONFIG}")" > "${SOUNDCONFIG_STAMP}")
+log "wrote ${SOUNDCONFIG} (Main 1-2$( (( channels >= 4 )) && echo ', Headphones 3-4'), ${samplerate} Hz)"

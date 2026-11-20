@@ -1,0 +1,155 @@
+Description: Sound and controller hotplug for an appliance
+ Mixxx 2.5 opens sound devices and controllers only at start-up. DecksmithOS
+ uses the controller's USB audio as its sound card, so plugging the controller
+ in after start-up (or unplugging and plugging it in again) left Mixxx silent
+ and the controller dead until a restart.
+ With DECKSMITHOS_SOUND_HOTPLUG_HOOK set in the environment:
+  - /proc/asound/cards is checked every second; on a change the hook runs
+    (it writes soundconfig.xml for the controller's audio and prints
+    DECKSMITHOS_* variables, set in Mixxx's environment), the sound devices
+    are queried again and set up from soundconfig.xml, and the controllers are
+    enumerated again (PortMidi is restarted so that new MIDI devices appear).
+    Not while the preferences dialog is open; retried after it is closed.
+  - Start-up without the output device does not overwrite soundconfig.xml
+    with an empty configuration (with DECKSMITHOS_NO_SOUND_DIALOGS).
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-20
+---
+--- a/src/mixxxmainwindow.cpp
++++ b/src/mixxxmainwindow.cpp
+@@ -3,6 +3,9 @@
+ #include <QCheckBox>
+ #include <QCloseEvent>
+ #include <QDebug>
++#include <QFile>
++#include <QProcess>
++#include <QTimer>
+ #include <QFileDialog>
+ #include <QOpenGLContext>
+ #include <QUrl>
+@@ -21,6 +24,7 @@
+ #include "widget/winitialglwidget.h"
+ #endif
+ 
++#include "controllers/controllermanager.h"
+ #include "controllers/keyboard/keyboardeventfilter.h"
+ #include "coreservices.h"
+ #include "defs_urls.h"
+@@ -46,6 +50,7 @@
+ #include "skin/legacy/launchimage.h"
+ #include "skin/skinloader.h"
+ #include "soundio/soundmanager.h"
++#include "soundio/soundmanagerconfig.h"
+ #include "sources/soundsourceproxy.h"
+ #include "track/track.h"
+ #include "util/debug.h"
+@@ -403,7 +408,78 @@
+ 
+     // The user has either reconfigured devices or accepted no outputs,
+     // so it's now safe to write the new config to disk.
+-    m_pCoreServices->getSoundManager()->getConfig().writeToDisk();
++    // DecksmithOS: not when Mixxx started without its output device (no
++    // controller plugged in yet): that would replace the configured device
++    // with an empty configuration on disk.
++    if (!noSoundDialogs ||
++            !m_pCoreServices->getSoundManager()->getConfig().getOutputs().isEmpty()) {
++        m_pCoreServices->getSoundManager()->getConfig().writeToDisk();
++    }
++
++    // DecksmithOS: sound and controller hotplug. Mixxx 2.5 opens sound devices
++    // and controllers only at start-up; an appliance must pick up a controller
++    // (USB audio + MIDI) plugged in later, or unplugged and plugged in again,
++    // without a restart. With DECKSMITHOS_SOUND_HOTPLUG_HOOK set, the list of
++    // ALSA cards is checked every second; when it changes, the hook (which
++    // writes soundconfig.xml for the controller) runs, the sound devices are
++    // queried again and set up from soundconfig.xml, and the controllers are
++    // enumerated again. Lines "DECKSMITHOS_<NAME>=<value>" printed by the hook
++    // are set in Mixxx's environment first (the ALSA configuration selects the
++    // card through DECKSMITHOS_ALSA_CARD). Not while the preferences are open
++    // (their pages hold the old device lists); retried once they are closed.
++    const QString hotplugHook = qEnvironmentVariable("DECKSMITHOS_SOUND_HOTPLUG_HOOK");
++    if (!hotplugHook.isEmpty()) {
++        const auto readCards = []() {
++            QFile cards(QStringLiteral("/proc/asound/cards"));
++            return cards.open(QIODevice::ReadOnly) ? QString::fromUtf8(cards.readAll()) : QString();
++        };
++        auto pLastCards = std::make_shared<QString>(readCards());
++        auto* pHotplugTimer = new QTimer(this);
++        connect(pHotplugTimer,
++                &QTimer::timeout,
++                this,
++                [this, pLastCards, readCards, hotplugHook]() {
++                    const QString cards = readCards();
++                    if (cards == *pLastCards) {
++                        return;
++                    }
++                    if (m_pPrefDlg && m_pPrefDlg->isVisible()) {
++                        return;
++                    }
++                    *pLastCards = cards;
++                    qInfo() << "DecksmithOS: audio devices changed; setting up sound and controllers again";
++                    QProcess hook;
++                    hook.setProcessChannelMode(QProcess::SeparateChannels);
++                    hook.start(hotplugHook, QStringList());
++                    if (hook.waitForFinished(5000)) {
++                        const QStringList lines = QString::fromUtf8(hook.readAllStandardOutput())
++                                                          .split(QChar('\n'), Qt::SkipEmptyParts);
++                        for (const QString& line : lines) {
++                            const int eq = line.indexOf(QChar('='));
++                            if (eq > 0 && line.startsWith(QStringLiteral("DECKSMITHOS_"))) {
++                                qputenv(line.left(eq).toUtf8().constData(),
++                                        line.mid(eq + 1).trimmed().toUtf8());
++                                qInfo() << "DecksmithOS:" << line.trimmed();
++                            }
++                        }
++                    } else {
++                        qWarning() << "DecksmithOS: hotplug hook did not finish:" << hotplugHook;
++                        hook.kill();
++                    }
++                    auto pSoundManager = m_pCoreServices->getSoundManager();
++                    pSoundManager->clearAndQueryDevices();
++                    SoundManagerConfig config = pSoundManager->getConfig();
++                    if (config.readFromDisk() && !config.getOutputs().isEmpty()) {
++                        const SoundDeviceStatus status = pSoundManager->setConfig(config);
++                        qInfo() << "DecksmithOS: sound devices set up, status"
++                                << static_cast<int>(status);
++                    } else {
++                        qInfo() << "DecksmithOS: the configured output device is not present";
++                    }
++                    m_pCoreServices->getControllerManager()->setUpDevices();
++                });
++        pHotplugTimer->start(1000);
++    }
+ 
+     // this has to be after the OpenGL widgets are created or depending on a
+     // million different variables the first waveform may be horribly
+--- a/src/controllers/midi/portmidienumerator.cpp
++++ b/src/controllers/midi/portmidienumerator.cpp
+@@ -180,8 +180,6 @@
+ QList<Controller*> PortMidiEnumerator::queryDevices() {
+     qDebug() << "Scanning PortMIDI devices:";
+ 
+-    int iNumDevices = Pm_CountDevices();
+-
+     QListIterator<Controller*> dev_it(m_devices);
+     while (dev_it.hasNext()) {
+         delete dev_it.next();
+@@ -189,6 +187,17 @@
+ 
+     m_devices.clear();
+ 
++    // DecksmithOS: PortMidi lists the devices present at Pm_Initialize(). For
++    // hotplug (see MixxxMainWindow), restart it so that a controller plugged in
++    // after start-up is found; the controllers deleted above closed their
++    // streams.
++    if (qEnvironmentVariableIsSet("DECKSMITHOS_SOUND_HOTPLUG_HOOK")) {
++        Pm_Terminate();
++        Pm_Initialize();
++    }
++
++    int iNumDevices = Pm_CountDevices();
++
+     const PmDeviceInfo* inputDeviceInfo = nullptr;
+     const PmDeviceInfo* outputDeviceInfo = nullptr;
+     int inputDevIndex = -1;

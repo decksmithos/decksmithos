@@ -54,7 +54,7 @@ EOF
 on_chroot <<'EOF'
 set -e
 missing=""
-for p in mixxx mixxx-data xserver-xorg-core xserver-xorg-legacy xinit openbox plymouth udev udisks2 \
+for p in mixxx mixxx-data xserver-xorg-core xserver-xorg-legacy xinit hsetroot openbox plymouth udev udisks2 \
          sqlite3 parted fdisk e2fsprogs dosfstools rpi-eeprom raspi-utils python3 kmod \
          sudo python3-tk python3-xlib xcompmgr xinput unclutter-xfixes xinput-calibrator \
          zstd openssh-client flashrom; do

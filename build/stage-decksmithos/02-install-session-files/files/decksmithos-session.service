@@ -3,32 +3,45 @@ Description=DecksmithOS X session (Mixxx)
 Documentation=file:///home/dj/.xsession
 # Replaces nodm, which restarted its session on SIGTERM so that every
 # shutdown waited for the stop timeout. Here systemd owns the restart.
-After=systemd-user-sessions.service plymouth-quit-wait.service getty@tty7.service
-Wants=plymouth-quit-wait.service
-Conflicts=getty@tty7.service
+After=systemd-user-sessions.service plymouth-start.service
+# X runs on tty1, where Plymouth draws the splash: switching to another VT
+# would clear the image (and "chvt" hangs while Plymouth holds the VT).
+# getty@tty1 is masked in the image (it would wait for Plymouth to quit).
+Conflicts=getty@tty1.service
+# The boot splash stays up until Mixxx is on screen (decksmithos-splash-done),
+# as display managers do: plymouth-quit.service must not end it at boot.
+Conflicts=plymouth-quit.service
+OnFailure=plymouth-quit.service
 # A crashing Mixxx must not leave a dead screen: never stop restarting.
 StartLimitIntervalSec=0
 
 [Service]
 User=dj
-# A full login session (pam_systemd/logind): seat0, VT 7, XDG_RUNTIME_DIR,
+# A full login session (pam_systemd/logind): seat0, VT 1, XDG_RUNTIME_DIR,
 # the user's D-Bus and systemd --user, as with a display manager.
 PAMName=login
 Environment=XDG_SESSION_TYPE=x11 XDG_SESSION_CLASS=user
-TTYPath=/dev/tty7
+TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
 StandardInput=tty
 StandardOutput=journal
 StandardError=journal
 UnsetEnvironment=TERM
-UtmpIdentifier=tty7
+UtmpIdentifier=tty1
 UtmpMode=user
 WorkingDirectory=~
-ExecStartPre=+/usr/bin/chvt 7
+# Plymouth stops drawing and releases the display; its image stays on screen.
+ExecStartPre=+-/usr/bin/plymouth deactivate
 # Xorg.wrap (xserver-xorg-legacy, allowed_users=console) starts the server
-# because this process owns the console tty7.
-ExecStart=/usr/bin/xinit /etc/X11/Xsession -- :0 vt7 -nolisten tcp -keeptty -novtswitch
+# because this process owns the console tty1.
+# The Plymouth image does not survive the start of X here (rotated DSI panel,
+# also with -background none); ~/.xsession sets the same logo as the X
+# background (hsetroot) first thing.
+ExecStart=/usr/bin/xinit /etc/X11/Xsession -- :0 vt1 -nolisten tcp -keeptty -novtswitch
+# Ends the splash once Mixxx's window is up (or after 120 s); in the background
+# so that the unit is "started" at once.
+ExecStartPost=+/bin/sh -c "/usr/local/sbin/decksmithos-splash-done > /dev/null 2>&1 &"
 # Mixxx saves its settings on SIGTERM: stop it first (up to 15 s), then the
 # rest of the session gets the usual SIGTERM.
 ExecStop=/bin/sh -c "pkill -TERM -u dj -x mixxx; for i in $(seq 150); do pgrep -u dj -x mixxx >/dev/null || exit 0; sleep 0.1; done"

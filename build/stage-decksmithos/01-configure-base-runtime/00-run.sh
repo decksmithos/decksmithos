@@ -24,7 +24,7 @@ install -v -m 644 files/splash.png "${ROOTFS_DIR}/usr/share/plymouth/themes/deck
 install -v -m 644 files/decksmithos-storage-init.service "${ROOTFS_DIR}/etc/systemd/system/decksmithos-storage-init.service"
 install -v -m 755 files/decksmithos-init-storage "${ROOTFS_DIR}/usr/local/sbin/decksmithos-init-storage"
 install -v -m 755 files/decksmithos-mixxx "${ROOTFS_DIR}/usr/local/bin/decksmithos-mixxx"
-install -v -m 755 files/decksmithos-mixxx-autoconf files/decksmithos-mixxx-ui "${ROOTFS_DIR}/usr/local/bin/"
+install -v -m 755 files/decksmithos-mixxx-autoconf files/decksmithos-mixxx-ui files/decksmithos-soundconfig "${ROOTFS_DIR}/usr/local/bin/"
 # A/B slot selection via the bootloader's tryboot mode (autoboot.txt on p1).
 install -v -m 755 files/decksmithos-slot "${ROOTFS_DIR}/usr/local/sbin/decksmithos-slot"
 # Read-only root: decksmithos-overlay-init runs as init= (cmdline.txt written by

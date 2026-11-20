@@ -1,0 +1,10 @@
+#!/bin/sh
+# End Plymouth once Mixxx shows its window (started by
+# decksmithos-session.service, as root). Plymouth was only deactivated before
+# X started, so the VT never falls back to the text console in between; the
+# image itself is the X background (hsetroot in ~/.xsession). Then Plymouth quits
+# (--retain-splash, nothing is redrawn). Gives up after 120 s (Mixxx not starting), so
+# Plymouth never outlives the session start by much.
+runuser -u dj -- env DISPLAY=:0 /usr/local/bin/decksmithos-mixxx-ui wait-window 120 \
+  || echo "decksmithos-splash-done: no Mixxx window after 120 s"
+/usr/bin/plymouth quit --retain-splash 2>/dev/null || true

@@ -170,11 +170,10 @@ BASE_CMDLINE="$(tr -s ' \n' '\n\n' < "${SRC_BOOT}/cmdline.txt" \
   | grep -vE '^(root=|rootfstype=|rootwait$|panic=|quiet$|splash$|resize$|overlayroot=.*|init=.*|systemd\.run.*firstboot|$)' \
   | paste -sd' ')"
 
-if [[ "${PROFILE}" == "dev" ]]; then
-  QUIET=""
-else
-  QUIET="quiet splash vt.global_cursor_default=0"
-fi
+# Both profiles boot to the splash (no kernel text or logo on the panel); in
+# dev the boot messages are in the journal (SSH: journalctl -b, dmesg). There
+# is no initramfs, so Plymouth starts with systemd (plymouth-start.service).
+QUIET="quiet splash vt.global_cursor_default=0 logo.nologo"
 FB="$(tr -d '\n' < "${DISPLAY_CMDLINE_FILE}")"
 # Read-only root with a RAM overlay, set up by decksmithos-overlay-init before
 # systemd starts (the kernel mounts the root read-only by default). Replaces

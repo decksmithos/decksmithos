@@ -15,6 +15,7 @@ xinit
 x11-xserver-utils
 openbox
 xserver-xorg-legacy
+hsetroot
 unclutter-xfixes
 plymouth
 plymouth-themes

@@ -14,9 +14,10 @@ echo "127.0.1.1 ${TARGET_HOSTNAME}" >> "${ROOTFS_DIR}/etc/hosts"
 
 sed -i 's/^#NAutoVTs=6/NAutoVTs=1/' "${ROOTFS_DIR}/etc/systemd/logind.conf"
 
-# Root autologin on the tty1 console for debugging.
-mkdir -p "${ROOTFS_DIR}/etc/systemd/system/getty@tty1.service.d"
-cat > "${ROOTFS_DIR}/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<'EOF'
+# Root autologin on the tty2 console for debugging (Ctrl+Alt+F2 with a USB
+# keyboard; tty1 is the X session).
+mkdir -p "${ROOTFS_DIR}/etc/systemd/system/getty@tty2.service.d"
+cat > "${ROOTFS_DIR}/etc/systemd/system/getty@tty2.service.d/autologin.conf" <<'EOF'
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --noreset %I $TERM
@@ -26,6 +27,7 @@ on_chroot <<EOF
 echo "${FIRST_USER_NAME}:${DEV_PASSWORD}" | chpasswd
 echo "root:${DEV_PASSWORD}" | chpasswd
 systemctl enable ssh
+systemctl enable getty@tty2.service
 EOF
 
 # eth0 DHCP in the background (dhcpcd-base). Not through ifupdown: "auto eth0"

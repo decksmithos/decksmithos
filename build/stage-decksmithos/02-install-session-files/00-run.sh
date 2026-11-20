@@ -11,10 +11,14 @@ echo "Installing DecksmithOS session files"
 cat > ${ROOTFS_DIR}/home/${FIRST_USER_NAME}/.xsession <<EOF
 #!/bin/sh
 
+# First thing: the DecksmithOS logo as the X background (the same band of the
+# splash that Plymouth shows, scaled the same way: proportionally to the
+# screen width). Mixxx starts over it; it also shows while Mixxx restarts.
+hsetroot -solid black -full /usr/share/decksmithos/splash-band.png
+
 xset s off
 xset -dpms
 xset s noblank
-xsetroot -solid black
 
 if [ "${DISPLAY_PROFILE}" = "spi35" ]; then
   export FRAMEBUFFER=${SPI_FB}
@@ -24,14 +28,6 @@ fi
 # mouse (dev) shows it again while it moves.
 unclutter-xfixes --start-hidden --hide-on-touch --timeout 2 &
 
-if command -v plymouth >/dev/null 2>&1; then
-  if plymouth --help 2>&1 | grep -q -- '--retain-splash'; then
-    plymouth quit --retain-splash || true
-  else
-    plymouth quit || true
-  fi
-fi
-
 openbox-session &
 
 # Touchscreen calibration saved on /storage (decksmithos-touch calibrate).
@@ -40,8 +36,9 @@ openbox-session &
 # Dev profile: show touches (compositor + overlay) and the dev-mode notice
 # once Mixxx is on screen.
 if [ "\$(cat /etc/decksmithos/profile 2>/dev/null)" = "dev" ]; then
-  (sleep 6; /usr/local/bin/decksmithos-touch overlay on) &
-  (sleep 10; /usr/local/bin/decksmithos-dev-banner) &
+  # After Mixxx is on screen: the compositor would paint over the splash.
+  (/usr/local/bin/decksmithos-mixxx-ui wait-window 120; /usr/local/bin/decksmithos-touch overlay on) &
+  (/usr/local/bin/decksmithos-mixxx-ui wait-window 120; sleep 3; /usr/local/bin/decksmithos-dev-banner) &
 fi
 
 exec /usr/local/bin/decksmithos-mixxx
@@ -94,4 +91,8 @@ install -v -m 644 files/decksmithos-session.service "${ROOTFS_DIR}/etc/systemd/s
 on_chroot <<CHROOT
 systemctl enable decksmithos-session.service
 systemctl set-default graphical.target
+# tty1 belongs to the X session (splash handover on the same VT).
+systemctl mask getty@tty1.service
 CHROOT
+install -v -m 755 files/decksmithos-splash-done "${ROOTFS_DIR}/usr/local/sbin/decksmithos-splash-done"
+install -v -m 644 files/splash-band.png "${ROOTFS_DIR}/usr/share/decksmithos/splash-band.png"

@@ -7,6 +7,9 @@
                                          settings), decksmithos-mixxx applies the skin
                                          before the next start
   decksmithos-mixxx-ui preferences       open Mixxx's preferences (Ctrl+P)
+  decksmithos-mixxx-ui wait-window [S]   wait (up to S seconds, default 120) until
+                                         Mixxx's main window is on screen;
+                                         exit 1 on timeout
 """
 
 import os
@@ -81,11 +84,9 @@ def set_skin(name):
         sys.exit("decksmithos-mixxx-ui: Mixxx did not stop; the skin is used from its next start")
 
 
-def preferences():
-    from Xlib import X, XK, display
-    from Xlib.ext import xtest
-
-    d = display.Display()
+def find_mixxx(d):
+    """Mixxx's viewable top-level window (inside a window manager frame too)."""
+    from Xlib import X
 
     def find(win):
         try:
@@ -100,9 +101,33 @@ def preferences():
             return None
         return None
 
+    return find(d.screen().root)
+
+
+def wait_window(seconds):
+    from Xlib import display
+
+    deadline = time.monotonic() + seconds
+    d = None
+    while time.monotonic() < deadline:
+        try:
+            d = d or display.Display()
+            if find_mixxx(d):
+                return True
+        except Exception:  # X not up yet
+            d = None
+        time.sleep(0.2)
+    return False
+
+
+def preferences():
+    from Xlib import X, XK, display
+    from Xlib.ext import xtest
+
+    d = display.Display()
     win = None
     for _ in range(20):  # the menu window may still be closing
-        win = find(d.screen().root)
+        win = find_mixxx(d)
         if win:
             break
         time.sleep(0.1)
@@ -127,6 +152,8 @@ def main():
         set_skin(sys.argv[2])
     elif cmd == "preferences":
         preferences()
+    elif cmd == "wait-window":
+        sys.exit(0 if wait_window(float(sys.argv[2]) if len(sys.argv) > 2 else 120) else 1)
     else:
         sys.exit(__doc__)
 

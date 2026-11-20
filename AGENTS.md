@@ -558,7 +558,23 @@ without a controller, Mixxx 2.5.6 stopped at a "No Output Devices" dialog
 that an appliance cannot answer). Published as
 `2.5.6+dfsg-3~deb13decksmithos2` (2026-11-20) and pinned; the
 "DecksmithOS Standalone" gear panel has a MIXXX / SETTINGS button on
-`[App],show_preferences`. A new Mixxx build means raising
+`[App],show_preferences`.
+`0003-decksmithos-sound-controller-hotplug.patch` (published as
+`~deb13decksmithos3`, unverified on hardware until the controller is
+plugged in and out while Mixxx runs): with
+`DECKSMITHOS_SOUND_HOTPLUG_HOOK` (set by `decksmithos-mixxx` to
+`decksmithos-soundconfig`), Mixxx checks `/proc/asound/cards` every
+second; on a change it runs the hook (writes `soundconfig.xml`, prints
+`DECKSMITHOS_ALSA_CARD=<id>`, which Mixxx puts in its environment for
+the ALSA PCM `decksmithos`), queries the sound devices again, sets them
+up from `soundconfig.xml` and enumerates the controllers again
+(PortMidi restarted). Not while the preferences are open. A start
+without the output device no longer writes an empty `soundconfig.xml`.
+`decksmithos-mixxx` therefore waits only 5 s (was 20) for the
+controller at start. `decksmithos-soundconfig` rewrites
+`soundconfig.xml` when it is missing, unchanged since it wrote it, or
+has no output (the old checksum test ran in the wrong directory and
+always kept the file). A new Mixxx build means raising
 `MIXXX_LOCAL_SUFFIX`, running the workflow with publish and
 `pin-release.sh`, committed together (the image build refuses a version
 that `release.sha256` does not pin).
@@ -674,6 +690,25 @@ Verified behavior (Touch Display 2, rotated, see §15):
 -   The `script` module **does not honor `DeviceRotation`** in
     `plymouthd.conf`. Rotation is applied inside the script instead,
     e.g. `logo.image.Rotate(1.5708)` (π/2 radians, 90°).
+-   Boot to Mixxx without text or black gaps (2026-11-20, verified on
+    the CM5): both profiles boot `quiet splash vt.global_cursor_default=0
+    logo.nologo`; Plymouth starts with systemd (no initramfs) at ~1 s.
+    `decksmithos-session.service` conflicts with `plymouth-quit.service`,
+    runs `plymouth deactivate` and starts X on **tty1** (the Plymouth VT;
+    `chvt 7` hung, and another VT loses the image), so `getty@tty1` is
+    masked and the dev root console is on tty2. Plymouth's image did not
+    survive X's start (tried `-background none`, glamor, rotated DSI), so
+    `decksmithos-x-splash` (first in `.xsession`) shows the same
+    `splash.png` logo band as the X root background (`hsetroot -full
+    /usr/share/decksmithos/splash-band.png`, first command in
+    `.xsession`); Mixxx starts over it (and it shows while Mixxx
+    restarts). `decksmithos-splash-done` quits Plymouth (`--retain-splash`)
+    once Mixxx's window is viewable. Both show the logo band of the 768x1024 canvas
+    (full width, 420 px around the centre) scaled proportionally to the
+    screen width (5/3 on the 7" panel), so the logo keeps its size from
+    Plymouth to X.
+    The dev compositor and notice start only after Mixxx is up (the
+    compositor would paint over the splash).
 -   Rotation in the theme is therefore display-specific. If multiple
     displays/orientations are supported, parameterize it per display
     profile rather than hardcoding one angle for all images.
