@@ -215,6 +215,8 @@ class Menu:
             ("Restart", lambda b: self.confirm(b, "Tap again to restart", lambda: self.run_and_quit("reboot")), WARN, True),
             ("Restart Mixxx", lambda b: self.confirm(b, "Tap again to restart Mixxx",
                                                       lambda: self.run_and_quit("restart-mixxx")), PANEL, True),
+            ("Mixxx settings", lambda b: self.mixxx_settings(), PANEL, True),
+            (f"Skin\n{self.skin_label()}", lambda b: self.draw_skins(), PANEL, True),
             ("Calibrate touchscreen", lambda b: self.calibrate(), PANEL, True),
         ]
         overlay_on = subprocess.run(["decksmithos-touch", "overlay", "status"],
@@ -483,6 +485,51 @@ class Menu:
     def commit(self):
         system("commit-slot", capture=True)
         self.close()
+
+    # --- Mixxx interface ----------------------------------------------------------
+    def skin_list(self):
+        out = subprocess.run(["decksmithos-mixxx-ui", "skins"], capture_output=True, text=True).stdout
+        return [line.split("\t") for line in out.splitlines() if line.count("\t") == 2]
+
+    def skin_label(self):
+        return next((name for name, _, state in self.skin_list() if state == "current"), "?")
+
+    def mixxx_settings(self):
+        self.close()
+        subprocess.Popen(["decksmithos-mixxx-ui", "preferences"], start_new_session=True)
+
+    def set_skin(self, name):
+        subprocess.Popen(["decksmithos-mixxx-ui", "set-skin", name], start_new_session=True)
+        self.close()
+
+    def draw_skins(self):
+        self.clear_page()
+        self.header(self.page, "Skin")
+        box = tk.Frame(self.page, bg=BG)
+        box.pack(fill="both", expand=True, padx=self.pad * 2, pady=self.pad * 2)
+        tk.Label(box, text="Switching restarts Mixxx (it saves its settings first). "
+                           "Skins marked 'too big' need a larger screen.",
+                 font=self.f_text, bg=BG, fg=DIM, anchor="w").pack(fill="x", pady=(0, self.pad))
+        grid = tk.Frame(box, bg=BG)
+        grid.pack(fill="both", expand=True)
+        cols = 2
+        items = self.skin_list()
+        for i, (name, minimum, state) in enumerate(items):
+            note = {"current": "  (current)", "too-big": f"  (too big: {minimum})"}.get(state, "")
+            enabled = state == "other"
+            btn = self.button(grid, name + note, None, color=ACCENT if enabled else PANEL, enabled=enabled)
+            if enabled:
+                btn.configure(command=lambda b=btn, n=name: self.confirm(
+                    b, f"Tap again: switch to {n}", lambda: self.set_skin(n)))
+            btn.grid(row=i // cols, column=i % cols, sticky="nsew", padx=self.pad // 2, pady=self.pad // 2)
+        for c in range(cols):
+            grid.columnconfigure(c, weight=1, uniform="skins")
+        for r in range((len(items) + cols - 1) // cols):
+            grid.rowconfigure(r, weight=1, uniform="skins")
+        back = self.button(box, "Back", None, color=PANEL)
+        back.configure(command=lambda: (self.clear_page(), self.draw_main()))
+        back.pack(anchor="w", pady=(self.pad, 0), ipadx=self.pad)
+        self.reset_idle()
 
     def calibrate(self):
         self.close()

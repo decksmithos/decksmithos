@@ -1,0 +1,100 @@
+Description: Appliance UI: open the preferences from a skin, no sound dialogs
+ DecksmithOS runs Mixxx without menu bar, mouse or keyboard:
+  - "[App],show_preferences" (push button) opens the preferences dialog, so
+    a skin can offer a settings button.
+  - With DECKSMITHOS_NO_SOUND_DIALOGS set in the environment, the start-up
+    dialogs about sound devices (busy, error, no output device) are skipped:
+    Mixxx starts without audio and logs a warning. Without a controller (whose
+    USB audio is the output) these dialogs blocked the start on a device that
+    has no way to answer them.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-20
+---
+--- a/src/mixxxmainwindow.h
++++ b/src/mixxxmainwindow.h
+@@ -9,6 +9,8 @@
+ #include "track/track_decl.h"
+ #include "util/parented_ptr.h"
+ 
++class ControlPushButton;
++
+ class ControlObject;
+ class DlgDeveloperTools;
+ class DlgPreferences;
+@@ -147,6 +149,8 @@
+     DlgDeveloperTools* m_pDeveloperToolsDlg;
+ 
+     DlgPreferences* m_pPrefDlg;
++    // DecksmithOS: [App],show_preferences opens the preferences from a skin button.
++    std::unique_ptr<ControlPushButton> m_pShowPreferences;
+     parented_ptr<DlgKeywheel> m_pKeywheel;
+ 
+ #ifdef __ENGINEPRIME__
+--- a/src/mixxxmainwindow.cpp
++++ b/src/mixxxmainwindow.cpp
+@@ -33,6 +33,7 @@
+ #include "broadcast/broadcastmanager.h"
+ #endif
+ #include "control/controlindicatortimer.h"
++#include "control/controlpushbutton.h"
+ #include "library/library.h"
+ #include "library/library_prefs.h"
+ #ifdef __ENGINEPRIME__
+@@ -302,6 +303,18 @@
+             m_pCoreServices->getLibrary());
+     m_pPrefDlg->setWindowIcon(QIcon(MIXXX_ICON_PATH));
+     m_pPrefDlg->setHidden(true);
++    // DecksmithOS: a skin button can open the preferences ([App],show_preferences),
++    // since an appliance has no menu bar or keyboard.
++    m_pShowPreferences = std::make_unique<ControlPushButton>(
++            ConfigKey(QStringLiteral("[App]"), QStringLiteral("show_preferences")));
++    connect(m_pShowPreferences.get(),
++            &ControlObject::valueChanged,
++            this,
++            [this](double value) {
++                if (value > 0) {
++                    slotOptionsPreferences();
++                }
++            });
+     connect(m_pPrefDlg,
+             &DlgPreferences::tooltipModeChanged,
+             this,
+@@ -343,10 +356,18 @@
+     // Sound hardware setup
+     // Try to open configured devices. If that fails, display dialogs
+     // that allow to either retry, reconfigure devices or exit.
++    // DecksmithOS: an appliance without mouse or keyboard cannot answer these
++    // dialogs. With DECKSMITHOS_NO_SOUND_DIALOGS set, Mixxx starts without
++    // audio instead (e.g. no controller plugged in) and only logs a warning.
++    const bool noSoundDialogs = qEnvironmentVariableIsSet("DECKSMITHOS_NO_SOUND_DIALOGS");
+     bool retryClicked;
+     do {
+         retryClicked = false;
+         SoundDeviceStatus result = m_pCoreServices->getSoundManager()->setupDevices();
++        if (noSoundDialogs && result != SoundDeviceStatus::Ok) {
++            qWarning() << "DecksmithOS: sound devices could not be opened; starting without audio";
++            break;
++        }
+         if (result == SoundDeviceStatus::ErrorDeviceCount ||
+                 result == SoundDeviceStatus::ErrorExcessiveOutputChannel) {
+             if (soundDeviceBusyDlg(&retryClicked) != QDialog::Accepted) {
+@@ -365,6 +386,10 @@
+     // In case of persisting errors, the user has already received a message
+     // above. So we can just check the output count here.
+     while (m_pCoreServices->getSoundManager()->getConfig().getOutputs().count() == 0) {
++        if (noSoundDialogs) {
++            qWarning() << "DecksmithOS: no output sound device configured; starting without audio";
++            break;
++        }
+         // Exit when we press the Exit button in the noSoundDlg dialog
+         // only call it if result != OK
+         bool continueClicked = false;
+@@ -514,6 +539,7 @@
+     m_pLibraryExporter.reset();
+ #endif
+ 
++    m_pShowPreferences.reset();
+     qDebug() << t.elapsed(false).debugMillisWithUnit() << "deleting DlgPreferences";
+     delete m_pPrefDlg;
+ 

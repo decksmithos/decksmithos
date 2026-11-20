@@ -29,7 +29,7 @@ systemctl enable ssh
 EOF
 
 # eth0 DHCP in the background (dhcpcd-base). Not through ifupdown: "auto eth0"
-# held network.target, and with it systemd-user-sessions, nodm and Mixxx, until
+# held network.target, and with it systemd-user-sessions, the X session and Mixxx, until
 # a lease arrived (or dhcpcd gave up). The release image has no eth0 config.
 install -m 644 files/decksmithos-dhcp.service "${ROOTFS_DIR}/etc/systemd/system/decksmithos-dhcp.service"
 on_chroot <<EOF
@@ -58,7 +58,8 @@ EOF
 install -m 644 files/decksmithos-x11vnc.service "${ROOTFS_DIR}/etc/systemd/system/decksmithos-x11vnc.service"
 on_chroot <<EOF
 x11vnc -storepasswd "${DEV_PASSWORD}" /etc/x11vnc.pass
-chmod 600 /etc/x11vnc.pass
+chown root:${FIRST_USER_NAME} /etc/x11vnc.pass
+chmod 640 /etc/x11vnc.pass
 systemctl enable decksmithos-x11vnc.service
 EOF
 

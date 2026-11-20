@@ -6,7 +6,7 @@
 #   reboot             stop Mixxx cleanly, then reboot
 #   reboot-writable    dev profile only: next boot with a writable root, reboot
 #   reboot-readonly    dev profile only: next boot read-only again, reboot
-#   restart-mixxx      stop Mixxx; nodm starts a new session with a new Mixxx
+#   restart-mixxx      stop Mixxx; decksmithos-session.service starts a new session
 #   slots              slot state and versions (decksmithos-slot info)
 #   try-slot           boot the other slot once (decksmithos-slot try)
 #   commit-slot        keep the running slot as default (decksmithos-slot commit)

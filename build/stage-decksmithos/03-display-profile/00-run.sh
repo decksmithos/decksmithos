@@ -77,6 +77,11 @@ fi
 
 # --- Touch device name for decksmithos-touch / the touch overlay ---------------------
 mkdir -p "${ROOTFS_DIR}/etc/decksmithos"
+if [[ -f "${PROFILE_DIR}/display.conf" ]]; then
+  install -v -d -m 755 "${ROOTFS_DIR}/etc/decksmithos"
+  install -v -m 644 "${PROFILE_DIR}/display.conf" "${ROOTFS_DIR}/etc/decksmithos/display.conf"
+fi
+
 if [[ -f "${PROFILE_DIR}/touch.conf" ]]; then
   install -v -m 644 "${PROFILE_DIR}/touch.conf" "${ROOTFS_DIR}/etc/decksmithos/touch.conf"
 elif [[ "${DISPLAY_PROFILE}" == "spi35" ]]; then

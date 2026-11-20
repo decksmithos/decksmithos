@@ -88,9 +88,19 @@ ownership, remote, and update policy.
     distribution.
 -   Mixxx starts automatically in a dedicated X session.
 -   Prefer Xorg and a minimal session over a full desktop environment.
-    `nodm` was preferred for autologin; verify availability/behavior on
-    the selected OS release. Openbox was considered but is not a
-    requirement unless needed.
+    Implemented: no display manager. `decksmithos-session.service`
+    runs `xinit /etc/X11/Xsession` as `dj` with `PAMName=login` on
+    tty7 (a full logind session: seat0, x11, XDG_RUNTIME_DIR, user
+    D-Bus); `Xorg.wrap` (xserver-xorg-legacy, `allowed_users=console`)
+    starts the server. systemd restarts it when Mixxx exits ("Restart
+    Mixxx", skin change); its `ExecStop` lets Mixxx save first. It
+    replaced nodm (2026-11-20), which restarted its session on SIGTERM so
+    every shutdown waited for the stop timeout. Units must not depend on
+    `nodm.service` by name (x11vnc did and pulled nodm in next to it);
+    use `display-manager.service`. The X server has no authority file:
+    it admits the session user (`xhost si:localuser:dj` in Xsession), so
+    X clients started by root run as `dj` (`runuser`). Openbox runs in
+    the session.
 -   Avoid adding Wayland or a heavyweight desktop without a concrete
     technical reason.
 
@@ -335,11 +345,10 @@ commands on the build host instead of inside the target rootfs.
 -   Use noninteractive package installation.
 -   Preseed package-specific debconf choices, rather than blindly
     suppressing prompts.
--   `nodm` prompts whether it should start at boot (this hung a build
-    waiting on whiptail): preseeded in
-    `stage-decksmithos/00-install-packages/00-debconf`
-    (`nodm/enabled true`); `DEBIAN_FRONTEND=noninteractive` is exported
-    from `build/config*`.
+-   Debconf preseeds live in `stage-decksmithos/00-install-packages/00-debconf`
+    (now `xserver-xorg-legacy/allowed_users`; formerly nodm's start
+    prompt, which hung a build waiting on whiptail);
+    `DEBIAN_FRONTEND=noninteractive` is exported from `build/config*`.
 -   Separate base, dev-only, and removal package lists.
 -   Do not remove apt/package tools before all pi-gen package
     installation and cleanup steps are complete. Removing package
@@ -514,6 +523,33 @@ to turn it off. Remaining touch work: library row height and finger scrolling, s
 buttons outside the top bar (BEAT FX channel buttons, Q), verification on
 the real panel. None of these skins fits 480×320.
 
+Screen-size adaptation (implemented, verified on the CM5 2026-11-20):
+`decksmithos-mixxx-autoconf` (run by `decksmithos-mixxx` before Mixxx
+starts) takes the screen's physical size from xrandr/EDID (HDMI) or,
+when the output reports 0 mm (the DSI Touch Display 2 does), from
+`DISPLAY_DIAGONAL_INCH` in `/etc/decksmithos/display.conf` (display
+profile), and sets `[Library] RowHeight` to ~6 mm (50 px on the 7"
+panel, Mixxx default 20) and `[Preferences] geometry` to the screen.
+Values the user changed in Mixxx's preferences are left alone (last
+automatic values in `decksmithos-auto.json`). Picking a skin by screen
+size is not done yet (only the 7" skins exist).
+
+Skin and settings: the system menu has "Mixxx settings" (focuses Mixxx
+and sends Ctrl+P via XTEST; works with the hidden menu bar) and "Skin"
+(installed skins minus the "(64 Samplers)" variants, those larger than
+the screen disabled). `decksmithos-mixxx-ui set-skin` leaves the choice
+in `decksmithos-pending-skin` and stops Mixxx; the autoconf applies it
+before the next start, because Mixxx rewrites `mixxx.cfg` when it quits.
+`build/mixxx/patches/0002-decksmithos-appliance-ui.patch` adds
+`[App],show_preferences` (for a settings button in the skin's gear
+panel) and `DECKSMITHOS_NO_SOUND_DIALOGS` (set by `decksmithos-mixxx`:
+without a controller, Mixxx 2.5.6 stopped at a "No Output Devices" dialog
+that an appliance cannot answer). The patch is not yet built: publishing
+it means raising `MIXXX_LOCAL_SUFFIX` to `~deb13decksmithos2`, running
+the workflow with publish, and `pin-release.sh` in the same change (the
+image build refuses a version that `release.sha256` does not pin). Add
+the skin button only once the image installs that package.
+
 ### Future display sizes
 
 -   Medium (\~5-inch): envisioned as dual waveforms plus browser access.
@@ -645,7 +681,7 @@ running X display `:0` on port 5900 (`decksmithos-x11vnc.service`, VNC
 password = first 8 characters of the dev password, i.e. `decksmit`).
 eth0 DHCP runs in the background (`decksmithos-dhcp.service`, dhcpcd,
 dev only; no ifupdown `auto eth0`, which held `network.target` and with
-it nodm/Mixxx until a lease arrived); the address is shown in the dev
+it the X session and Mixxx until a lease arrived); the address is shown in the dev
 notice and the system menu. The release image has no eth0
 configuration. Dev mode exists only in the dev image (decided): every session starts
 the touch overlay with its compositor and shows an English
@@ -725,6 +761,12 @@ Keep documentation synchronized with implementation.
     sustained `fio` read/write run with the SSD at operating
     temperature. Record measured throughput; if any errors appear,
     remove the line and fall back to Gen 2.
+    First run (2026-11-20, CM5 IO board, Samsung MZVL2256HCHQ-00BH1
+    256 GB): link 8.0 GT/s x1; 4 x 8 GiB direct write/read on `/storage`
+    plus 8 GiB raw read in ~95 s: 766 MB/s write, 872 MB/s read, steady
+    across rounds; no AER/NVMe kernel messages; NVMe 36 -> 50 °C (still
+    rising), SoC 55 °C. Still to do: a longer run to thermal steady state
+    and a run with Mixxx playing.
 -   [ ] A/B slots identified correctly (`decksmithos-slot` shows A).
 -   [ ] `decksmithos-slot try` boots slot B once; next reboot returns
     to A; `try` + `commit` in B makes B the default.
@@ -785,7 +827,7 @@ kept here for the reasoning. Update the status when something changes.
 | # | Question | Status |
 |---|---|---|
 | 5 | Raspberry Pi OS release and pinned pi-gen revision | Open |
-| 7 | `nodm` on the selected OS | Works; quirk: it restarts the session on SIGTERM, so `nodm.service.d/decksmithos-stop.conf` stops Mixxx and then SIGKILLs the rest (shutdown 10.5 s -> 0.7 s, `docs/boot-time.md`). A plain systemd unit running `xinit` would avoid the quirk |
+| 7 | Display manager | **Decided (2026-11-20):** none; `decksmithos-session.service` (xinit, PAM login session) replaced nodm. Verified on the CM5: Mixxx, touch overlay, menu, VNC, Restart Mixxx, shutdown 0.7 s with a clean session stop |
 | 8 | Plymouth on the SPI panel | Open |
 | 9 | A/B boot and rollback | **Decided:** tryboot (§5); signed `decksmithos.update` from USB (`docs/update-strategy.md`). Still open: automatic health check before keeping a slot |
 | 10 | Partition sizes and the 15% reserve | Open (rootfs 4 GiB per slot now) |
@@ -842,6 +884,7 @@ these are not yet tested on DecksmithOS. The gaps:
 | 28 | Lighting: DMX, Hue, SoundSwitch, phrase-aware lights (Prime 4 G2, CDJ-3000/X) | No | Proposal: out of scope for now |
 | 29 | Boot time and power-loss behaviour (no flagship publishes them) | Unmeasured; read-only root and A/B slots | Measure and publish: could become a DecksmithOS strength |
 | 30 | Zone output, 10-band room EQ, multiple mic inputs (all-in-ones) | Depends on the controller's audio interface | Open; controller-agnostic, so only via what Mixxx supports |
+| 31 | Automatic mixing from a prepared playlist ("AI mode"; Engine DJ/rekordbox have smart playlists and auto-mix features) | Mixxx Auto DJ: plays a crate/playlist with fixed-length crossfades or intro/outro cues; no key/BPM ordering, no phrase-aligned transitions | **Decided (2026-11-20), staged:** (1) Auto DJ set up for DecksmithOS and started from the menu (sync/quantize, transition mode); (2) on-device playlist ordering by key compatibility (Camelot) and a BPM/energy curve, from Mixxx's own analysis; (3) later, separately: a transition engine as a JS mapping on a virtual MIDI device (sync, 16/32-beat aligned starts, EQ bass swap, outro loops), judged by listening on the hardware. No cloud or on-device LLM: release has no network, and a local model would compete with audio for CPU |
 
 ## 14. Instructions for coding agents
 

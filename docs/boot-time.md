@@ -25,13 +25,14 @@ runs). Power button to Mixxx: about **12--13 s** (firmware + bootloader
 
 ## Changes made
 
-- **Shutdown, 10.5 s to 0.7 s:** nodm answers SIGTERM by starting a new
-  X session, whose processes never got the stop signal, so systemd
-  waited 10 s for its stop timeout. `nodm.service.d/decksmithos-stop.conf`
-  stops Mixxx first (SIGTERM, up to 15 s to save), then kills the rest
-  of the session.
+- **Shutdown, 10.5 s to 0.7 s:** nodm answered SIGTERM by starting a
+  new X session, whose processes never got the stop signal, so systemd
+  waited 10 s for its stop timeout. Now there is no display manager:
+  `decksmithos-session.service` stops Mixxx first (SIGTERM, up to 15 s
+  to save), then the rest of the session (measured: session stopped in
+  0.22 s, shutdown 0.7 s).
 - **DHCP in the background (dev):** `auto eth0` held `network.target`
-  and with it nodm and Mixxx.
+  and with it the X session and Mixxx.
 - **Bootloader settings** (`/etc/decksmithos/bootloader.conf`, written
   by "Update bootloader" / "Apply bootloader settings" in the system
   menu): `BOOT_ORDER=0xf416` (NVMe first instead of eMMC/SD first),

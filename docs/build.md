@@ -100,7 +100,7 @@ Raspberry Pi OS Lite 64-bit base
 
 user dj
 
-automatic login through nodm
+automatic login: decksmithos-session.service (xinit with a PAM login session, no display manager)
 
 Xorg + Openbox
 

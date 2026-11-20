@@ -1,0 +1,170 @@
+#!/usr/bin/python3
+"""Fit Mixxx's settings to the screen it runs on (called by decksmithos-mixxx
+inside the X session, before Mixxx starts).
+
+Screen size: the primary output's physical size from xrandr (HDMI: EDID);
+when it reports 0 mm (DSI panels), the diagonal from
+/etc/decksmithos/display.conf (display profile).
+
+Settings written to mixxx.cfg:
+  [Library] RowHeight    library rows about ROW_MM tall, finger sized
+  [Preferences] geometry the preferences dialog fits the screen
+  [Config] ResizableSkin  a skin chosen in the system menu
+                         (decksmithos-mixxx-ui set-skin leaves it in
+                         decksmithos-pending-skin; applied here because Mixxx
+                         rewrites mixxx.cfg when it quits)
+
+Only values DecksmithOS set itself are changed: the last automatic values are
+kept in decksmithos-auto.json next to mixxx.cfg, and a value that differs from
+it was changed by the user (Mixxx preferences) and is left alone.
+
+  decksmithos-mixxx-autoconf <settings dir>     apply
+  decksmithos-mixxx-autoconf --info             print what was detected
+"""
+
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+
+ROW_MM = 6.0                 # finger-sized library rows
+ROW_MIN, ROW_MAX = 20, 64    # Mixxx default row height is 20 px
+DISPLAY_CONF = "/etc/decksmithos/display.conf"
+
+
+def screen():
+    """(width px, height px, px per mm, diagonal inch, source) or None."""
+    try:
+        out = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = [l for l in out.splitlines() if " connected" in l]
+    line = next((l for l in lines if " primary " in l), lines[0] if lines else None)
+    if not line:
+        return None
+    m = re.search(r"(\d+)x(\d+)\+\d+\+\d+", line)
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    px_diag = math.hypot(w, h)
+    mm = re.search(r"(\d+)mm x (\d+)mm", line)
+    if mm and int(mm.group(1)) > 0 and int(mm.group(2)) > 0:
+        mm_diag = math.hypot(int(mm.group(1)), int(mm.group(2)))
+        if 50 <= mm_diag <= 2600:  # 2" .. 100": anything else is a bogus EDID
+            return w, h, px_diag / mm_diag, mm_diag / 25.4, "EDID"
+    try:
+        conf = open(DISPLAY_CONF).read()
+        inch = float(re.search(r'^DISPLAY_DIAGONAL_INCH="?([0-9.]+)', conf, re.M).group(1))
+        return w, h, px_diag / (inch * 25.4), inch, DISPLAY_CONF
+    except (OSError, AttributeError, ValueError):
+        return w, h, None, None, "unknown size"
+
+
+def read_cfg(path):
+    """mixxx.cfg as an ordered list of [section, [(key, value), ...]]."""
+    sections, cur = [], None
+    try:
+        for raw in open(path, encoding="utf-8"):
+            line = raw.rstrip("\n")
+            if line.startswith("[") and line.endswith("]"):
+                cur = [line, []]
+                sections.append(cur)
+            elif line.strip() and cur is not None:
+                key, _, value = line.partition(" ")
+                cur[1].append((key, value))
+    except FileNotFoundError:
+        pass
+    return sections
+
+
+def write_cfg(path, sections):
+    tmp = path + ".decksmithos-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for name, items in sections:
+            f.write(name + "\n")
+            for key, value in items:
+                f.write(f"{key} {value}\n")
+            f.write("\n")
+    os.replace(tmp, path)
+
+
+def get(sections, section, key):
+    for name, items in sections:
+        if name == section:
+            for k, v in items:
+                if k == key:
+                    return v
+    return None
+
+
+def put(sections, section, key, value):
+    for entry in sections:
+        if entry[0] == section:
+            entry[1] = [(k, value if k == key else v) for k, v in entry[1]]
+            if key not in (k for k, _ in entry[1]):
+                entry[1].append((key, value))
+            return
+    sections.append([section, [(key, value)]])
+
+
+def main():
+    info = screen()
+    if len(sys.argv) > 1 and sys.argv[1] == "--info":
+        print(info)
+        return
+    settings = sys.argv[1]
+    if not info:
+        print("decksmithos-mixxx-autoconf: no screen found; screen settings unchanged")
+        info = (None, None, None, None, "no screen")
+    w, h, ppmm, inch, source = info
+    wanted = {("[Preferences]", "geometry"): f"0,0,{w},{h}"} if w else {}
+    if ppmm:
+        row = max(ROW_MIN, min(ROW_MAX, round(ROW_MM * ppmm)))
+        wanted[("[Library]", "RowHeight")] = str(row)
+
+    cfg_path = os.path.join(settings, "mixxx.cfg")
+    auto_path = os.path.join(settings, "decksmithos-auto.json")
+    sections = read_cfg(cfg_path)
+    try:
+        auto = json.load(open(auto_path))
+    except (OSError, ValueError):
+        auto = {}
+
+    changed = []
+    for (section, key), value in wanted.items():
+        name = f"{section}{key}"
+        current = get(sections, section, key)
+        # Ours to change: never set, or still the value we set last time (or
+        # Mixxx's shipped default for the dialog geometry).
+        if current is None or current == auto.get(name) or (
+                name == "[Preferences]geometry" and name not in auto):
+            if current != value:
+                put(sections, section, key, value)
+                changed.append(f"{section} {key} {value}")
+            auto[name] = value
+        else:
+            auto.pop(name, None)  # the user's value from now on
+    pending = os.path.join(settings, "decksmithos-pending-skin")
+    try:
+        skin = open(pending, encoding="utf-8").read().strip()
+        os.remove(pending)
+        if skin and "/" not in skin and os.path.isfile(f"/usr/share/mixxx/skins/{skin}/skin.xml"):
+            put(sections, "[Config]", "ResizableSkin", skin)
+            changed.append(f"[Config] ResizableSkin {skin}")
+    except OSError:
+        pass
+    if changed:
+        write_cfg(cfg_path, sections)
+    tmp = auto_path + ".tmp"
+    json.dump(auto, open(tmp, "w"), indent=1)
+    os.replace(tmp, auto_path)
+    size = f'{inch:.1f}" ({source})' if inch else source
+    print(f"decksmithos-mixxx-autoconf: screen {w or '?'}x{h or '?'}, {size}"
+          + (f", {ppmm:.2f} px/mm" if ppmm else "")
+          + ("; set " + "; ".join(changed) if changed else "; no change"))
+
+
+if __name__ == "__main__":
+    main()

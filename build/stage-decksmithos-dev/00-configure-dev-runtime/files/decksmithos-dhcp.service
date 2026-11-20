@@ -2,7 +2,7 @@
 Description=DHCP on wired Ethernet (dev profile, in the background)
 Documentation=man:dhcpcd(8)
 # Deliberately not ordered before network.target / network-online.target:
-# nothing in the boot (nodm, Mixxx) waits for a DHCP lease. sshd and x11vnc
+# nothing in the boot (X session, Mixxx) waits for a DHCP lease. sshd and x11vnc
 # listen on all addresses and become reachable once the lease arrives.
 BindsTo=sys-subsystem-net-devices-eth0.device
 After=sys-subsystem-net-devices-eth0.device

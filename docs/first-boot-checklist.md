@@ -76,7 +76,7 @@ The first boot creates `/storage` (p7) and reboots once by itself.
       `/storage/dev/ssh-host-keys`).
 - [ ] Mixxx starts without waiting for the network: boot with the
       cable unplugged, plug it in later; the notice/menu then shows the
-      address. `systemd-analyze critical-chain nodm.service` shows no
+      address. `systemd-analyze critical-chain decksmithos-session.service` shows no
       network unit.
 - [ ] The journal survives a restart (`journalctl --list-boots` lists
       more than one boot; stored in `/storage/logs/journal`).

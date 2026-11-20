@@ -1,12 +1,15 @@
 [Unit]
 Description=DecksmithOS dev: VNC access to the running X session (:0)
-After=nodm.service
-Wants=nodm.service
+After=display-manager.service
+# No Wants=: pulling in a display manager by name started nodm next to the
+# DecksmithOS session unit. The session is started by graphical.target.
 
 [Service]
-# Shares the existing X display (no separate desktop). -auth guess finds the
-# X server's authority file; retries until the X session is up.
-ExecStart=/usr/bin/x11vnc -display :0 -auth guess -forever -shared -noxdamage -rfbport 5900 -rfbauth /etc/x11vnc.pass
+# Shares the existing X display (no separate desktop). The session's X server
+# has no authority file; it admits the session user (xhost si:localuser:dj in
+# Xsession), so x11vnc runs as dj. Retries until the X session is up.
+User=dj
+ExecStart=/usr/bin/x11vnc -display :0 -forever -shared -noxdamage -rfbport 5900 -rfbauth /etc/x11vnc.pass
 Restart=always
 RestartSec=3
 

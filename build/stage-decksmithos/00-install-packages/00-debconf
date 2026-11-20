@@ -1,1 +1,1 @@
-nodm nodm/enabled boolean true
+xserver-xorg-legacy xserver-xorg-legacy/allowed_users select Console

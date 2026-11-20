@@ -46,6 +46,10 @@ if [[ -d "${DEFAULTS}" ]]; then
   done
 fi
 
+# --- Fit to the screen: finger-sized library rows, preferences dialog on screen ----
+# Only values DecksmithOS set itself are changed (see the script).
+/usr/local/bin/decksmithos-mixxx-autoconf "${SETTINGS}" 2>&1 | while read -r line; do log "${line}"; done
+
 # --- Library root directories (avoids the first-run directory dialog) --------------
 # Mixxx creates all tables with CREATE TABLE IF NOT EXISTS, so a database holding
 # only the "directories" table is completed by Mixxx's own schema migration.
@@ -158,4 +162,8 @@ CORES="${DECKSMITHOS_CORES:-2,3}"
 ARGS=(--settings-path "${SETTINGS}/")
 
 renice -n -5 $$ >/dev/null 2>&1 || true
+# No blocking sound-device dialogs: without a controller Mixxx starts silent
+# instead of waiting for a click (build/mixxx/patches/0002; ignored by an
+# unpatched Mixxx).
+export DECKSMITHOS_NO_SOUND_DIALOGS=1
 exec taskset -c "${CORES}" mixxx "${ARGS[@]}"

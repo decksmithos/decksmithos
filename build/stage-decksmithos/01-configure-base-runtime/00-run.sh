@@ -24,6 +24,7 @@ install -v -m 644 files/splash.png "${ROOTFS_DIR}/usr/share/plymouth/themes/deck
 install -v -m 644 files/decksmithos-storage-init.service "${ROOTFS_DIR}/etc/systemd/system/decksmithos-storage-init.service"
 install -v -m 755 files/decksmithos-init-storage "${ROOTFS_DIR}/usr/local/sbin/decksmithos-init-storage"
 install -v -m 755 files/decksmithos-mixxx "${ROOTFS_DIR}/usr/local/bin/decksmithos-mixxx"
+install -v -m 755 files/decksmithos-mixxx-autoconf files/decksmithos-mixxx-ui "${ROOTFS_DIR}/usr/local/bin/"
 # A/B slot selection via the bootloader's tryboot mode (autoboot.txt on p1).
 install -v -m 755 files/decksmithos-slot "${ROOTFS_DIR}/usr/local/sbin/decksmithos-slot"
 # Read-only root: decksmithos-overlay-init runs as init= (cmdline.txt written by
@@ -45,13 +46,8 @@ ln -sfn /usb2 "${ROOTFS_DIR}/media/usb2"
 # Stable ALSA name "decksmithos" for the controller's USB audio (see decksmithos-mixxx).
 install -v -m 644 files/asound.conf "${ROOTFS_DIR}/etc/asound.conf"
 
-sed -i 's/^NODM_ENABLED=.*/NODM_ENABLED=true/' ${ROOTFS_DIR}/etc/default/nodm
-sed -i "s/^NODM_USER=.*/NODM_USER=${FIRST_USER_NAME}/" ${ROOTFS_DIR}/etc/default/nodm
-#sed -i "s#^NODM_XSESSION=.*#NODM_XSESSION=/home/${FIRST_USER_NAME}/.xsession#" ${ROOTFS_DIR}/etc/default/nodm
-
 on_chroot <<EOF
 systemctl enable decksmithos-storage-init.service
-systemctl enable nodm
 
 systemctl disable serial-getty@ttyAMA0.service || true
 systemctl disable bluetooth || true

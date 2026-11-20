@@ -2,7 +2,7 @@
 Description=Initialize DecksmithOS storage partition on first boot
 DefaultDependencies=no
 After=local-fs.target systemd-udevd.service
-Before=multi-user.target nodm.service
+Before=multi-user.target decksmithos-session.service
 ConditionPathExists=!/dev/disk/by-label/storage
 
 [Service]

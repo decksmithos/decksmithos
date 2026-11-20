@@ -14,7 +14,7 @@ x11-xkb-utils
 xinit
 x11-xserver-utils
 openbox
-nodm
+xserver-xorg-legacy
 unclutter-xfixes
 plymouth
 plymouth-themes

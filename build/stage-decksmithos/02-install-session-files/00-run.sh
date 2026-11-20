@@ -87,6 +87,11 @@ install -v -m 644 files/45-evdev.conf "${ROOTFS_DIR}/etc/X11/xorg.conf.d/45-evde
 
 # Display-specific Xorg configuration is installed by ../03-display-profile.
 
-# Fast, clean stop of the X session at power off / restart (see the file).
-install -v -d -m 755 "${ROOTFS_DIR}/etc/systemd/system/nodm.service.d"
-install -v -m 644 files/nodm-decksmithos-stop.conf "${ROOTFS_DIR}/etc/systemd/system/nodm.service.d/decksmithos-stop.conf"
+# The X session (xinit + ~/.xsession + Mixxx) as a systemd service with a login
+# session for the user, instead of a display manager (nodm restarted its
+# session on SIGTERM, which made every shutdown wait for a timeout).
+install -v -m 644 files/decksmithos-session.service "${ROOTFS_DIR}/etc/systemd/system/decksmithos-session.service"
+on_chroot <<CHROOT
+systemctl enable decksmithos-session.service
+systemctl set-default graphical.target
+CHROOT
