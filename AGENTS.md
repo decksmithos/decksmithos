@@ -264,6 +264,19 @@ time before NTP). `decksmithos-clock` saves the time to
 wins when it is at or after the saved time, and only an RTC that lost
 the time is replaced by the saved time (both profiles).
 
+Time zone (implemented, verified on the CM5 2026-11-20): the image stays
+on `TIMEZONE_DEFAULT` (UTC); the choice is saved in
+`/storage/config/system/timezone` and `decksmithos-timezone.service`
+(after `storage.mount`, before sysinit and the session, ~25 ms) writes
+`/etc/localtime` and `/etc/timezone` into the overlay at every boot.
+Set it from the system menu ("Time zone": region, then city, 16 per page)
+or `decksmithos-timezone set Europe/Bucharest` (root; the menu goes
+through `decksmithos-system timezone-set`). Only zones from `zone.tab`,
+`UTC` and `Etc/UTC` are accepted (not paths, regions or tzdata's own
+files such as `posixrules`). The RTC, the saved clock and the journal stay
+in UTC; Mixxx reads the zone when it starts. `timedatectl set-timezone`
+writes only the overlay and is lost at restart.
+
 Machine ID: the image's `/etc/machine-id` is empty (read-only root);
 `decksmithos-overlay-init` writes a stable one into the overlay, derived
 from the board serial (md5 of `decksmithos-machine-id:<serial>`; it
@@ -551,15 +564,23 @@ and sends Ctrl+P via XTEST; works with the hidden menu bar) and "Skin"
 the screen disabled). `decksmithos-mixxx-ui set-skin` leaves the choice
 in `decksmithos-pending-skin` and stops Mixxx; the autoconf applies it
 before the next start, because Mixxx rewrites `mixxx.cfg` when it quits.
-`build/mixxx/patches/0002-decksmithos-appliance-ui.patch` adds
-`[App],show_preferences` (for a settings button in the skin's gear
-panel) and `DECKSMITHOS_NO_SOUND_DIALOGS` (set by `decksmithos-mixxx`:
-without a controller, Mixxx 2.5.6 stopped at a "No Output Devices" dialog
-that an appliance cannot answer). Published as
-`2.5.6+dfsg-3~deb13decksmithos2` (2026-11-20) and pinned; the
-"DecksmithOS Standalone" gear panel has a MIXXX / SETTINGS button on
-`[App],show_preferences`.
-`0003-decksmithos-sound-controller-hotplug.patch` (published as
+The patch series (2026-11-21, `build/mixxx/README.md`): `0000` the
+upstream 2.5 branch since 2.5.6 (`make-stable-patch.sh`), `0001` ronso0's
+`[Controls],show_preferences` (his commit from #13266, unchanged; the
+"DecksmithOS Standalone" gear panel's MIXXX / SETTINGS button uses it;
+`[App],show_preferences` of `~deb13decksmithos2`/`3` is gone), `0002`
+auto-enable controllers, `0003` a "do not show again" option for the
+"No Output Devices" warning (`[Soundcard] HideNoOutputWarning`, reset
+when an output is configured in the preferences, as ronso0 suggested on
+#13252; `decksmithos-mixxx-autoconf` sets it at every start, and while
+it is set Mixxx does not write `soundconfig.xml` back), `0004`
+`DECKSMITHOS_NO_SOUND_DIALOGS` for the busy/error dialogs only
+(appliance-only), `0005` sound and controller hotplug, `0006` the Auto
+DJ "Harmonic" ordering. Earlier: `0002-decksmithos-appliance-ui.patch`
+was published as `2.5.6+dfsg-3~deb13decksmithos2` (2026-11-20) and
+pinned; without a controller, Mixxx 2.5.6 stopped at a "No Output
+Devices" dialog that an appliance cannot answer.
+The sound and controller hotplug patch (now `0005`; published as
 `~deb13decksmithos3`; verified on the CM5 2026-11-20 with the Mixtrack
 Pro 3: Mixxx started without it in 1 s with no dialog; plugging it in
 gave sound and an auto-enabled, opened controller ~5 s later; unplugging
@@ -572,7 +593,8 @@ second; on a change it runs the hook (writes `soundconfig.xml`, prints
 the ALSA PCM `decksmithos`), queries the sound devices again, sets them
 up from `soundconfig.xml` and enumerates the controllers again
 (PortMidi restarted). Not while the preferences are open. A start
-without the output device no longer writes an empty `soundconfig.xml`.
+without the output device no longer writes an empty `soundconfig.xml`
+(now part of `0003`).
 `decksmithos-mixxx` therefore waits only 1 s (was 20) for the
 controller at start. `decksmithos-soundconfig` rewrites
 `soundconfig.xml` when it is missing, unchanged since it wrote it, or
@@ -599,7 +621,7 @@ is fixed at 5 s. `decksmithos-powerd` (root) handles it:
 
 -   short press: `decksmithos-menu` over Mixxx (Tk, full screen, touch
     sized). Power off, Restart, Restart Mixxx (two taps each), Calibrate
-    touchscreen, Show/Hide touches; dev only: Restart writable / Restart
+    touchscreen, Show/Hide touches, Time zone; dev only: Restart writable / Restart
     read-only. Slot panel: version, build date, profile and Mixxx version
     of A and B (`decksmithos-slot info`, read from
     `decksmithos-version.txt` in each boot partition); "Restart into slot
@@ -643,7 +665,10 @@ time measurements: `docs/boot-time.md`.
 Touch tools (`decksmithos-touch`): `calibrate` runs `xinput_calibrator`
 and stores the evdev axis calibration in
 `/storage/config/touch/evdev-axis-calibration`, applied by `.xsession`;
-`overlay on|off` starts `xcompmgr` plus `decksmithos-touch-overlay`
+`overlay on|off` (remembered in `/storage/config/touch/overlay`; `overlay
+session` at session start restores it, default on in dev, off in release;
+"Show/Hide touches" in the system menu, both profiles) starts `xcompmgr`
+plus `decksmithos-touch-overlay`
 (click-through ARGB window: fading discs for taps, trails for drags,
 growing disc while held, orange on right click; reads X RECORD for the
 mouse and the touch device itself (BTN_TOUCH, ABS_X/Y mapped like
@@ -942,7 +967,7 @@ these are not yet tested on DecksmithOS. The gaps:
 | 28 | Lighting: DMX, Hue, SoundSwitch, phrase-aware lights (Prime 4 G2, CDJ-3000/X) | No | Proposal: out of scope for now |
 | 29 | Boot time and power-loss behaviour (no flagship publishes them) | Unmeasured; read-only root and A/B slots | Measure and publish: could become a DecksmithOS strength |
 | 30 | Zone output, 10-band room EQ, multiple mic inputs (all-in-ones) | Depends on the controller's audio interface | Open; controller-agnostic, so only via what Mixxx supports |
-| 31 | Automatic mixing from a prepared playlist ("AI mode"; Engine DJ/rekordbox have smart playlists and auto-mix features) | Mixxx Auto DJ: plays a crate/playlist with fixed-length crossfades or intro/outro cues; no key/BPM ordering, no phrase-aligned transitions | **Decided (2026-11-20), staged:** (1) Auto DJ set up for DecksmithOS and started from the menu (sync/quantize, transition mode); (2) on-device playlist ordering by key compatibility (Camelot) and a BPM/energy curve, from Mixxx's own analysis; (3) later, separately: a transition engine as a JS mapping on a virtual MIDI device (sync, 16/32-beat aligned starts, EQ bass swap, outro loops), judged by listening on the hardware. No cloud or on-device LLM: release has no network, and a local model would compete with audio for CPU |
+| 31 | Automatic mixing from a prepared playlist ("AI mode"; Engine DJ/rekordbox have smart playlists and auto-mix features) | Mixxx Auto DJ: plays a crate/playlist with fixed-length crossfades or intro/outro cues; no key/BPM ordering, no phrase-aligned transitions | **Decided (2026-11-20), staged:** (1) Auto DJ set up for DecksmithOS and started from the menu (sync/quantize, transition mode); (2) queue ordering by key compatibility (Camelot) and tempo, from Mixxx's own analysis: **in progress (2026-11-21)** as `build/mixxx/patches/0006-decksmithos-autodj-harmonic-order.patch` ("Harmonic" button and `[AutoDJ],sort_harmonic`; tracks keep their key, unlike upstream draft PR #17519); (3) a transition engine as a JS mapping on a virtual MIDI device, no Mixxx patch: **first version (2026-11-21)** `mixxx/controllers/DecksmithOS-AutoDJ.js` on snd-virmidi card 7 ("VirMIDI 7-0", enabled by `decksmithos-mixxx-autoconf`): tempo and phase match within 8 %, keylock, EQ bass swap at the crossfader middle, slow return to the track's own tempo afterwards (upstream: daschuer on #9821, #11956). Later: 16/32-beat aligned starts, outro loops. Judged by listening on the hardware. Upstream has no ordering or beat-matched transitions (researched 2026-11-21; the unlicensed beatItAutoDJ script is reference only). No cloud or on-device LLM: release has no network, and a local model would compete with audio for CPU |
 
 ## 14. Instructions for coding agents
 

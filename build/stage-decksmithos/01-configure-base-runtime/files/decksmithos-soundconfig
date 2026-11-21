@@ -10,7 +10,7 @@
 # that variable); messages go to stderr. Exit 1 if there is no such card.
 #
 # Run by decksmithos-mixxx before Mixxx starts, and by Mixxx itself when the
-# ALSA cards change (DECKSMITHOS_SOUND_HOTPLUG_HOOK, build/mixxx/patches/0003),
+# ALSA cards change (DECKSMITHOS_SOUND_HOTPLUG_HOOK, build/mixxx/patches/0005),
 # so a controller plugged in later is picked up without a restart.
 #
 # soundconfig.xml is rewritten only if it does not exist, is still the one

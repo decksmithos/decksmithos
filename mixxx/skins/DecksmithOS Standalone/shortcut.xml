@@ -120,8 +120,8 @@
             </WidgetGroup>
 
             <!-- MIXXX — the preferences dialog (sound, controllers, library,
-                 skin...). [App],show_preferences is added by the DecksmithOS
-                 Mixxx package (build/mixxx/patches/0002). -->
+                 skin...). [Controls],show_preferences is added by the DecksmithOS
+                 Mixxx package (build/mixxx/patches/0001, ronso0's commit). -->
             <WidgetGroup>
               <ObjectName>ShortcutSectionSettings</ObjectName>
               <Layout>vertical</Layout>
@@ -145,7 +145,7 @@
                       <Size>me,55f</Size>
                       <State><Number>0</Number><Text>SETTINGS</Text></State>
                       <Connection>
-                        <ConfigKey>[App],show_preferences</ConfigKey>
+                        <ConfigKey>[Controls],show_preferences</ConfigKey>
                         <ButtonState>LeftButton</ButtonState>
                       </Connection>
                     </PushButton>

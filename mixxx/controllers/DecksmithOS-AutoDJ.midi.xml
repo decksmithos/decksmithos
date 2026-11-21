@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MixxxControllerPreset schemaVersion="1" mixxxVersion="2.5.0+">
+  <info>
+    <name>DecksmithOS Auto DJ</name>
+    <author>DecksmithOS</author>
+    <description>Beat-matched Auto DJ transitions with a bass swap (DecksmithOS). Runs on a virtual MIDI device; has no controls.</description>
+  </info>
+  <controller id="DecksmithOS-AutoDJ">
+    <scriptfiles>
+      <file functionprefix="DecksmithAutoDJ" filename="DecksmithOS-AutoDJ.js"/>
+    </scriptfiles>
+    <controls/>
+    <outputs/>
+  </controller>
+</MixxxControllerPreset>

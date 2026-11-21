@@ -1,0 +1,89 @@
+#!/bin/bash
+# DecksmithOS time zone (root). The root file system is read-only (overlay),
+# so the choice lives on /storage and is applied at every boot.
+#
+#   decksmithos-timezone apply       at boot: /etc/localtime and /etc/timezone
+#                                    from the saved zone (the image's zone if
+#                                    none is saved or it is not valid)
+#   decksmithos-timezone set ZONE    save ZONE (e.g. Europe/Bucharest) and
+#                                    apply it now
+#   decksmithos-timezone get         the zone in use
+#   decksmithos-timezone list        the selectable zones (zone.tab, plus UTC)
+#
+# Only the displayed local time changes: the RTC, the saved clock
+# (decksmithos-clock) and the journal stay in UTC. Programs read the zone
+# when they start; Mixxx uses it from its next start.
+set -Eeuo pipefail
+
+SAVED="/storage/config/system/timezone"
+ZONEINFO="/usr/share/zoneinfo"
+
+log() { echo "decksmithos-timezone: $*" >&2; logger -t decksmithos-timezone -- "$*" 2>/dev/null || true; }
+die() { log "ERROR: $*"; exit 1; }
+
+zones() {
+  { echo "UTC"; awk -F'\t' '!/^#/ && NF >= 3 {print $3}' "${ZONEINFO}/zone.tab"; } | sort -u
+}
+
+# Only the zones offered by "list" (zone.tab plus UTC) and Etc/UTC (the image
+# default), and only with an existing TZif file: rejects paths, regions and
+# tzdata's own files (posixrules, localtime, Factory, ...).
+valid_zone() {
+  local z="$1"
+  [[ "${z}" =~ ^[A-Za-z0-9+_-]+(/[A-Za-z0-9+_-]+)*$ ]] || return 1
+  [[ "${z}" == Etc/UTC ]] || zones | grep -qxF -- "${z}" || return 1
+  [[ "$(head -c 4 "${ZONEINFO}/${z}" 2>/dev/null)" == TZif ]]
+}
+
+current() {
+  local z
+  z="$(cat /etc/timezone 2>/dev/null || true)"
+  if [[ -z "${z}" ]]; then
+    z="$(readlink /etc/localtime 2>/dev/null || true)"
+    z="${z#*zoneinfo/}"
+  fi
+  echo "${z:-Etc/UTC}"
+}
+
+# /etc lives in the overlay: replace the link atomically.
+install_zone() {
+  local z="$1"
+  ln -sfn "${ZONEINFO}/${z}" /etc/.localtime.new
+  mv -fT /etc/.localtime.new /etc/localtime
+  echo "${z}" > /etc/.timezone.new
+  mv -f /etc/.timezone.new /etc/timezone
+}
+
+case "${1:-}" in
+  apply)
+    [[ -r "${SAVED}" ]] || exit 0
+    z="$(head -n 1 "${SAVED}" | tr -d '[:space:]')"
+    if valid_zone "${z}"; then
+      [[ "${z}" == "$(current)" ]] || install_zone "${z}"
+      log "time zone ${z}"
+    else
+      log "saved time zone '${z}' is not valid; keeping $(current)"
+    fi
+    ;;
+  set)
+    [[ "${EUID}" -eq 0 ]] || die "run as root"
+    z="${2:-}"
+    valid_zone "${z}" || die "unknown time zone '${z}'"
+    mountpoint -q /storage || die "/storage is not mounted; the zone would be lost at restart"
+    install -d -m 755 "$(dirname "${SAVED}")"
+    echo "${z}" > "${SAVED}.new"
+    sync "${SAVED}.new"
+    mv -f "${SAVED}.new" "${SAVED}"
+    install_zone "${z}"
+    log "time zone set to ${z}"
+    ;;
+  get)
+    current
+    ;;
+  list)
+    zones
+    ;;
+  *)
+    die "usage: decksmithos-timezone apply|set ZONE|get|list"
+    ;;
+esac

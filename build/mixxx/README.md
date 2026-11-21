@@ -14,6 +14,7 @@ would pull glibc, Qt and FFmpeg from sid into the image, so it is not used.
 |---|---|
 | `mixxx.conf` | Pinned source version, snapshot fallback, local version suffix |
 | `build-mixxx-deb.sh` | Fetch and verify the source, bump the version, install build deps, build |
+| `make-stable-patch.sh` | Make `patches/0000-*`: upstream stable-branch fixes since the release; checks our patches on top |
 | `pin-release.sh` | Pin a published release's `.deb`s by SHA256 into `release.sha256` |
 | `release.sha256` | Pinned release assets used by the image build (created by `pin-release.sh`) |
 | `../../.github/workflows/mixxx-deb.yml` | CI build on a native `ubuntu-24.04-arm` runner |
@@ -49,6 +50,45 @@ sudo docker run --rm --platform linux/arm64 \
 ```
 
 Set `MIXXX_NOCHECK=1` to skip the upstream test suite.
+
+## Patches and their order
+
+The build appends `patches/*.patch` (in name order) to Debian's quilt series,
+so the source is patched in this order:
+
+1. Debian's own patches (`debian/patches/series` of the source package).
+2. `0000-mixxx-<branch>-branch-<sha>.patch`: the bug fixes on the upstream
+   stable branch since the release Debian packages (for 2.5.6: branch `2.5`,
+   the future 2.5.7). Code, skins, controller mappings and CMake only; no CI,
+   packaging or translations; the version stays the release's.
+3. `0001-*` and later, on top of the stable branch: changes taken from
+   upstream developers that are not in a branch yet, then the DecksmithOS
+   patches. One change per patch, so that each can be dropped when upstream
+   has it, or sent upstream on its own:
+
+| Patch | What | Upstream |
+|---|---|---|
+| `0001-ronso0-gui-show-preferences-control` | `[Controls],show_preferences` opens the preferences (skin settings button) | ronso0's commit, proposed on #13266 |
+| `0002-decksmithos-auto-enable-controllers` | enable a never-configured controller when exactly one mapping matches | ours |
+| `0003-decksmithos-no-output-warning-setting` | "do not show again" for the "No Output Devices" warning; keeps `soundconfig.xml` meanwhile | for #13252 |
+| `0004-decksmithos-appliance-sound-dialogs` | `DECKSMITHOS_NO_SOUND_DIALOGS`: no busy/error sound dialogs at start | appliance only |
+| `0005-decksmithos-sound-controller-hotplug` | `DECKSMITHOS_SOUND_HOTPLUG_HOOK`: sound and controller hotplug | appliance only (upstream waits for PipeWire/libremidi) |
+| `0006-decksmithos-autodj-harmonic-order` | Auto DJ "Harmonic" ordering, `[AutoDJ],sort_harmonic` | ours |
+
+Refresh 0000 with `build/mixxx/make-stable-patch.sh [branch [commit]]`
+(default: head of `2.5`). It also tries each DecksmithOS patch on top and
+reports, per patch:
+
+| Result | Meaning |
+|---|---|
+| `ok` | applies |
+| `ALREADY UPSTREAM` | applies reversed: the stable branch has this change; delete the patch |
+| `PARTLY UPSTREAM` | some files already have the change; drop those hunks |
+| `CONFLICT` | upstream changed the code around it; refresh its context |
+
+When Debian packages the next release (e.g. 2.5.7), update `mixxx.conf`
+(see below) and regenerate 0000; it then holds only what came after that
+release, or delete it if there is nothing.
 
 ## Updating Mixxx
 

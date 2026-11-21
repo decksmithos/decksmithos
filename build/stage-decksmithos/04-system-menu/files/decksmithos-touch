@@ -4,7 +4,12 @@
 #   decksmithos-touch apply            apply the saved calibration (called by .xsession)
 #   decksmithos-touch calibrate        run xinput_calibrator, save and apply the result
 #   decksmithos-touch reset            forget the calibration
-#   decksmithos-touch overlay on|off|status
+#   decksmithos-touch overlay on|off|status|session
+#                                      on/off are remembered on /storage
+#                                      (config/touch/overlay); "session" starts
+#                                      the overlay at session start if it was left
+#                                      on (default: on in the dev profile, off in
+#                                      release)
 #                                      show touches as fading discs (starts the
 #                                      xcompmgr compositor while it is on)
 #
@@ -104,6 +109,23 @@ sys.exit(0 if d.get_selection_owner(d.intern_atom("_NET_WM_CM_S%d" % d.get_defau
   disown
 }
 
+OVERLAY_STATE="/storage/config/touch/overlay"
+
+remember_overlay() {
+  mkdir -p "$(dirname "${OVERLAY_STATE}")" 2>/dev/null && echo "$1" > "${OVERLAY_STATE}" 2>/dev/null || true
+}
+
+overlay_session() {
+  local state profile
+  state="$(cat "${OVERLAY_STATE}" 2>/dev/null)"
+  if [[ -z "${state}" ]]; then
+    profile="$(cat /etc/decksmithos/profile 2>/dev/null)"
+    [[ "${profile}" == dev ]] && state=on || state=off
+  fi
+  [[ "${state}" == on ]] && overlay_on
+  return 0
+}
+
 overlay_off() {
   pkill -u "$(id -u)" -f decksmithos-touch-overlay || true
   pkill -u "$(id -u)" -x xcompmgr || true
@@ -115,11 +137,12 @@ case "${1:-}" in
   reset)     reset_calibration ;;
   overlay)
     case "${2:-status}" in
-      on)     overlay_on ;;
-      off)    overlay_off ;;
-      status) overlay_running && echo on || { echo off; exit 1; } ;;
-      *)      die "usage: decksmithos-touch overlay on|off|status" ;;
+      on)      overlay_on; remember_overlay on ;;
+      off)     overlay_off; remember_overlay off ;;
+      session) overlay_session ;;
+      status)  overlay_running && echo on || { echo off; exit 1; } ;;
+      *)       die "usage: decksmithos-touch overlay on|off|status|session" ;;
     esac
     ;;
-  *) die "usage: decksmithos-touch apply|calibrate|reset|overlay on|off|status" ;;
+  *) die "usage: decksmithos-touch apply|calibrate|reset|overlay on|off|status|session" ;;
 esac

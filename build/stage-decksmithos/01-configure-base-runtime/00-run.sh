@@ -101,6 +101,10 @@ install -v -m 644 files/journald-decksmithos.conf "${ROOTFS_DIR}/etc/systemd/jou
 install -v -m 755 files/decksmithos-clock "${ROOTFS_DIR}/usr/local/sbin/decksmithos-clock"
 install -v -m 644 files/decksmithos-clock.service files/decksmithos-clock-save.service \
   files/decksmithos-clock-save.timer "${ROOTFS_DIR}/etc/systemd/system/"
+# Time zone: chosen in the system menu, saved on /storage, applied at boot
+# (the image itself stays on TIMEZONE_DEFAULT).
+install -v -m 755 files/decksmithos-timezone "${ROOTFS_DIR}/usr/local/sbin/decksmithos-timezone"
+install -v -m 644 files/decksmithos-timezone.service "${ROOTFS_DIR}/etc/systemd/system/"
 on_chroot <<CHROOT
-systemctl enable decksmithos-clock.service decksmithos-clock-save.timer
+systemctl enable decksmithos-clock.service decksmithos-clock-save.timer decksmithos-timezone.service
 CHROOT

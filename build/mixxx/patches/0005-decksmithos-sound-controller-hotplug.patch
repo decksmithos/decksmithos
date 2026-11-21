@@ -10,12 +10,43 @@ Description: Sound and controller hotplug for an appliance
     are queried again and set up from soundconfig.xml, and the controllers are
     enumerated again (PortMidi is restarted so that new MIDI devices appear).
     Not while the preferences dialog is open; retried after it is closed.
-  - Start-up without the output device does not overwrite soundconfig.xml
-    with an empty configuration (with DECKSMITHOS_NO_SOUND_DIALOGS).
 Author: DecksmithOS
 Forwarded: no
-Last-Update: 2026-11-20
+Last-Update: 2026-11-21
 ---
+diff --git a/src/controllers/midi/portmidienumerator.cpp b/src/controllers/midi/portmidienumerator.cpp
+index e7c3a38..e127049 100644
+--- a/src/controllers/midi/portmidienumerator.cpp
++++ b/src/controllers/midi/portmidienumerator.cpp
+@@ -180,8 +180,6 @@ bool shouldLinkInputToOutput(const QString& input_name,
+ QList<Controller*> PortMidiEnumerator::queryDevices() {
+     qDebug() << "Scanning PortMIDI devices:";
+ 
+-    int iNumDevices = Pm_CountDevices();
+-
+     QListIterator<Controller*> dev_it(m_devices);
+     while (dev_it.hasNext()) {
+         delete dev_it.next();
+@@ -189,6 +187,17 @@ QList<Controller*> PortMidiEnumerator::queryDevices() {
+ 
+     m_devices.clear();
+ 
++    // DecksmithOS: PortMidi lists the devices present at Pm_Initialize(). For
++    // hotplug (see MixxxMainWindow), restart it so that a controller plugged in
++    // after start-up is found; the controllers deleted above closed their
++    // streams.
++    if (qEnvironmentVariableIsSet("DECKSMITHOS_SOUND_HOTPLUG_HOOK")) {
++        Pm_Terminate();
++        Pm_Initialize();
++    }
++
++    int iNumDevices = Pm_CountDevices();
++
+     const PmDeviceInfo* inputDeviceInfo = nullptr;
+     const PmDeviceInfo* outputDeviceInfo = nullptr;
+     int inputDevIndex = -1;
+diff --git a/src/mixxxmainwindow.cpp b/src/mixxxmainwindow.cpp
+index d33e544..d62943c 100644
 --- a/src/mixxxmainwindow.cpp
 +++ b/src/mixxxmainwindow.cpp
 @@ -3,6 +3,9 @@
@@ -36,7 +67,7 @@ Last-Update: 2026-11-20
  #include "controllers/keyboard/keyboardeventfilter.h"
  #include "coreservices.h"
  #include "defs_urls.h"
-@@ -46,6 +50,7 @@
+@@ -45,6 +49,7 @@
  #include "skin/legacy/launchimage.h"
  #include "skin/skinloader.h"
  #include "soundio/soundmanager.h"
@@ -44,19 +75,10 @@ Last-Update: 2026-11-20
  #include "sources/soundsourceproxy.h"
  #include "track/track.h"
  #include "util/debug.h"
-@@ -403,7 +408,78 @@
+@@ -416,6 +421,71 @@ void MixxxMainWindow::initialize() {
+         m_pCoreServices->getSoundManager()->getConfig().writeToDisk();
+     }
  
-     // The user has either reconfigured devices or accepted no outputs,
-     // so it's now safe to write the new config to disk.
--    m_pCoreServices->getSoundManager()->getConfig().writeToDisk();
-+    // DecksmithOS: not when Mixxx started without its output device (no
-+    // controller plugged in yet): that would replace the configured device
-+    // with an empty configuration on disk.
-+    if (!noSoundDialogs ||
-+            !m_pCoreServices->getSoundManager()->getConfig().getOutputs().isEmpty()) {
-+        m_pCoreServices->getSoundManager()->getConfig().writeToDisk();
-+    }
-+
 +    // DecksmithOS: sound and controller hotplug. Mixxx 2.5 opens sound devices
 +    // and controllers only at start-up; an appliance must pick up a controller
 +    // (USB audio + MIDI) plugged in later, or unplugged and plugged in again,
@@ -121,35 +143,7 @@ Last-Update: 2026-11-20
 +                });
 +        pHotplugTimer->start(1000);
 +    }
- 
++
      // this has to be after the OpenGL widgets are created or depending on a
      // million different variables the first waveform may be horribly
---- a/src/controllers/midi/portmidienumerator.cpp
-+++ b/src/controllers/midi/portmidienumerator.cpp
-@@ -180,8 +180,6 @@
- QList<Controller*> PortMidiEnumerator::queryDevices() {
-     qDebug() << "Scanning PortMIDI devices:";
- 
--    int iNumDevices = Pm_CountDevices();
--
-     QListIterator<Controller*> dev_it(m_devices);
-     while (dev_it.hasNext()) {
-         delete dev_it.next();
-@@ -189,6 +187,17 @@
- 
-     m_devices.clear();
- 
-+    // DecksmithOS: PortMidi lists the devices present at Pm_Initialize(). For
-+    // hotplug (see MixxxMainWindow), restart it so that a controller plugged in
-+    // after start-up is found; the controllers deleted above closed their
-+    // streams.
-+    if (qEnvironmentVariableIsSet("DECKSMITHOS_SOUND_HOTPLUG_HOOK")) {
-+        Pm_Terminate();
-+        Pm_Initialize();
-+    }
-+
-+    int iNumDevices = Pm_CountDevices();
-+
-     const PmDeviceInfo* inputDeviceInfo = nullptr;
-     const PmDeviceInfo* outputDeviceInfo = nullptr;
-     int inputDevIndex = -1;
+     // corrupted. See bug 521509 -- bkgood ?? -- vrince

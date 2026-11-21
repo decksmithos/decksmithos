@@ -9,12 +9,23 @@ when it reports 0 mm (DSI panels), the diagonal from
 Settings written to mixxx.cfg:
   [Library] RowHeight    library rows about ROW_MM tall, finger sized
   [Preferences] geometry the preferences dialog fits the screen
+  [Controller] / [ControllerPreset] VirMIDI_7-0
+                         the Auto DJ transitions script (mapping
+                         DecksmithOS-AutoDJ.midi.xml) on the virtual MIDI
+                         device (snd-virmidi, card 7)
   [Config] ResizableSkin  a skin chosen in the system menu
                          (decksmithos-mixxx-ui set-skin leaves it in
                          decksmithos-pending-skin; applied here because Mixxx
                          rewrites mixxx.cfg when it quits)
 
-Only values DecksmithOS set itself are changed: the last automatic values are
+Always (the device cannot answer the dialog, and Mixxx resets the setting
+when an output device is configured in the preferences):
+  [Soundcard] HideNoOutputWarning 1
+                         no "No Output Devices" dialog when Mixxx starts
+                         before the controller (its USB audio) is plugged
+                         in (build/mixxx/patches/0003)
+
+Otherwise only values DecksmithOS set itself are changed: the last automatic values are
 kept in decksmithos-auto.json next to mixxx.cfg, and a value that differs from
 it was changed by the user (Mixxx preferences) and is left alone.
 
@@ -32,6 +43,10 @@ import sys
 ROW_MM = 6.0                 # finger-sized library rows
 ROW_MIN, ROW_MAX = 20, 64    # Mixxx default row height is 20 px
 DISPLAY_CONF = "/etc/decksmithos/display.conf"
+# Mixxx's config key for the virtual MIDI device: its PortMidi name
+# "VirMIDI 7-0" with spaces replaced (ControllerManager sanitizeDeviceName).
+AUTODJ_DEVICE = "VirMIDI_7-0"
+AUTODJ_MAPPING = "/usr/share/mixxx/controllers/DecksmithOS-AutoDJ.midi.xml"
 
 
 def screen():
@@ -120,6 +135,9 @@ def main():
         info = (None, None, None, None, "no screen")
     w, h, ppmm, inch, source = info
     wanted = {("[Preferences]", "geometry"): f"0,0,{w},{h}"} if w else {}
+    if os.path.isfile(AUTODJ_MAPPING):
+        wanted[("[Controller]", AUTODJ_DEVICE)] = "1"
+        wanted[("[ControllerPreset]", AUTODJ_DEVICE)] = AUTODJ_MAPPING
     if ppmm:
         row = max(ROW_MIN, min(ROW_MAX, round(ROW_MM * ppmm)))
         wanted[("[Library]", "RowHeight")] = str(row)
@@ -146,6 +164,11 @@ def main():
             auto[name] = value
         else:
             auto.pop(name, None)  # the user's value from now on
+    forced = {("[Soundcard]", "HideNoOutputWarning"): "1"}
+    for (section, key), value in forced.items():
+        if get(sections, section, key) != value:
+            put(sections, section, key, value)
+            changed.append(f"{section} {key} {value}")
     pending = os.path.join(settings, "decksmithos-pending-skin")
     try:
         skin = open(pending, encoding="utf-8").read().strip()

@@ -156,6 +156,9 @@ sync_decksmithos_files() {
   # Mixxx skins live in the repository root (mixxx/skins); stage 02 installs them.
   rsync -a --delete "${BUILD_DIR}/../mixxx/skins/" \
     "${PI_GEN_DIR}/stage-decksmithos/02-install-session-files/files/skins/"
+  # Mixxx controller mappings (mixxx/controllers), also installed by stage 02.
+  rsync -a --delete "${BUILD_DIR}/../mixxx/controllers/" \
+    "${PI_GEN_DIR}/stage-decksmithos/02-install-session-files/files/controllers/"
   fetch_mixxx_debs "${PI_GEN_DIR}/stage-decksmithos/00-install-packages/files/mixxx"
   # Demo tracks for the full image (stage 05; never part of an update file).
   if [[ "${DECKSMITHOS_DEMO_MUSIC:-1}" != 0 ]]; then

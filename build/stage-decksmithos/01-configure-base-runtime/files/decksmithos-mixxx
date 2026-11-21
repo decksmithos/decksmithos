@@ -126,8 +126,10 @@ CORES="${DECKSMITHOS_CORES:-2,3}"
 ARGS=(--settings-path "${SETTINGS}/")
 
 renice -n -5 $$ >/dev/null 2>&1 || true
-# No blocking sound-device dialogs: without a controller Mixxx starts silent
-# instead of waiting for a click (build/mixxx/patches/0002; ignored by an
-# unpatched Mixxx).
+# No blocking dialogs about busy or failing sound devices: Mixxx starts silent
+# instead of waiting for a click (build/mixxx/patches/0004; ignored by an
+# unpatched Mixxx). The "No Output Devices" warning (no controller plugged in)
+# is turned off by [Soundcard] HideNoOutputWarning (decksmithos-mixxx-autoconf,
+# patch 0003).
 export DECKSMITHOS_NO_SOUND_DIALOGS=1
 exec taskset -c "${CORES}" mixxx "${ARGS[@]}"

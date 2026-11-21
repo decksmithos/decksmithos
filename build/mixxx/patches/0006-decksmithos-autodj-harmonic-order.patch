@@ -1,0 +1,579 @@
+Description: Auto DJ: order the queue by key and tempo ("Harmonic")
+ A "Harmonic" button next to "Shuffle" in the Auto DJ view, and the control
+ [AutoDJ],sort_harmonic, order the Auto DJ queue (or the selected rows) for
+ mixing: compatible keys on the Camelot / Open Key wheel (same key, +-1 step,
+ relative major/minor) and small tempo changes (half/double tempo counts as
+ the same; beyond +-8 % costs extra; going down costs more than going up).
+ Greedy, from the track playing (or the next track of a running Auto DJ,
+ which stays first) or else from the slowest track. Tracks keep their key:
+ nothing is pitch shifted. Uses the key and BPM from Mixxx's analysis.
+ The ordering is in library/autodj/harmonicorder.h (header only, unit tested);
+ PlaylistDAO::reorderTracks() writes the new positions in one transaction.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-21
+---
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 6bcb65e..241cc11 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -1,6 +1,10 @@
+ #include "library/autodj/autodjprocessor.h"
+ 
++#include <algorithm>
++#include <optional>
++
+ #include "engine/channels/enginedeck.h"
++#include "library/autodj/harmonicorder.h"
+ #include "mixer/basetrackplayer.h"
+ #include "mixer/playermanager.h"
+ #include "moc_autodjprocessor.cpp"
+@@ -122,6 +126,7 @@ AutoDJProcessor::AutoDJProcessor(
+           m_coCrossfader(QStringLiteral("[Master]"), QStringLiteral("crossfader")),
+           m_coCrossfaderReverse(QStringLiteral("[Mixer Profile]"), QStringLiteral("xFaderReverse")),
+           m_shufflePlaylist(ConfigKey(kControlGroup, QStringLiteral("shuffle_playlist"))),
++          m_sortHarmonic(ConfigKey(kControlGroup, QStringLiteral("sort_harmonic"))),
+           m_skipNext(ConfigKey(kControlGroup, QStringLiteral("skip_next"))),
+           m_addRandomTrack(ConfigKey(kControlGroup, QStringLiteral("add_random_track"))),
+           m_fadeNow(ConfigKey(kControlGroup, QStringLiteral("fade_now"))),
+@@ -135,6 +140,10 @@ AutoDJProcessor::AutoDJProcessor(
+             &ControlPushButton::valueChanged,
+             this,
+             &AutoDJProcessor::controlShuffle);
++    connect(&m_sortHarmonic,
++            &ControlPushButton::valueChanged,
++            this,
++            &AutoDJProcessor::controlSortHarmonic);
+     connect(&m_skipNext, &ControlObject::valueChanged, this, &AutoDJProcessor::controlSkipNext);
+     connect(&m_addRandomTrack,
+             &ControlObject::valueChanged,
+@@ -200,6 +209,67 @@ AutoDJProcessor::AutoDJError AutoDJProcessor::shufflePlaylist(
+     return ADJ_OK;
+ }
+ 
++AutoDJProcessor::AutoDJError AutoDJProcessor::sortPlaylistHarmonic(
++        const QModelIndexList& selectedIndices) {
++    const auto harmonicTrack = [](const TrackPointer& pTrack) {
++        mixxx::autodj::HarmonicTrack track;
++        if (pTrack) {
++            track.bpm = pTrack->getBpm();
++            track.key = pTrack->getKey();
++        }
++        return track;
++    };
++
++    // Rows to order: the selection if more than one row is selected (like
++    // Shuffle), otherwise the whole queue.
++    QModelIndexList rows;
++    if (selectedIndices.size() > 1) {
++        for (const auto& index : selectedIndices) {
++            rows.append(index.siblingAtColumn(0));
++        }
++        std::sort(rows.begin(), rows.end(), [](const QModelIndex& a, const QModelIndex& b) {
++            return a.row() < b.row();
++        });
++    } else {
++        for (int row = 0; row < m_pAutoDJTableModel->rowCount(); ++row) {
++            rows.append(m_pAutoDJTableModel->index(row, 0));
++        }
++    }
++
++    // A running Auto DJ has the first queued track cued already: keep it in
++    // place and continue from it. Otherwise continue from the track playing,
++    // if any.
++    std::optional<mixxx::autodj::HarmonicTrack> previous;
++    if (m_eState != ADJ_DISABLED) {
++        const QModelIndex first = m_pAutoDJTableModel->index(0, 0);
++        rows.erase(std::remove_if(rows.begin(),
++                           rows.end(),
++                           [&first](const QModelIndex& index) {
++                               return index.row() == first.row();
++                           }),
++                rows.end());
++        previous = harmonicTrack(m_pAutoDJTableModel->getTrack(first));
++    } else {
++        for (const auto& pDeck : m_decks) {
++            if (pDeck->isPlaying()) {
++                previous = harmonicTrack(pDeck->getLoadedTrack());
++                break;
++            }
++        }
++    }
++    if (rows.size() < 2) {
++        return ADJ_OK;
++    }
++
++    QList<mixxx::autodj::HarmonicTrack> tracks;
++    tracks.reserve(rows.size());
++    for (const auto& index : std::as_const(rows)) {
++        tracks.append(harmonicTrack(m_pAutoDJTableModel->getTrack(index)));
++    }
++    m_pAutoDJTableModel->reorderTracks(rows, mixxx::autodj::harmonicOrder(tracks, previous));
++    return ADJ_OK;
++}
++
+ void AutoDJProcessor::fadeNow() {
+     if (m_eState != ADJ_IDLE) {
+         // we cannot fade if AutoDj is disabled or already fading
+@@ -602,6 +672,12 @@ void AutoDJProcessor::controlShuffle(double value) {
+     }
+ }
+ 
++void AutoDJProcessor::controlSortHarmonic(double value) {
++    if (value > 0.0) {
++        sortPlaylistHarmonic(QModelIndexList());
++    }
++}
++
+ void AutoDJProcessor::controlSkipNext(double value) {
+     if (value > 0.0) {
+         skipNext();
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index 4aae21d..48d7c82 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -200,6 +200,11 @@ class AutoDJProcessor : public QObject {
+     void setTransitionMode(TransitionMode newMode);
+ 
+     AutoDJError shufflePlaylist(const QModelIndexList& selectedIndices);
++    /// Orders the queue (or the selected rows) so that keys stay compatible
++    /// (Camelot wheel) and the tempo changes little and builds up; see
++    /// library/autodj/harmonicorder.h. The track already cued by a running
++    /// Auto DJ stays first, and the order continues from it.
++    AutoDJError sortPlaylistHarmonic(const QModelIndexList& selectedIndices);
+     AutoDJError skipNext();
+     void fadeNow();
+     AutoDJError toggleAutoDJ(bool enable);
+@@ -228,6 +233,7 @@ class AutoDJProcessor : public QObject {
+     void controlEnableChangeRequest(double value);
+     void controlFadeNow(double value);
+     void controlShuffle(double value);
++    void controlSortHarmonic(double value);
+     void controlSkipNext(double value);
+     void controlAddRandomTrack(double value);
+     void slotNumberOfDecksChanged(int decks);
+@@ -299,6 +305,7 @@ class AutoDJProcessor : public QObject {
+     PollingControlProxy m_coCrossfaderReverse;
+ 
+     ControlPushButton m_shufflePlaylist;
++    ControlPushButton m_sortHarmonic;
+     ControlPushButton m_skipNext;
+     ControlPushButton m_addRandomTrack;
+     ControlPushButton m_fadeNow;
+diff --git a/src/library/autodj/dlgautodj.cpp b/src/library/autodj/dlgautodj.cpp
+index f085dea..590db5a 100644
+--- a/src/library/autodj/dlgautodj.cpp
++++ b/src/library/autodj/dlgautodj.cpp
+@@ -91,6 +91,12 @@ DlgAutoDJ::DlgAutoDJ(WLibrary* parent,
+     setupActionButton(pushButtonFadeNow, &DlgAutoDJ::fadeNowButton, tr("Fade"));
+     setupActionButton(pushButtonSkipNext, &DlgAutoDJ::skipNextButton, tr("Skip"));
+     setupActionButton(pushButtonShuffle, &DlgAutoDJ::shufflePlaylistButton, tr("Shuffle"));
++    // No skin has an icon for this button yet: always show its text.
++    connect(pushButtonSortHarmonic,
++            &QPushButton::clicked,
++            this,
++            &DlgAutoDJ::sortHarmonicButton);
++    pushButtonSortHarmonic->setText(tr("Harmonic"));
+     setupActionButton(pushButtonAddRandomTrack, &DlgAutoDJ::addRandomTrackButton, tr("Random"));
+ 
+     m_enableBtnTooltip = tr(
+@@ -113,6 +119,11 @@ DlgAutoDJ::DlgAutoDJ(WLibrary* parent,
+             "Shuffle the content of the Auto DJ queue\n"
+             "\n"
+             "Shortcut: Shift+F9");
++    QString sortHarmonicBtnTooltip = tr(
++            "Order the Auto DJ queue for mixing: compatible keys (Camelot wheel)\n"
++            "and small tempo changes, building up from the slowest track.\n"
++            "Tracks keep their key. Orders only the selection if more than one\n"
++            "track is selected; the next track of a running Auto DJ stays first.");
+     QString addRandomTrackBtnTooltip = tr(
+             "Adds a random track from track sources (crates) to the Auto DJ queue.\n"
+             "If no track sources are configured, the track is added from the library instead.");
+@@ -150,6 +161,7 @@ DlgAutoDJ::DlgAutoDJ(WLibrary* parent,
+     pushButtonFadeNow->setToolTip(fadeBtnTooltip);
+     pushButtonSkipNext->setToolTip(skipBtnTooltip);
+     pushButtonShuffle->setToolTip(shuffleBtnTooltip);
++    pushButtonSortHarmonic->setToolTip(sortHarmonicBtnTooltip);
+     pushButtonAddRandomTrack->setToolTip(addRandomTrackBtnTooltip);
+     pushButtonRepeatPlaylist->setToolTip(repeatBtnTooltip);
+     spinBoxTransition->setToolTip(spinBoxTransitionTooltip);
+@@ -254,6 +266,13 @@ void DlgAutoDJ::shufflePlaylistButton(bool) {
+     m_pAutoDJProcessor->shufflePlaylist(indexList);
+ }
+ 
++void DlgAutoDJ::sortHarmonicButton(bool) {
++    QModelIndexList indexList = m_pTrackTableView->selectionModel()->selectedRows();
++
++    // Activate regardless of button being checked
++    m_pAutoDJProcessor->sortPlaylistHarmonic(indexList);
++}
++
+ void DlgAutoDJ::skipNextButton(bool) {
+     // Activate regardless of button being checked
+     m_pAutoDJProcessor->skipNext();
+diff --git a/src/library/autodj/dlgautodj.h b/src/library/autodj/dlgautodj.h
+index 9ac38a1..4fcfcf2 100644
+--- a/src/library/autodj/dlgautodj.h
++++ b/src/library/autodj/dlgautodj.h
+@@ -35,6 +35,7 @@ class DlgAutoDJ : public QWidget, public Ui::DlgAutoDJ, public LibraryView {
+ 
+   public slots:
+     void shufflePlaylistButton(bool buttonChecked);
++    void sortHarmonicButton(bool buttonChecked);
+     void skipNextButton(bool buttonChecked);
+     void fadeNowButton(bool buttonChecked);
+     void toggleAutoDJButton(bool enable);
+diff --git a/src/library/autodj/dlgautodj.ui b/src/library/autodj/dlgautodj.ui
+index 8336857..0b5cb2f 100644
+--- a/src/library/autodj/dlgautodj.ui
++++ b/src/library/autodj/dlgautodj.ui
+@@ -170,6 +170,22 @@
+         </property>
+        </widget>
+       </item>
++      <item>
++       <widget class="QPushButton" name="pushButtonSortHarmonic">
++        <property name="focusPolicy">
++         <enum>Qt::NoFocus</enum>
++        </property>
++        <property name="sizePolicy">
++         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
++          <horstretch>0</horstretch>
++          <verstretch>0</verstretch>
++         </sizepolicy>
++        </property>
++        <property name="checkable">
++         <bool>false</bool>
++        </property>
++       </widget>
++      </item>
+       <item>
+        <widget class="QPushButton" name="pushButtonAddRandomTrack">
+         <property name="focusPolicy">
+diff --git a/src/library/autodj/harmonicorder.h b/src/library/autodj/harmonicorder.h
+new file mode 100644
+index 0000000..eaf9e94
+--- /dev/null
++++ b/src/library/autodj/harmonicorder.h
+@@ -0,0 +1,123 @@
++#pragma once
++
++#include <QList>
++#include <algorithm>
++#include <cmath>
++#include <optional>
++
++#include "proto/keys.pb.h"
++#include "track/keyutils.h"
++
++namespace mixxx {
++namespace autodj {
++
++/// Key and tempo of one Auto DJ queue entry, as the analyzer stored them.
++struct HarmonicTrack {
++    /// 0 if not analyzed
++    double bpm = 0.0;
++    track::io::key::ChromaticKey key = track::io::key::INVALID;
++};
++
++/// Distance of two keys on the Camelot / Open Key wheel: 0 same key,
++/// 1 a neighbour (+-1 step, or the relative major/minor), 2 a diagonal or
++/// two steps, and so on. 2 when either key is unknown.
++inline int harmonicKeyDistance(track::io::key::ChromaticKey a,
++        track::io::key::ChromaticKey b) {
++    if (a == track::io::key::INVALID || b == track::io::key::INVALID) {
++        return 2;
++    }
++    const int na = KeyUtils::keyToOpenKeyNumber(a);
++    const int nb = KeyUtils::keyToOpenKeyNumber(b);
++    const int steps = std::abs(na - nb);
++    return std::min(steps, 12 - steps) +
++            (KeyUtils::keyIsMajor(a) != KeyUtils::keyIsMajor(b) ? 1 : 0);
++}
++
++/// Tempo change in percent from `from` to `to`, after taking the closest of
++/// half, same and double tempo (a 70 BPM track mixes into a 140 BPM one).
++/// Positive when the tempo goes up. std::nullopt if a tempo is unknown.
++inline std::optional<double> harmonicBpmChangePercent(double from, double to) {
++    if (!(from > 0.0) || !(to > 0.0)) {
++        return std::nullopt;
++    }
++    double best = to / from;
++    for (double factor : {0.5, 2.0}) {
++        const double ratio = to * factor / from;
++        if (std::abs(std::log(ratio)) < std::abs(std::log(best))) {
++            best = ratio;
++        }
++    }
++    return (best - 1.0) * 100.0;
++}
++
++/// Cost of playing `to` after `from`: key distance first, then the tempo
++/// change. A tempo change beyond the usual +-8 % pitch range costs extra, and
++/// going down in tempo costs a little more than going up, so that the set
++/// builds up instead of jumping back and forth.
++inline double harmonicTransitionCost(const HarmonicTrack& from, const HarmonicTrack& to) {
++    double cost = 2.0 * harmonicKeyDistance(from.key, to.key);
++    const auto change = harmonicBpmChangePercent(from.bpm, to.bpm);
++    if (!change) {
++        return cost + 4.0;
++    }
++    const double magnitude = std::abs(*change);
++    cost += 0.5 * magnitude;
++    if (*change < 0.0) {
++        cost += 0.25 * magnitude;
++    }
++    if (magnitude > 8.0) {
++        cost += 5.0;
++    }
++    return cost;
++}
++
++/// The order in which to play `tracks` (indices into it). Starts after
++/// `previous` (the track playing or cued before them) or, without it, with the
++/// slowest track, then always takes the cheapest next track
++/// (harmonicTransitionCost); ties keep the queue order. Tracks keep their own
++/// key: nothing is pitch shifted.
++inline QList<int> harmonicOrder(const QList<HarmonicTrack>& tracks,
++        const std::optional<HarmonicTrack>& previous = std::nullopt) {
++    QList<int> order;
++    if (tracks.isEmpty()) {
++        return order;
++    }
++    QList<int> remaining;
++    for (int i = 0; i < tracks.size(); ++i) {
++        remaining.append(i);
++    }
++    HarmonicTrack last;
++    if (previous) {
++        last = *previous;
++    } else {
++        // Warm up: the slowest analyzed track first.
++        int first = 0;
++        for (int i = 1; i < tracks.size(); ++i) {
++            if (tracks[i].bpm > 0.0 &&
++                    (!(tracks[first].bpm > 0.0) || tracks[i].bpm < tracks[first].bpm)) {
++                first = i;
++            }
++        }
++        order.append(first);
++        remaining.removeAt(first);
++        last = tracks[first];
++    }
++    while (!remaining.isEmpty()) {
++        int bestIndex = 0;
++        double bestCost = harmonicTransitionCost(last, tracks[remaining[0]]);
++        for (int i = 1; i < remaining.size(); ++i) {
++            const double cost = harmonicTransitionCost(last, tracks[remaining[i]]);
++            if (cost < bestCost) {
++                bestCost = cost;
++                bestIndex = i;
++            }
++        }
++        const int next = remaining.takeAt(bestIndex);
++        order.append(next);
++        last = tracks[next];
++    }
++    return order;
++}
++
++} // namespace autodj
++} // namespace mixxx
+diff --git a/src/library/dao/playlistdao.cpp b/src/library/dao/playlistdao.cpp
+index ffe6522..377c05b 100644
+--- a/src/library/dao/playlistdao.cpp
++++ b/src/library/dao/playlistdao.cpp
+@@ -1,6 +1,7 @@
+ #include "library/dao/playlistdao.h"
+ 
+ #include <QRandomGenerator>
++#include <algorithm>
+ #include <QtDebug>
+ 
+ #include "library/autodj/autodjprocessor.h"
+@@ -1341,6 +1342,41 @@ void PlaylistDAO::shuffleTracks(const int playlistId,
+     emit tracksMoved(QSet<int>{playlistId});
+ }
+ 
++void PlaylistDAO::reorderTracks(const int playlistId, const QList<int>& oldPositions) {
++    QList<int> newPositions = oldPositions;
++    std::sort(newPositions.begin(), newPositions.end());
++    VERIFY_OR_DEBUG_ASSERT(std::adjacent_find(newPositions.cbegin(), newPositions.cend()) ==
++            newPositions.cend()) {
++        return;
++    }
++    ScopedTransaction transaction(m_database);
++    QSqlQuery query(m_database);
++    // Positions are >= 1: park every moved track at minus its new position,
++    // then flip the signs, so that no two rows share a position meanwhile.
++    query.prepare(QStringLiteral(
++            "UPDATE PlaylistTracks SET position=:new_position "
++            "WHERE position=:old_position AND playlist_id=:id"));
++    query.bindValue(":id", playlistId);
++    for (int i = 0; i < oldPositions.size(); ++i) {
++        query.bindValue(":new_position", -newPositions.at(i));
++        query.bindValue(":old_position", oldPositions.at(i));
++        if (!query.exec()) {
++            LOG_FAILED_QUERY(query);
++            return;
++        }
++    }
++    query.prepare(QStringLiteral(
++            "UPDATE PlaylistTracks SET position=-position "
++            "WHERE position<0 AND playlist_id=:id"));
++    query.bindValue(":id", playlistId);
++    if (!query.exec()) {
++        LOG_FAILED_QUERY(query);
++        return;
++    }
++    transaction.commit();
++    emit tracksMoved(QSet<int>{playlistId});
++}
++
+ bool PlaylistDAO::isTrackInPlaylist(TrackId trackId, const int playlistId) const {
+     return m_playlistsTrackIsIn.contains(trackId, playlistId);
+ }
+diff --git a/src/library/dao/playlistdao.h b/src/library/dao/playlistdao.h
+index d798843..8de07a8 100644
+--- a/src/library/dao/playlistdao.h
++++ b/src/library/dao/playlistdao.h
+@@ -114,6 +114,9 @@ class PlaylistDAO : public QObject, public virtual DAO {
+             const int oldPosition, const int newPosition);
+     // shuffles all tracks in the position List
+     void shuffleTracks(const int playlistId, const QList<int>& positions, const QHash<int,TrackId>& allIds);
++    // Puts the tracks at oldPositions (in this order) at the sorted positions
++    // the list contains: a permutation of these positions.
++    void reorderTracks(const int playlistId, const QList<int>& oldPositions);
+     bool isTrackInPlaylist(TrackId trackId, const int playlistId) const;
+ 
+     void getPlaylistsTrackIsIn(TrackId trackId, QSet<int>* playlistSet) const;
+diff --git a/src/library/playlisttablemodel.cpp b/src/library/playlisttablemodel.cpp
+index 8239035..d3bd9af 100644
+--- a/src/library/playlisttablemodel.cpp
++++ b/src/library/playlisttablemodel.cpp
+@@ -3,6 +3,7 @@
+ #include "library/dao/playlistdao.h"
+ #include "library/dao/trackschema.h"
+ #include "library/queryutil.h"
++#include "util/assert.h"
+ #include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+ #include "moc_playlisttablemodel.cpp"
+@@ -343,6 +344,20 @@ void PlaylistTableModel::shuffleTracks(const QModelIndexList& shuffle, const QMo
+     m_pTrackCollectionManager->internalCollection()->getPlaylistDAO().shuffleTracks(m_iPlaylistId, positions, allIds);
+ }
+ 
++void PlaylistTableModel::reorderTracks(const QModelIndexList& rows, const QList<int>& order) {
++    VERIFY_OR_DEBUG_ASSERT(rows.size() == order.size()) {
++        return;
++    }
++    const int positionColumn = fieldIndex(ColumnCache::COLUMN_PLAYLISTTRACKSTABLE_POSITION);
++    QList<int> oldPositions;
++    oldPositions.reserve(order.size());
++    for (int i : order) {
++        oldPositions.append(rows.at(i).siblingAtColumn(positionColumn).data().toInt());
++    }
++    m_pTrackCollectionManager->internalCollection()->getPlaylistDAO().reorderTracks(
++            m_iPlaylistId, oldPositions);
++}
++
+ const QList<int> PlaylistTableModel::getSelectedPositions(const QModelIndexList& indices) const {
+     if (indices.isEmpty()) {
+         return {};
+diff --git a/src/library/playlisttablemodel.h b/src/library/playlisttablemodel.h
+index cbdc930..cdaaffb 100644
+--- a/src/library/playlisttablemodel.h
++++ b/src/library/playlisttablemodel.h
+@@ -22,6 +22,9 @@ class PlaylistTableModel final : public TrackSetTableModel {
+     void moveTrack(const QModelIndex& sourceIndex, const QModelIndex& destIndex) override;
+     void removeTrack(const QModelIndex& index);
+     void shuffleTracks(const QModelIndexList& shuffle, const QModelIndex& exclude);
++    /// Reorders the given rows (all at the same positions they take now):
++    /// rows[order[0]] first, then rows[order[1]], ...
++    void reorderTracks(const QModelIndexList& rows, const QList<int>& order);
+ 
+     bool isColumnInternal(int column) final;
+     bool isColumnHiddenByDefault(int column) final;
+diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
+index e1fa580..d49f180 100644
+--- a/src/test/autodjprocessor_test.cpp
++++ b/src/test/autodjprocessor_test.cpp
+@@ -1,4 +1,5 @@
+ #include "library/autodj/autodjprocessor.h"
++#include "library/autodj/harmonicorder.h"
+ 
+ #include <gmock/gmock.h>
+ #include <gtest/gtest.h>
+@@ -1700,3 +1701,72 @@ TEST_F(AutoDJProcessorTest, TrackZeroLength) {
+     // Signal that the request to load pTrack succeeded.
+     deck1.fakeTrackLoadedEvent(pTrack);
+ }
++
++namespace {
++using mixxx::autodj::harmonicKeyDistance;
++using mixxx::autodj::HarmonicTrack;
++namespace key = mixxx::track::io::key;
++} // namespace
++
++TEST(AutoDJHarmonicOrderTest, KeyDistance) {
++    // 8B = C major, 8A = A minor, 9B = G major, 7B = F major, 9A = E minor
++    EXPECT_EQ(0, harmonicKeyDistance(key::C_MAJOR, key::C_MAJOR));
++    EXPECT_EQ(1, harmonicKeyDistance(key::C_MAJOR, key::A_MINOR));
++    EXPECT_EQ(1, harmonicKeyDistance(key::C_MAJOR, key::G_MAJOR));
++    // across the wrap of the wheel: 8B (C major) and 7B (F major) are 1d and 12d
++    EXPECT_EQ(1, harmonicKeyDistance(key::C_MAJOR, key::F_MAJOR));
++    EXPECT_EQ(2, harmonicKeyDistance(key::C_MAJOR, key::E_MINOR));
++    EXPECT_EQ(1, harmonicKeyDistance(key::E_MAJOR, key::B_MAJOR));
++    EXPECT_EQ(6, harmonicKeyDistance(key::C_MAJOR, key::F_SHARP_MAJOR));
++    EXPECT_EQ(2, harmonicKeyDistance(key::C_MAJOR, key::INVALID));
++}
++
++TEST(AutoDJHarmonicOrderTest, BpmChangeUsesHalfAndDoubleTempo) {
++    EXPECT_NEAR(0.0, *mixxx::autodj::harmonicBpmChangePercent(70.0, 140.0), 1e-9);
++    EXPECT_NEAR(2.0, *mixxx::autodj::harmonicBpmChangePercent(125.0, 127.5), 1e-9);
++    EXPECT_NEAR(-50.0 / 3.0, *mixxx::autodj::harmonicBpmChangePercent(120.0, 100.0), 1e-9);
++    EXPECT_FALSE(mixxx::autodj::harmonicBpmChangePercent(0.0, 120.0));
++}
++
++TEST(AutoDJHarmonicOrderTest, OrdersByKeyAndTempo) {
++    const QList<HarmonicTrack> tracks = {
++            {128.0, key::F_SHARP_MAJOR}, // 0: far key
++            {124.0, key::A_MINOR},       // 1
++            {120.0, key::C_MAJOR},       // 2: slowest, first
++            {126.0, key::E_MINOR},       // 3
++            {124.0, key::G_MAJOR},       // 4
++    };
++    // 8B 120 -> 8A 124 (relative minor) -> 9A 126 (neighbour) -> 9B 124
++    // (relative major) -> the far key last.
++    EXPECT_EQ(QList<int>({2, 1, 3, 4, 0}), mixxx::autodj::harmonicOrder(tracks));
++    // Continue from a playing G major track at 124 BPM.
++    EXPECT_EQ(QList<int>({4, 3, 1, 2, 0}),
++            mixxx::autodj::harmonicOrder(tracks, HarmonicTrack{124.0, key::G_MAJOR}));
++    EXPECT_TRUE(mixxx::autodj::harmonicOrder({}).isEmpty());
++}
++
++TEST_F(AutoDJProcessorTest, SortHarmonic) {
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    const QList<std::pair<QString, std::pair<double, key::ChromaticKey>>> files = {
++            {"id3-test-data/cover-test-jpg.mp3", {128.0, key::F_SHARP_MAJOR}},
++            {"id3-test-data/cover-test-png.mp3", {124.0, key::A_MINOR}},
++            {"id3-test-data/cover-test-vbr.mp3", {120.0, key::C_MAJOR}},
++    };
++    QList<TrackPointer> tracks;
++    for (const auto& [location, bpmKey] : files) {
++        TrackPointer pTrack = getOrAddTrackByLocation(getTestDir().filePath(location));
++        ASSERT_TRUE(pTrack);
++        pTrack->trySetBpm(bpmKey.first);
++        pTrack->setKey(bpmKey.second, mixxx::track::io::key::USER);
++        tracks.append(pTrack);
++        pAutoDJTableModel->appendTrack(pTrack->getId());
++    }
++
++    // Auto DJ is disabled and no deck plays: the whole queue, slowest first.
++    EXPECT_EQ(AutoDJProcessor::ADJ_OK, pProcessor->sortPlaylistHarmonic({}));
++    pAutoDJTableModel->select();
++    ASSERT_EQ(3, pAutoDJTableModel->rowCount());
++    EXPECT_EQ(tracks[2]->getId(), pAutoDJTableModel->getTrackId(pAutoDJTableModel->index(0, 0)));
++    EXPECT_EQ(tracks[1]->getId(), pAutoDJTableModel->getTrackId(pAutoDJTableModel->index(1, 0)));
++    EXPECT_EQ(tracks[0]->getId(), pAutoDJTableModel->getTrackId(pAutoDJTableModel->index(2, 0)));
++}

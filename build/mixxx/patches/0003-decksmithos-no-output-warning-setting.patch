@@ -1,0 +1,119 @@
+Description: Option to not show the "No Output Devices" warning again
+ The start-up dialog "No Output Devices" gets a check box "Do not show this
+ warning again (until an output device is configured)", stored as
+ [Soundcard],HideNoOutputWarning. While it is set, Mixxx starts without audio
+ and without the dialog, and does not write the sound configuration back to
+ disk, so the configured output device is used again once it is present
+ (writing it back would drop the missing device). Applying a sound
+ configuration with an output device in the preferences resets it, as
+ suggested by ronso0 on #13252.
+ DecksmithOS sets it at every start (decksmithos-mixxx-autoconf): the
+ controller's USB audio is the output, and Mixxx may start before the
+ controller is plugged in; the device has no way to answer the dialog.
+Author: DecksmithOS
+Bug: https://github.com/mixxxdj/mixxx/issues/13252
+Forwarded: no
+Last-Update: 2026-11-21
+---
+diff --git a/src/mixxxmainwindow.cpp b/src/mixxxmainwindow.cpp
+index 16afc57..812cd01 100644
+--- a/src/mixxxmainwindow.cpp
++++ b/src/mixxxmainwindow.cpp
+@@ -371,7 +371,22 @@ void MixxxMainWindow::initialize() {
+     // that says "mixxx will barely work with no outs".
+     // In case of persisting errors, the user has already received a message
+     // above. So we can just check the output count here.
+-    while (m_pCoreServices->getSoundManager()->getConfig().getOutputs().isEmpty()) {
++    // The user may have chosen not to be warned again: then start without
++    // outputs and keep the configuration on disk, so that the configured
++    // device is used again once it is present (e.g. a controller with
++    // built-in audio that is plugged in later).
++    const bool hideNoOutputWarning =
++            m_pCoreServices->getSettings()->getValue<bool>(
++                    hideNoOutputWarningConfigKey(), false);
++    bool keepConfigOnDisk = false;
++    if (hideNoOutputWarning &&
++            m_pCoreServices->getSoundManager()->getConfig().getOutputs().isEmpty()) {
++        qWarning() << "No output sound device; starting without audio"
++                   << "(the warning is disabled)";
++        keepConfigOnDisk = true;
++    }
++    while (!keepConfigOnDisk &&
++            m_pCoreServices->getSoundManager()->getConfig().getOutputs().isEmpty()) {
+         // Exit when we press the Exit button in the noSoundDlg dialog
+         // only call it if result != OK
+         bool continueClicked = false;
+@@ -385,7 +400,9 @@ void MixxxMainWindow::initialize() {
+ 
+     // The user has either reconfigured devices or accepted no outputs,
+     // so it's now safe to write the new config to disk.
+-    m_pCoreServices->getSoundManager()->getConfig().writeToDisk();
++    if (!keepConfigOnDisk) {
++        m_pCoreServices->getSoundManager()->getConfig().writeToDisk();
++    }
+ 
+     // this has to be after the OpenGL widgets are created or depending on a
+     // million different variables the first waveform may be horribly
+@@ -730,6 +747,12 @@ QDialog::DialogCode MixxxMainWindow::noOutputDlg(bool* continueClicked) {
+             "</ul></html>"
+     );
+ 
++    // Users who run Mixxx without outputs on purpose, or whose output device
++    // is often not plugged in at start-up, can turn this warning off.
++    QCheckBox* pDontShowAgain = new QCheckBox(
++            tr("Do not show this warning again (until an output device is configured)"));
++    msgBox.setCheckBox(pDontShowAgain);
++
+     QPushButton* continueButton =
+             msgBox.addButton(tr("Continue"), QMessageBox::ActionRole);
+     QPushButton* reconfigureButton =
+@@ -743,6 +766,9 @@ QDialog::DialogCode MixxxMainWindow::noOutputDlg(bool* continueClicked) {
+ 
+         if (msgBox.clickedButton() == continueButton) {
+             *continueClicked = true;
++            if (pDontShowAgain->isChecked()) {
++                m_pCoreServices->getSettings()->setValue(hideNoOutputWarningConfigKey(), true);
++            }
+             return QDialog::Accepted;
+         } else if (msgBox.clickedButton() == reconfigureButton) {
+             msgBox.hide();
+diff --git a/src/preferences/dialog/dlgprefsound.cpp b/src/preferences/dialog/dlgprefsound.cpp
+index 3390032..c88c2ba 100644
+--- a/src/preferences/dialog/dlgprefsound.cpp
++++ b/src/preferences/dialog/dlgprefsound.cpp
+@@ -329,6 +329,11 @@ void DlgPrefSound::slotApply() {
+     } else {
+         m_settingsModified = false;
+         m_bLatencyChanged = false;
++        // An output device is configured again: warn again if it is missing
++        // at a later start.
++        if (!m_config.getOutputs().isEmpty()) {
++            m_pSettings->setValue(hideNoOutputWarningConfigKey(), false);
++        }
+     }
+     m_bSkipConfigClear = true;
+     loadSettings(); // in case SM decided to change anything it didn't like
+diff --git a/src/soundio/soundmanagerconfig.h b/src/soundio/soundmanagerconfig.h
+index 40dd9c1..40639f0 100644
+--- a/src/soundio/soundmanagerconfig.h
++++ b/src/soundio/soundmanagerconfig.h
+@@ -9,10 +9,19 @@
+ #include <QString>
+ 
+ #include "audio/types.h"
++#include "preferences/configobject.h"
+ #include "soundio/soundmanagerutil.h"
+ 
+ class SoundManager;
+ 
++/// Set when the user chose not to be warned again that no output device is
++/// configured (the start-up "No Output Devices" dialog). Mixxx then starts
++/// without audio silently and keeps the sound configuration on disk. Reset
++/// when an output device is configured in the preferences (#13252).
++inline ConfigKey hideNoOutputWarningConfigKey() {
++    return ConfigKey(QStringLiteral("[Soundcard]"), QStringLiteral("HideNoOutputWarning"));
++}
++
+ class SoundManagerConfig {
+   public:
+     explicit SoundManagerConfig(

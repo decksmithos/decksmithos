@@ -13,6 +13,8 @@ Author: DecksmithOS
 Forwarded: no
 Last-Update: 2026-11-19
 ---
+diff --git a/src/controllers/controllermanager.cpp b/src/controllers/controllermanager.cpp
+index 37d5796..8cbfe7d 100644
 --- a/src/controllers/controllermanager.cpp
 +++ b/src/controllers/controllermanager.cpp
 @@ -1,7 +1,9 @@
@@ -25,7 +27,7 @@ Last-Update: 2026-11-19
  
  #include "controllers/controller.h"
  #include "controllers/controllerlearningeventfilter.h"
-@@ -68,6 +70,99 @@
+@@ -68,6 +70,99 @@ QFileInfo findMappingFile(const QString& pathOrFilename, const QStringList& path
  // kept for backwards compatibility.
  const QString kSettingsGroup = QLatin1String("[ControllerPreset]");
  
@@ -125,7 +127,7 @@ Last-Update: 2026-11-19
  } // anonymous namespace
  
  QString firstAvailableFilename(QSet<QString>& filenames,
-@@ -257,6 +352,23 @@
+@@ -257,6 +352,23 @@ void ControllerManager::slotSetUpDevices() {
          // The filename for this device name.
          QString deviceName = sanitizeDeviceName(name);
  

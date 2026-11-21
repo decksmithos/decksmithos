@@ -33,11 +33,13 @@ openbox-session &
 # Touchscreen calibration saved on /storage (decksmithos-touch calibrate).
 /usr/local/bin/decksmithos-touch apply || true
 
-# Dev profile: show touches (compositor + overlay) and the dev-mode notice
-# once Mixxx is on screen.
+# Touches on screen (compositor + overlay) if they were left on in the system
+# menu ("Show touches"; default on in dev, off in release), started once Mixxx
+# is on screen: the compositor would paint over the splash.
+(/usr/local/bin/decksmithos-mixxx-ui wait-window 120; /usr/local/bin/decksmithos-touch overlay session) &
+
+# Dev profile: the dev-mode notice once Mixxx is on screen.
 if [ "\$(cat /etc/decksmithos/profile 2>/dev/null)" = "dev" ]; then
-  # After Mixxx is on screen: the compositor would paint over the splash.
-  (/usr/local/bin/decksmithos-mixxx-ui wait-window 120; /usr/local/bin/decksmithos-touch overlay on) &
   (/usr/local/bin/decksmithos-mixxx-ui wait-window 120; sleep 3; /usr/local/bin/decksmithos-dev-banner) &
 fi
 
@@ -67,6 +69,17 @@ if [ -d files/skins ]; then
 else
   echo "WARNING: files/skins missing (run via build.sh); only built-in Mixxx skins installed"
 fi
+
+# DecksmithOS controller mappings (synced from mixxx/controllers by build.sh):
+# the Auto DJ transitions script runs on a virtual MIDI device (snd-virmidi,
+# card 7: "VirMIDI 7-0"), enabled by decksmithos-mixxx-autoconf.
+if [ -d files/controllers ]; then
+  install -v -m 644 -t "${ROOTFS_DIR}/usr/share/mixxx/controllers" files/controllers/*
+else
+  echo "WARNING: files/controllers missing (run via build.sh); no DecksmithOS mappings installed"
+fi
+install -v -m 644 -D files/snd-virmidi.modprobe.conf "${ROOTFS_DIR}/etc/modprobe.d/decksmithos-virmidi.conf"
+install -v -m 644 -D files/snd-virmidi.modules-load.conf "${ROOTFS_DIR}/etc/modules-load.d/decksmithos-virmidi.conf"
 
 # soundconfig.xml is not shipped: decksmithos-mixxx generates it for the detected
 # controller audio (a config without outputs makes Mixxx stop at a dialog).

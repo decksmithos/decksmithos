@@ -16,6 +16,7 @@
 #   update-install PATH  install it into the inactive slot (progress lines)
 #   bootloader-status  installed and included EEPROM versions (epoch seconds)
 #   bootloader-update  write the included bootloader if it is newer (never older)
+#   timezone-set ZONE  save and apply the time zone (decksmithos-timezone set)
 set -Eeuo pipefail
 
 MIXXX_STOP_SECONDS=15
@@ -173,7 +174,10 @@ case "${1:-}" in
   bootloader-update)
     bootloader_update
     ;;
+  timezone-set)
+    decksmithos-timezone set "${2:-}"
+    ;;
   *)
-    die "usage: decksmithos-system poweroff|reboot|reboot-writable|reboot-readonly|restart-mixxx|slots|try-slot|commit-slot|rootfs-status|update-find|update-check PATH|update-install PATH|bootloader-status|bootloader-update"
+    die "usage: decksmithos-system poweroff|reboot|reboot-writable|reboot-readonly|restart-mixxx|slots|try-slot|commit-slot|rootfs-status|update-find|update-check PATH|update-install PATH|bootloader-status|bootloader-update|timezone-set ZONE"
     ;;
 esac

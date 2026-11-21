@@ -10,7 +10,7 @@ through `sudo decksmithos-system <action>` (/etc/sudoers.d/decksmithos-system).
   decksmithos-menu --message TITLE TEXT
                               full-screen notice without buttons (power off)
 
-Sections: actions (power, restart, Mixxx, touch, dev root mode), system
+Sections: actions (power, restart, Mixxx, touch, time zone, dev root mode), system
 update from USB (decksmithos.update in the root of a stick), bootloader
 EEPROM update, and the A/B slots with "Restart into slot X".
 """
@@ -131,6 +131,33 @@ def system_info():
     return "   ·   ".join(parts)
 
 
+def timezone_current():
+    try:
+        return subprocess.run(["decksmithos-timezone", "get"], capture_output=True,
+                              text=True, timeout=5).stdout.strip() or "?"
+    except (OSError, subprocess.TimeoutExpired):
+        return "?"
+
+
+def timezone_list():
+    """{region: [zone, ...]} from decksmithos-timezone list; UTC is its own region."""
+    try:
+        out = subprocess.run(["decksmithos-timezone", "list"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    regions = {}
+    for zone in out.split():
+        regions.setdefault(zone.split("/", 1)[0], []).append(zone)
+    return regions
+
+
+def zone_label(zone):
+    """'America/Argentina/Buenos_Aires' -> 'Argentina / Buenos Aires'."""
+    rest = zone.split("/", 1)[1] if "/" in zone else zone
+    return rest.replace("_", " ").replace("/", " / ")
+
+
 class Menu:
     def __init__(self, root):
         self.root = root
@@ -218,6 +245,7 @@ class Menu:
             ("Mixxx settings", lambda b: self.mixxx_settings(), PANEL, True),
             (f"Skin\n{self.skin_label()}", lambda b: self.draw_skins(), PANEL, True),
             ("Calibrate touchscreen", lambda b: self.calibrate(), PANEL, True),
+            (f"Time zone\n{timezone_current()}", lambda b: self.draw_regions(), PANEL, True),
         ]
         overlay_on = subprocess.run(["decksmithos-touch", "overlay", "status"],
                                     capture_output=True).returncode == 0
@@ -530,6 +558,93 @@ class Menu:
         back.configure(command=lambda: (self.clear_page(), self.draw_main()))
         back.pack(anchor="w", pady=(self.pad, 0), ipadx=self.pad)
         self.reset_idle()
+
+    # --- time zone ------------------------------------------------------------------
+    ZONES_PER_PAGE = 16
+    ZONE_COLS = 4
+
+    def zone_grid(self, title, note, items, back, page=0, redraw=None):
+        """A page of large buttons (label, command) with Back and, if needed, paging."""
+        self.clear_page()
+        self.header(self.page, title)
+        box = tk.Frame(self.page, bg=BG)
+        box.pack(fill="both", expand=True, padx=self.pad * 2, pady=self.pad * 2)
+        tk.Label(box, text=note, font=self.f_text, bg=BG, fg=DIM, anchor="w").pack(fill="x", pady=(0, self.pad))
+        grid = tk.Frame(box, bg=BG)
+        grid.pack(fill="both", expand=True)
+        per = self.ZONES_PER_PAGE
+        pages = max(1, (len(items) + per - 1) // per)
+        page = max(0, min(page, pages - 1))
+        shown = items[page * per:(page + 1) * per]
+        cols = self.ZONE_COLS
+        for i, (label, cmd, color) in enumerate(shown):
+            btn = self.button(grid, label, None, color=color)
+            btn.configure(font=self.f_text, command=lambda b=btn, c=cmd: c(b))
+            btn.grid(row=i // cols, column=i % cols, sticky="nsew", padx=self.pad // 2, pady=self.pad // 2)
+        for c in range(cols):
+            grid.columnconfigure(c, weight=1, uniform="zones")
+        for r in range((per + cols - 1) // cols):
+            grid.rowconfigure(r, weight=1, uniform="zones")
+        row = tk.Frame(box, bg=BG)
+        row.pack(fill="x", pady=(self.pad, 0))
+        b = self.button(row, "Back", None, color=PANEL)
+        b.configure(command=back)
+        b.pack(side="left", ipadx=self.pad)
+        if pages > 1:
+            nxt = self.button(row, "Next ›", None, color=PANEL, enabled=page < pages - 1)
+            nxt.configure(command=lambda: redraw(page + 1))
+            nxt.pack(side="right", ipadx=self.pad)
+            tk.Label(row, text=f"{page + 1} / {pages}", font=self.f_text, bg=BG, fg=DIM).pack(side="right", padx=self.pad)
+            prv = self.button(row, "‹ Previous", None, color=PANEL, enabled=page > 0)
+            prv.configure(command=lambda: redraw(page - 1))
+            prv.pack(side="right", ipadx=self.pad)
+        self.reset_idle()
+
+    def draw_regions(self):
+        regions = timezone_list()
+        cur = timezone_current()
+        cur_region = cur.split("/", 1)[0]
+        items = []
+        for region in sorted(regions, key=lambda r: (r != "UTC", r)):
+            zones = regions[region]
+            color = OK if region == cur_region or (region == "UTC" and cur in ("UTC", "Etc/UTC")) else PANEL
+            if zones == [region]:  # UTC: no city page
+                items.append((region, lambda b, z=region: self.confirm(
+                    b, f"Tap again: {z}", lambda: self.set_timezone(z)), color))
+            else:
+                items.append((region, lambda b, r=region: self.draw_zones(r), color))
+        self.zone_grid("Time zone", f"Now: {cur}. Choose the region.", items,
+                       back=lambda: (self.clear_page(), self.draw_main()))
+
+    def draw_zones(self, region, page=None):
+        zones = timezone_list().get(region, [])
+        cur = timezone_current()
+        if page is None:  # open on the page with the current zone
+            page = zones.index(cur) // self.ZONES_PER_PAGE if cur in zones else 0
+        items = [(zone_label(z) + ("  ✓" if z == cur else ""),
+                  lambda b, z=z: self.confirm(b, f"Tap again: {zone_label(z)}", lambda: self.set_timezone(z)),
+                  OK if z == cur else PANEL) for z in zones]
+        self.zone_grid(f"Time zone: {region}", f"Now: {cur}. Choose the nearest city.", items,
+                       back=self.draw_regions, page=page,
+                       redraw=lambda p: self.draw_zones(region, p))
+
+    def set_timezone(self, zone):
+        ok = system("timezone-set", zone, capture=True) is not None
+        try:
+            now = subprocess.run(["date", "+%H:%M  %Z"], capture_output=True, text=True,
+                                 timeout=3).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            now = "?"
+        if ok:
+            self.result_page("Time zone", True, f"Time zone set to {zone}. Local time: {now}.",
+                             ["Kept on /storage, so it stays after restarts and updates. "
+                              "Mixxx shows it from its next start."],
+                             [("Restart Mixxx", PANEL, lambda b: self.confirm(
+                                 b, "Tap again to restart Mixxx", lambda: self.run_and_quit("restart-mixxx"))),
+                              ("Close", PANEL, lambda b: self.close())])
+        else:
+            self.result_page("Time zone", False, f"The time zone was not changed (still {timezone_current()}).",
+                             [], [("Close", PANEL, lambda b: self.close())])
 
     def calibrate(self):
         self.close()

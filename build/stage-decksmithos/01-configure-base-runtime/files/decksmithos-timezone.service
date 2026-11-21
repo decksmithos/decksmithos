@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply the time zone saved on /storage
+DefaultDependencies=no
+After=storage.mount
+Before=sysinit.target display-manager.service
+ConditionPathIsMountPoint=/storage
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/decksmithos-timezone apply
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,58 @@
+Description: GUI: add control [Controls],show_preferences
+ A control that opens the preferences dialog, so that a skin (or a controller)
+ can offer a settings button: DecksmithOS runs Mixxx without menu bar or
+ keyboard. Taken unchanged from ronso0's commit, which he proposed on
+ mixxxdj/mixxx#13266 ("To move on here I suggest to add a Pref button. I
+ already have it in my custom build"); not in a Mixxx branch yet.
+Author: ronso0 <ronso0@mixxx.org>
+Origin: other, https://github.com/ronso0/mixxx/commit/e1cfea4b987f7895af5973bc8d033d329a39d281
+Bug: https://github.com/mixxxdj/mixxx/issues/13266
+Forwarded: not-needed
+Last-Update: 2026-11-21
+---
+diff --git a/src/mixxxmainwindow.cpp b/src/mixxxmainwindow.cpp
+index ae4be7b..16afc57 100644
+--- a/src/mixxxmainwindow.cpp
++++ b/src/mixxxmainwindow.cpp
+@@ -319,6 +319,13 @@ void MixxxMainWindow::initialize() {
+             Qt::DirectConnection);
+ #endif
+ 
++    m_pShowPreferences = std::make_unique<ControlObject>(
++            ConfigKey(QStringLiteral("[Controls]"), QStringLiteral("show_preferences")));
++    connect(m_pShowPreferences.get(),
++            &ControlObject::valueChanged,
++            this,
++            &MixxxMainWindow::slotOptionsPreferences);
++
+     // Connect signals to the menubar. Should be done before emit skinLoaded.
+     connectMenuBar();
+ 
+@@ -1079,9 +1086,11 @@ void MixxxMainWindow::slotViewFullScreen(bool toggle) {
+ }
+ 
+ void MixxxMainWindow::slotOptionsPreferences() {
+-    m_pPrefDlg->show();
+-    m_pPrefDlg->raise();
+-    m_pPrefDlg->activateWindow();
++    if (!m_pPrefDlg->isVisible()) {
++        m_pPrefDlg->show();
++        m_pPrefDlg->raise();
++        m_pPrefDlg->activateWindow();
++    }
+ }
+ 
+ void MixxxMainWindow::slotNoVinylControlInputConfigured() {
+diff --git a/src/mixxxmainwindow.h b/src/mixxxmainwindow.h
+index 512498a..a11befc 100644
+--- a/src/mixxxmainwindow.h
++++ b/src/mixxxmainwindow.h
+@@ -149,6 +149,8 @@ class MixxxMainWindow : public QMainWindow {
+     DlgPreferences* m_pPrefDlg;
+     parented_ptr<DlgKeywheel> m_pKeywheel;
+ 
++    std::unique_ptr<ControlObject> m_pShowPreferences;
++
+ #ifdef __ENGINEPRIME__
+     // Library exporter
+     std::unique_ptr<mixxx::LibraryExporter> m_pLibraryExporter;

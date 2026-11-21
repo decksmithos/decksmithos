@@ -1,0 +1,38 @@
+Description: Appliance: no start-up dialogs about busy or failing sound devices
+ With DECKSMITHOS_NO_SOUND_DIALOGS set in the environment, the start-up dialogs
+ about sound devices that are busy or fail to open (Retry / Reconfigure / Exit)
+ are skipped: Mixxx starts without audio and logs a warning; the sound hotplug
+ (0005) sets the devices up again later. A device without mouse or keyboard
+ cannot answer them. DecksmithOS only; the "No Output Devices" warning has its
+ own setting (0003).
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-21
+---
+diff --git a/src/mixxxmainwindow.cpp b/src/mixxxmainwindow.cpp
+index 812cd01..d33e544 100644
+--- a/src/mixxxmainwindow.cpp
++++ b/src/mixxxmainwindow.cpp
+@@ -350,10 +350,22 @@ void MixxxMainWindow::initialize() {
+     // Sound hardware setup
+     // Try to open configured devices. If that fails, display dialogs
+     // that allow to either retry, reconfigure devices or exit.
++    // DecksmithOS: an appliance without mouse or keyboard cannot answer the
++    // busy/error dialogs below. With DECKSMITHOS_NO_SOUND_DIALOGS set, Mixxx
++    // starts without audio instead and only logs a warning; the sound
++    // hotplug (DECKSMITHOS_SOUND_HOTPLUG_HOOK) sets the devices up later.
++    // (The "No Output Devices" warning has its own setting,
++    // [Soundcard],HideNoOutputWarning.)
++    const bool noSoundDialogs = qEnvironmentVariableIsSet("DECKSMITHOS_NO_SOUND_DIALOGS");
+     bool retryClicked;
+     do {
+         retryClicked = false;
+         SoundDeviceStatus result = m_pCoreServices->getSoundManager()->setupDevices();
++        if (noSoundDialogs && result != SoundDeviceStatus::Ok) {
++            qWarning() << "DecksmithOS: sound devices could not be opened"
++                       << static_cast<int>(result) << "; starting without audio";
++            break;
++        }
+         if (result == SoundDeviceStatus::ErrorDeviceCount ||
+                 result == SoundDeviceStatus::ErrorExcessiveOutputChannel) {
+             if (soundDeviceBusyDlg(&retryClicked) != QDialog::Accepted) {
