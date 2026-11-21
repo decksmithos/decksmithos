@@ -14,6 +14,11 @@ dtparam=pciex1_gen=3
 # has a CR2032, which must never be charged. Add dtparam=rtc_bbat_vchg=3000000
 # only on a board fitted with a rechargeable cell (official ML-2020 Li-Mn).
 
+# Fan connector (J14, 4 pins: 5 V, GND, PWM, tach) of the CM5 IO board: the
+# kernel's pwm-fan driver runs a 5 V PWM fan by the SoC temperature (same
+# trip points as the Pi 5). The enclosure has a 40 mm exhaust fan.
+dtparam=cooling_fan=on
+
 # disable onboard wifi
 dtoverlay=disable-wifi
 
