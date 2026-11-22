@@ -7,13 +7,14 @@
      shown lights up ([Skin],dsm_lit_<name>); tapping it again closes the
      library page, like the browse buttons of a standalone player.
        PLAYLIST  Playlists
-       BROWSE    the library page as it was left
+       BROWSE    the library page as it was left; tapped again (in any
+                 section) it closes it
        AUTO DJ   the Auto DJ queue
        SEARCH    Tracks (all music), focus on the search box
-       MENU      skin settings page ([Tab],shortcut)
-       BACK      one level up in the sidebar (a folder's parent, a list's
-                 section); at the top it closes the library page. Shown on
-                 the library page only. -->
+       MENU      skin settings page ([Tab],shortcut); tapped again, back to
+                 the main page
+     No BACK button: every page closes with a second tap on its lit button,
+     and the sidebar is in reach of a finger. -->
 <Template>
   <WidgetGroup>
     <ObjectName>Topbar</ObjectName>
@@ -58,36 +59,6 @@
         <SetVariable name="objname">TopNavBtn</SetVariable>
         <SetVariable name="push">false</SetVariable>
       </Template>
-
-      <!-- BACK: last, only on the library page (its place stays reserved so
-           the other buttons do not move) -->
-      <WidgetGroup>
-        <Layout>horizontal</Layout>
-        <Size>116f,48f</Size>
-        <Children>
-          <WidgetGroup>
-            <Layout>horizontal</Layout>
-            <Size>116f,48f</Size>
-            <Children>
-              <PushButton>
-                <ObjectName>TopNavBtnBack</ObjectName>
-                <Size>110f,38f</Size>
-                <NumberStates>2</NumberStates>
-                <LeftClickIsPushButton>true</LeftClickIsPushButton>
-                <State><Number>0</Number><Text>BACK</Text></State>
-                <State><Number>1</Number><Text>BACK</Text></State>
-                <Connection>
-                  <ConfigKey>[Skin],dsm_nav_back</ConfigKey>
-                </Connection>
-              </PushButton>
-            </Children>
-            <Connection>
-              <ConfigKey>[Skin],show_maximized_library</ConfigKey>
-              <BindProperty>visible</BindProperty>
-            </Connection>
-          </WidgetGroup>
-        </Children>
-      </WidgetGroup>
 
       <WidgetGroup><Size>0me,48f</Size></WidgetGroup>
 

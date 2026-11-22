@@ -10,16 +10,14 @@
 // missing control is retried every second (up to two minutes).
 //
 //   [Skin],dsm_nav_playlist   library page, Playlists
-//   [Skin],dsm_nav_browse     library page as it was left
+//   [Skin],dsm_nav_browse     library page as it was left; closes it again
 //   [Skin],dsm_nav_autodj     library page, Auto DJ (the queue)
 //   [Skin],dsm_nav_search     library page, Tracks (all music), focus on
 //                             the search box
-//   [Skin],dsm_nav_back       one level up in the sidebar; at the top it
-//                             closes the library page
 //   The button of the section shown is lit ([Skin],dsm_lit_<name>); tapping
-//   it again closes the library page. Sections are opened with
-//   [Library],show_<key> and followed with [Library],active_<key>,
-//   sidebar_up / sidebar_at_top (Mixxx patch 0015).
+//   it again closes the library page (there is no BACK button). Sections
+//   are opened with [Library],show_<key> and followed with
+//   [Library],active_<key> (Mixxx patch 0015).
 //   [Skin],dsm_xpad_<n>       X-PAD: while held, the BEAT FX effect
 //                             ([EffectRack1_EffectUnit1], focused effect or
 //                             effect 1) is on with its time (parameter 1) at
@@ -36,7 +34,7 @@ var DecksmithSkin = {};
 
 DecksmithSkin.XPAD_BEATS = [1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2, 3 / 4, 1, 2];
 DecksmithSkin.RFX = ["brake_s", "brake_l", "spin_s", "spin_l", "mute", "duck", "buildup"];
-DecksmithSkin.NAV = ["search", "playlist", "autodj", "browse", "back"];
+DecksmithSkin.NAV = ["search", "playlist", "autodj", "browse"];
 DecksmithSkin.DECKS = 2; // the skin has RELEASE FX pads for decks 1 and 2
 DecksmithSkin.RETRY_MS = 1000;
 DecksmithSkin.RETRY_MAX = 120;
@@ -166,13 +164,9 @@ DecksmithSkin.closeLibrary = function() {
 };
 
 DecksmithSkin.navigate = function(name) {
-    if (name === "back") {
-        if (engine.getValue("[Library]", "sidebar_at_top") > 0) {
-            this.closeLibrary();
-        } else {
-            engine.setValue("[Library]", "sidebar_up", 1);
-            engine.setValue("[Library]", "sidebar_up", 0);
-        }
+    if (name === "browse" && this.libraryShown()) {
+        // BROWSE opens or closes the library page, whatever section is shown
+        this.closeLibrary();
         return;
     }
     if (this.litButton() === name) {

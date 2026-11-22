@@ -565,10 +565,11 @@ Sidebar, patch 0015); `decksmithos-mixxx-autoconf` sets the order Playlists,
 Auto DJ, History, Crates, Recordings, Tracks, Rekordbox, Serato, Analyze and
 hides the folder tree (Sources; decided 2026-11-22: Tracks and SEARCH cover
 all drives, and two DJs' drives at once are avoided at events) and iTunes.
-The top bar (PLAYLIST, BROWSE, AUTO DJ, SEARCH, MENU, BACK) opens sections
+The top bar (PLAYLIST, BROWSE, AUTO DJ, SEARCH, MENU) opens sections
 with `[Library],show_<key>` through the skin bridge; the button of the
-section shown is lit, a second tap closes the library page, BACK goes one
-sidebar level up and closes the page at the top (like a CDJ); SEARCH
+section shown is lit, a second tap closes the library page (BROWSE closes it
+from any section); no BACK button (removed 2026-11-22: with touch lists and
+second-tap close it had no use left); SEARCH
 searches Tracks (all music). EJECT buttons for /usb and /usb2 in the library
 bar (patch 0017, `decksmithos-system eject`: unmount and detach; refused
 while a track from the drive plays). rekordbox/Serato drives are imported

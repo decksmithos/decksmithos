@@ -1032,13 +1032,12 @@ font-size:25px;
 
 /* Top bar */
 #Topbar { background-color: #0b0b0d; border-bottom: 1px solid #2a2a30; }
-#TopNavBtn, #TopNavBtnPlain, #TopNavBtnBack {
+#TopNavBtn {
   font-size: 18px; color: #e8e8ec; background-color: #1d1d22;
   border: 1px solid #45454d; border-radius: 3px;
 }
-#TopNavBtnPlain[value="1"] { color: #e8e8ec; border-color: #45454d; }
-#TopNavBtn[value="1"], #TopNavBtnBack { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
-#TopNavBtn:pressed, #TopNavBtnPlain:pressed, #TopNavBtnBack:pressed { background-color: #2d2d35; }
+#TopNavBtn[value="1"] { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
+#TopNavBtn:pressed { background-color: #2d2d35; }
 #TopbarClock, #TopbarRecDuration { font-size: 18px; color: #e8e8ec; }
 #TopbarRecDuration[highlight="1"] { color: #ff3b30; }
 #TopbarRecCircle { font-size: 14px; color: #55555c; qproperty-alignment: 'AlignRight | AlignVCenter'; }
@@ -1114,7 +1113,7 @@ font-size:25px;
 #ZoomBtn { font-size: 22px; color: #c8c8cc; border: 1px solid #45454d; background-color: #000; }
 #ZoomBtn[value="1"] { color: #fff; border-color: #4b93ff; }
 #ZoomLabel { font-size: 15px; color: #4b93ff; }
-#BeatFX_Ch, #BeatFX_ChMaster, #BeatFX_OnOff, #ZoomBtn, #DeckQuantize, #DeckTagMT, #DeckTagSync, #TopNavBtn, #TopNavBtnPlain, #TopNavBtnBack, #PadHotcue { padding: 0px; }
+#BeatFX_Ch, #BeatFX_ChMaster, #BeatFX_OnOff, #ZoomBtn, #DeckQuantize, #DeckTagMT, #DeckTagSync, #TopNavBtn, #PadHotcue { padding: 0px; }
 
 /* Library page */
 #SidebarContainer { background-color: #0b0b0d; }
