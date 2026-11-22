@@ -82,7 +82,11 @@ so the source is patched in this order:
 | `0012-decksmithos-touch-scroll` | `DECKSMITHOS_TOUCH_SCROLL`: library sidebar and track tables scroll by dragging (kinetic); no dragging tracks out of them then | appliance only |
 | `0013-decksmithos-browse-sources` | `DECKSMITHOS_BROWSE_SOURCES="LABEL=/path:..."`: "Computer" becomes "Sources" with only these folders, each shown while a drive is mounted there (checked every 2 s) | appliance only |
 | `0014-decksmithos-touch-keyboard` | `DECKSMITHOS_TOUCH_KEYBOARD`: on-screen keyboard at the bottom of the window while the search box or any other text field has the focus | appliance only |
-| `0015-decksmithos-library-sidebar` | sidebar order / hidden / labels (`[Library] SidebarOrder`, `SidebarHidden`, `SidebarLabels`, editor in Preferences > Library > Sidebar); `[Library],show_<key>` opens a section | ours |
+| `0015-decksmithos-library-sidebar` | sidebar order / hidden / labels (`[Library] SidebarOrder`, `SidebarHidden`, `SidebarLabels`, editor in Preferences > Library > Sidebar); `[Library],show_<key>` opens a section, `active_<key>`, `sidebar_up`, `sidebar_at_top` | ours |
+| `0016-decksmithos-usb-library-import` | `DECKSMITHOS_USB_IMPORT`: a rekordbox/Serato drive's playlists and crates become locked playlists "USB ▸ ..." first in Playlists (gone when the drive is removed); the rekordbox analysis (grid, cues, loops, phrases, key, colour) is applied to its tracks, rekordbox wins; never writes to the drive. ANLZ/PDB and crate reading shared with the Rekordbox/Serato views | appliance only |
+| `0017-decksmithos-removable-drives` | `DECKSMITHOS_DRIVES` / `DECKSMITHOS_EJECT_COMMAND`: `[Drives],mounted_<n>`, `eject_<n>`, `eject_error_<n>` for EJECT buttons | appliance only |
+| `0018-decksmithos-thread-placement` | `DECKSMITHOS_AUDIO_CPUS`: the audio thread moves to its own CPU; `DECKSMITHOS_BACKGROUND_NICE`: analysis and library scan below the GUI | appliance only |
+| `0019-decksmithos-no-scan-dialog` | `DECKSMITHOS_NO_SCAN_DIALOG`: no library scan window (scans started by a new drive run in the background) | appliance only |
 
 Refresh 0000 with `build/mixxx/make-stable-patch.sh [branch [commit]]`
 (default: head of `2.5`). It also tries each DecksmithOS patch on top and

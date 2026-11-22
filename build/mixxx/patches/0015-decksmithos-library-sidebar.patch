@@ -1,27 +1,32 @@
-Description: Library sidebar: order, hide and rename sections; show controls
+Description: Library sidebar: order, hide and rename sections; navigation controls
  The sidebar sections (library features) follow [Library] SidebarOrder (keys
  = icon names, comma separated; unlisted ones follow in Mixxx's order),
  [Library] SidebarHidden hides sections and [Library] SidebarLabels
  (key=Label;...) renames them. Preferences > Library > Sidebar edits all
  three: tick to show, double-click to rename, drag or Up/Down to order; the
  order and hidden sections apply at the next start, labels at once.
- [Library],show_<key> (show_tracks, show_autodj, show_playlist, show_crates,
- show_computer, show_history, ...) selects and opens a section, so a skin or
- controller can jump to it without counting sidebar rows.
- Mixxx has no way to order or rename the sidebar.
+ Controls for skins and controllers, so that they never count sidebar rows:
+ [Library],show_<key> (show_tracks, show_autodj, show_playlist,
+ show_crates, show_computer, show_history, ...) selects and opens a section;
+ [Library],active_<key> is 1 while that section or one of its lists is
+ shown; [Library],sidebar_up selects the parent of the selected sidebar item
+ (a folder's parent, a list's section); [Library],sidebar_at_top is 1 while
+ a section itself is selected. Mixxx has no way to order or rename the
+ sidebar.
 Author: DecksmithOS
 Forwarded: no
 Last-Update: 2026-11-22
 ---
 diff --git a/src/library/library.cpp b/src/library/library.cpp
-index 3a17c062..54f2446f 100644
+index 3a17c062..77a5c8a8 100644
 --- a/src/library/library.cpp
 +++ b/src/library/library.cpp
-@@ -2,9 +2,12 @@
+@@ -2,9 +2,13 @@
  
  #include <QApplication>
  #include <QDir>
 +#include <QHash>
++#include <QItemSelectionModel>
 +#include <algorithm>
  #include <QMessageBox>
  
@@ -30,7 +35,7 @@ index 3a17c062..54f2446f 100644
  #include "controllers/keyboard/keyboardeventfilter.h"
  #include "library/analysis/analysisfeature.h"
  #include "library/autodj/autodjfeature.h"
-@@ -45,6 +48,49 @@ namespace {
+@@ -45,6 +49,49 @@ namespace {
  
  const mixxx::Logger kLogger("Library");
  
@@ -80,7 +85,7 @@ index 3a17c062..54f2446f 100644
  } // namespace
  
  using namespace mixxx::library::prefs;
-@@ -257,6 +303,76 @@ Library::Library(
+@@ -257,6 +304,114 @@ Library::Library(
      m_editMetadataSelectedClick = m_pConfig->getValue(
              kEditMetadataSelectedClickConfigKey,
              kEditMetadataSelectedClickDefault);
@@ -89,6 +94,23 @@ index 3a17c062..54f2446f 100644
 +}
 +
 +void Library::addFeaturesToSidebar() {
++    m_pSidebarUp = std::make_unique<ControlPushButton>(
++            ConfigKey(kLibraryGroup, QStringLiteral("sidebar_up")));
++    connect(m_pSidebarUp.get(), &ControlObject::valueChanged, this, [this](double value) {
++        if (value <= 0 || !m_pSidebarWidget) {
++            return;
++        }
++        const QModelIndex parent = m_pSidebarWidget->currentIndex().parent();
++        if (parent.isValid()) {
++            m_pSidebarWidget->selectIndex(parent);
++            m_pSidebarModel->clicked(parent);
++        }
++    });
++    m_pSidebarAtTop = std::make_unique<ControlObject>(
++            ConfigKey(kLibraryGroup, QStringLiteral("sidebar_at_top")));
++    m_pSidebarAtTop->setReadOnly();
++    m_pSidebarAtTop->forceSet(1.0);
++
 +    const QStringList hidden = configList(m_pConfig, kSidebarHiddenKey);
 +    const QList<LibraryFeature*> features =
 +            orderedFeatures(m_features, configList(m_pConfig, kSidebarOrderKey));
@@ -115,6 +137,27 @@ index 3a17c062..54f2446f 100644
 +                }
 +            });
 +    m_showFeatureControls.push_back(std::move(pControl));
++
++    auto pActive = std::make_unique<ControlObject>(
++            ConfigKey(kLibraryGroup, QStringLiteral("active_") + pFeature->iconName()));
++    pActive->setReadOnly();
++    m_activeFeatureControls.insert(pFeature, pActive.get());
++    m_activeControlsOwner.push_back(std::move(pActive));
++    // A feature shows its root page or one of its lists
++    connect(pFeature, &LibraryFeature::switchToView, this, [this, pFeature]() {
++        setActiveFeature(pFeature);
++    });
++    connect(pFeature, &LibraryFeature::showTrackModel, this, [this, pFeature]() {
++        setActiveFeature(pFeature);
++    });
++}
++
++void Library::setActiveFeature(LibraryFeature* pFeature) {
++    for (auto it = m_activeFeatureControls.constBegin();
++            it != m_activeFeatureControls.constEnd();
++            ++it) {
++        it.value()->forceSet(it.key() == pFeature ? 1.0 : 0.0);
++    }
 +}
 +
 +QList<Library::SidebarEntry> Library::sidebarEntries(bool mixxxDefaults) const {
@@ -157,7 +200,23 @@ index 3a17c062..54f2446f 100644
  }
  
  Library::~Library() = default;
-@@ -471,7 +587,11 @@ void Library::addFeature(LibraryFeature* feature) {
+@@ -333,6 +488,15 @@ void Library::bindSidebarWidget(WLibrarySidebar* pSidebarWidget) {
+ 
+     // Setup the sources view
+     pSidebarWidget->setModel(m_pSidebarModel);
++    m_pSidebarWidget = pSidebarWidget;
++    connect(pSidebarWidget->selectionModel(),
++            &QItemSelectionModel::currentChanged,
++            this,
++            [this](const QModelIndex& current) {
++                if (m_pSidebarAtTop) {
++                    m_pSidebarAtTop->forceSet(current.parent().isValid() ? 0.0 : 1.0);
++                }
++            });
+     connect(m_pSidebarModel,
+             &SidebarModel::selectIndex,
+             pSidebarWidget,
+@@ -471,7 +635,11 @@ void Library::addFeature(LibraryFeature* feature) {
          return;
      }
      m_features.push_back(feature);
@@ -171,19 +230,21 @@ index 3a17c062..54f2446f 100644
              &LibraryFeature::pasteFromSidebar,
              this,
 diff --git a/src/library/library.h b/src/library/library.h
-index 0c9523ba..2605ca59 100644
+index 0c9523ba..ead2cd66 100644
 --- a/src/library/library.h
 +++ b/src/library/library.h
-@@ -4,6 +4,8 @@
+@@ -3,7 +3,10 @@
+ #include <QFont>
  #include <QList>
  #include <QObject>
++#include <QHash>
  #include <QPointer>
 +#include <memory>
 +#include <vector>
  
  #include "analyzer/trackanalysisscheduler.h"
  #include "library/library_decl.h"
-@@ -42,6 +44,8 @@ class LibraryExporter;
+@@ -42,6 +45,8 @@ class LibraryExporter;
  
  // A Library class is a container for all the model-side aspects of the library.
  // A library widget can be attached to the Library object by calling bindLibraryWidget.
@@ -192,7 +253,7 @@ index 0c9523ba..2605ca59 100644
  class Library: public QObject {
      Q_OBJECT
  
-@@ -73,6 +77,26 @@ class Library: public QObject {
+@@ -73,6 +78,30 @@ class Library: public QObject {
  
      void addFeature(LibraryFeature* feature);
  
@@ -204,7 +265,11 @@ index 0c9523ba..2605ca59 100644
 +    ///   [Library] SidebarLabels  key=Label pairs, separated by ';'
 +    /// The key of a section is its icon name: tracks, autodj, playlist,
 +    /// crates, computer, recordings, history, prepare, rekordbox, serato, ...
-+    /// [Library],show_<key> selects a section (not if hidden).
++    /// [Library],show_<key> selects a section (not if hidden);
++    /// [Library],active_<key> is 1 while that section (or one of its lists)
++    /// is shown. [Library],sidebar_up selects the parent of the selected
++    /// sidebar item (a folder's parent folder, a playlist's section);
++    /// [Library],sidebar_at_top is 1 while a section itself is selected.
 +    struct SidebarEntry {
 +        QString key;
 +        QString title; // Mixxx's own title
@@ -219,7 +284,7 @@ index 0c9523ba..2605ca59 100644
      /// Needed for exposing models to QML
      LibraryTableModel* trackTableModel() const;
  
-@@ -166,6 +190,10 @@ class Library: public QObject {
+@@ -166,6 +195,16 @@ class Library: public QObject {
      parented_ptr<LibraryControl> m_pLibraryControl;
  
      QList<LibraryFeature*> m_features;
@@ -227,6 +292,12 @@ index 0c9523ba..2605ca59 100644
 +    void addShowFeatureControl(LibraryFeature* pFeature);
 +    bool m_bSidebarDeferred = true;
 +    std::vector<std::unique_ptr<ControlPushButton>> m_showFeatureControls;
++    QHash<LibraryFeature*, ControlObject*> m_activeFeatureControls;
++    std::vector<std::unique_ptr<ControlObject>> m_activeControlsOwner;
++    void setActiveFeature(LibraryFeature* pFeature);
++    std::unique_ptr<ControlPushButton> m_pSidebarUp;
++    std::unique_ptr<ControlObject> m_pSidebarAtTop;
++    QPointer<WLibrarySidebar> m_pSidebarWidget;
      const static QString m_sTrackViewName;
      const static QString m_sAutoDJViewName;
      WLibrary* m_pLibraryWidget;

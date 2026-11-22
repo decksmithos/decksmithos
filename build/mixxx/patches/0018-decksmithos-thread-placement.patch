@@ -1,0 +1,151 @@
+Description: Thread placement for an appliance (DECKSMITHOS_AUDIO_CPUS)
+ Linux only; without the variables nothing changes.
+ DECKSMITHOS_AUDIO_CPUS="3": the PortAudio callback (engine) thread moves
+ itself to these CPUs on its first callback; DecksmithOS keeps them free of
+ everything else (systemd CPUAffinity, irqaffinity), so that the GUI, the
+ waveforms, disk reads and other processes never delay the audio.
+ DECKSMITHOS_BACKGROUND_NICE=10: track analysis and the library scan run
+ with this nice value, below the GUI.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/src/analyzer/analyzerthread.cpp b/src/analyzer/analyzerthread.cpp
+index a81f8848..3ed5d7c3 100644
+--- a/src/analyzer/analyzerthread.cpp
++++ b/src/analyzer/analyzerthread.cpp
+@@ -3,6 +3,7 @@
+ #include <mutex>
+ 
+ #include "analyzer/analyzerbeats.h"
++#include "util/threadplacement.h"
+ #include "analyzer/analyzerebur128.h"
+ #include "analyzer/analyzergain.h"
+ #include "analyzer/analyzerkey.h"
+@@ -88,6 +89,8 @@ AnalyzerThread::AnalyzerThread(
+ }
+ 
+ void AnalyzerThread::doRun() {
++    // DecksmithOS: below the GUI and the waveforms (DECKSMITHOS_BACKGROUND_NICE)
++    mixxx::threadplacement::lowerCurrentThreadPriority("Analyzer");
+     std::unique_ptr<AnalysisDao> pAnalysisDao;
+     // The thread-local database connection  must not be closed
+     // before returning from this function.
+diff --git a/src/library/scanner/libraryscanner.cpp b/src/library/scanner/libraryscanner.cpp
+index aa58c01d..df1530c3 100644
+--- a/src/library/scanner/libraryscanner.cpp
++++ b/src/library/scanner/libraryscanner.cpp
+@@ -1,6 +1,7 @@
+ #include "library/scanner/libraryscanner.h"
+ 
+ #include "library/coverartutils.h"
++#include "util/threadplacement.h"
+ #include "library/queryutil.h"
+ #include "library/scanner/libraryscannerdlg.h"
+ #include "library/scanner/recursivescandirectorytask.h"
+@@ -156,6 +157,8 @@ LibraryScanner::~LibraryScanner() {
+ 
+ void LibraryScanner::run() {
+     kLogger.debug() << "Entering thread";
++    // DecksmithOS: below the GUI and the waveforms (DECKSMITHOS_BACKGROUND_NICE)
++    mixxx::threadplacement::lowerCurrentThreadPriority("LibraryScanner");
+     {
+         Trace trace("LibraryScanner");
+ 
+diff --git a/src/soundio/sounddeviceportaudio.cpp b/src/soundio/sounddeviceportaudio.cpp
+index b4b71310..fd8ebdf4 100644
+--- a/src/soundio/sounddeviceportaudio.cpp
++++ b/src/soundio/sounddeviceportaudio.cpp
+@@ -16,6 +16,7 @@
+ #include "util/fifo.h"
+ #include "util/math.h"
+ #include "util/sample.h"
++#include "util/threadplacement.h"
+ #include "util/timer.h"
+ #include "util/trace.h"
+ #include "waveform/visualplayposition.h"
+@@ -952,6 +953,8 @@ int SoundDevicePortAudio::callbackProcessClkRef(
+         if ((sched_getscheduler(0) & SCHED_FIFO) == 0) {
+             qWarning() << "Engine thread not scheduled with the real-time policy SCHED_FIFO";
+         }
++        // DecksmithOS: a CPU of its own (DECKSMITHOS_AUDIO_CPUS)
++        mixxx::threadplacement::moveCurrentThreadToAudioCpus();
+ #else
+         // Turn on TimeCritical priority for the callback thread.
+         // If we are running in Linux this will have no effect. Either the thread is
+diff --git a/src/util/threadplacement.h b/src/util/threadplacement.h
+new file mode 100644
+index 00000000..ed69b011
+--- /dev/null
++++ b/src/util/threadplacement.h
+@@ -0,0 +1,70 @@
++#pragma once
++
++#include <QByteArray>
++#include <QList>
++#include <QtDebug>
++
++#ifdef __linux__
++#include <pthread.h>
++#include <sched.h>
++#include <sys/resource.h>
++#include <unistd.h>
++#endif
++
++namespace mixxx {
++
++/// DecksmithOS: place Mixxx's threads on an appliance with a fixed number of
++/// CPUs (Linux only; without the variables nothing changes).
++///  - DECKSMITHOS_AUDIO_CPUS="3" (comma separated CPU numbers): the audio
++///    (engine) thread moves itself there; the system keeps these CPUs free.
++///  - DECKSMITHOS_BACKGROUND_NICE=10: track analysis and the library scan
++///    run with this nice value, below the GUI and the waveforms.
++namespace threadplacement {
++
++inline void moveCurrentThreadToAudioCpus() {
++#ifdef __linux__
++    const QByteArray value = qgetenv("DECKSMITHOS_AUDIO_CPUS");
++    if (value.isEmpty()) {
++        return;
++    }
++    cpu_set_t cpus;
++    CPU_ZERO(&cpus);
++    int count = 0;
++    for (const QByteArray& part : value.split(',')) {
++        bool ok = false;
++        const int cpu = part.trimmed().toInt(&ok);
++        if (ok && cpu >= 0 && cpu < CPU_SETSIZE) {
++            CPU_SET(cpu, &cpus);
++            ++count;
++        }
++    }
++    if (count == 0) {
++        return;
++    }
++    const int error = pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus);
++    if (error != 0) {
++        qWarning() << "Audio thread: could not move to CPUs" << value << ":" << error;
++    } else {
++        qInfo() << "Audio thread on CPUs" << value;
++    }
++#endif
++}
++
++inline void lowerCurrentThreadPriority(const char* name) {
++#ifdef __linux__
++    bool ok = false;
++    const int nice = qgetenv("DECKSMITHOS_BACKGROUND_NICE").toInt(&ok);
++    if (!ok) {
++        return;
++    }
++    // On Linux, setpriority() with a thread ID applies to that thread only
++    if (setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), nice) != 0) {
++        qWarning() << name << "thread: could not set nice" << nice;
++    }
++#else
++    Q_UNUSED(name);
++#endif
++}
++
++} // namespace threadplacement
++} // namespace mixxx

@@ -1,0 +1,304 @@
+Description: Removable drives with eject controls (DECKSMITHOS_DRIVES)
+ DECKSMITHOS_DRIVES="/usb:/usb2" lists fixed mount points of removable
+ drives; per drive n: [Drives],mounted_<n> (1 while a drive is mounted
+ there, polled every second), [Drives],eject_<n> and [Drives],eject_error_<n>.
+ Eject unloads the tracks from that drive from stopped players (refused,
+ with eject_error, while one of them plays), then runs
+ DECKSMITHOS_EJECT_COMMAND with the mount point (DecksmithOS: sudo -n
+ decksmithos-system eject, which unmounts and detaches the disk). For a skin
+ EJECT button on an appliance without a desktop. Without the variable
+ nothing changes.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 38d62644..a38af613 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1051,6 +1051,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/mixer/microphone.cpp
+   src/mixer/playerinfo.cpp
+   src/mixer/playermanager.cpp
++  src/mixer/removabledrives.cpp
+   src/mixer/previewdeck.cpp
+   src/mixer/sampler.cpp
+   src/mixer/samplerbank.cpp
+diff --git a/src/coreservices.cpp b/src/coreservices.cpp
+index 06cf17a4..20be30a5 100644
+--- a/src/coreservices.cpp
++++ b/src/coreservices.cpp
+@@ -1,5 +1,7 @@
+ #include "coreservices.h"
+ 
++#include "mixer/removabledrives.h"
++
+ #include <QApplication>
+ #include <QFileDialog>
+ #include <QProcess>
+@@ -541,6 +543,10 @@ void CoreServices::initialize(QApplication* pApp) {
+ 
+     m_pPlayerManager->addPreviewDeck();
+ 
++    if (RemovableDrives::isEnabled()) {
++        m_pRemovableDrives = std::make_unique<RemovableDrives>(nullptr, m_pPlayerManager.get());
++    }
++
+     m_pEffectsManager->setup();
+ 
+ #ifdef __VINYLCONTROL__
+@@ -784,6 +790,9 @@ void CoreServices::finalize() {
+     Timer t("CoreServices::~CoreServices");
+     t.start();
+ 
++    // Uses the players: gone before them
++    m_pRemovableDrives.reset();
++
+     // Stop all pending library operations
+     qDebug() << t.elapsed(false).debugMillisWithUnit() << "stopping pending Library tasks";
+     m_pTrackCollectionManager->stopLibraryScan();
+diff --git a/src/coreservices.h b/src/coreservices.h
+index b5d5325c..323e2013 100644
+--- a/src/coreservices.h
++++ b/src/coreservices.h
+@@ -23,6 +23,8 @@ class Library;
+ class SkinControls;
+ class ControlPushButton;
+ 
++class RemovableDrives;
++
+ namespace mixxx {
+ 
+ class ControlIndicatorTimer;
+@@ -125,6 +127,8 @@ class CoreServices : public QObject {
+     std::shared_ptr<EngineMixer> m_pEngine;
+     std::shared_ptr<SoundManager> m_pSoundManager;
+     std::shared_ptr<PlayerManager> m_pPlayerManager;
++    /// DecksmithOS: drives with eject buttons (DECKSMITHOS_DRIVES)
++    std::unique_ptr<RemovableDrives> m_pRemovableDrives;
+     std::shared_ptr<RecordingManager> m_pRecordingManager;
+ #ifdef __BROADCAST__
+     std::shared_ptr<BroadcastManager> m_pBroadcastManager;
+diff --git a/src/mixer/removabledrives.cpp b/src/mixer/removabledrives.cpp
+new file mode 100644
+index 00000000..d06cf238
+--- /dev/null
++++ b/src/mixer/removabledrives.cpp
+@@ -0,0 +1,157 @@
++#include "mixer/removabledrives.h"
++
++#include <QDir>
++#include <QProcess>
++#include <QStorageInfo>
++#include <QtDebug>
++
++#include "control/controlobject.h"
++#include "control/controlpushbutton.h"
++#include "mixer/basetrackplayer.h"
++#include "mixer/playermanager.h"
++#include "moc_removabledrives.cpp"
++#include "track/track.h"
++
++namespace {
++
++const QString kGroup = QStringLiteral("[Drives]");
++
++bool isMounted(const QString& path) {
++    if (!QFileInfo(path).isDir()) {
++        return false;
++    }
++    const QStorageInfo storage(path);
++    return storage.isValid() && storage.isReady() && storage.rootPath() != QDir::rootPath();
++}
++
++} // namespace
++
++// static
++bool RemovableDrives::isEnabled() {
++    return !qEnvironmentVariableIsEmpty("DECKSMITHOS_DRIVES");
++}
++
++RemovableDrives::RemovableDrives(QObject* pParent, PlayerManager* pPlayerManager)
++        : QObject(pParent),
++          m_pPlayerManager(pPlayerManager),
++          m_ejectCommand(QProcess::splitCommand(
++                  qEnvironmentVariable("DECKSMITHOS_EJECT_COMMAND"))) {
++    const QStringList paths = qEnvironmentVariable("DECKSMITHOS_DRIVES")
++                                      .split(QChar(':'), Qt::SkipEmptyParts);
++    for (int i = 0; i < paths.size(); ++i) {
++        auto pDrive = std::make_unique<Drive>();
++        pDrive->path = QDir::cleanPath(paths[i]);
++        const QString n = QString::number(i + 1);
++        pDrive->pMounted = std::make_unique<ControlObject>(
++                ConfigKey(kGroup, QStringLiteral("mounted_") + n));
++        pDrive->pMounted->setReadOnly();
++        pDrive->pEjectError = std::make_unique<ControlObject>(
++                ConfigKey(kGroup, QStringLiteral("eject_error_") + n));
++        pDrive->pEjectError->setReadOnly();
++        pDrive->pEject = std::make_unique<ControlPushButton>(
++                ConfigKey(kGroup, QStringLiteral("eject_") + n));
++        Drive* pRaw = pDrive.get();
++        connect(pDrive->pEject.get(),
++                &ControlObject::valueChanged,
++                this,
++                [this, pRaw](double value) {
++                    if (value > 0) {
++                        eject(pRaw);
++                    }
++                });
++        m_drives.push_back(std::move(pDrive));
++    }
++    slotPoll();
++    m_pollTimer.setInterval(1000);
++    connect(&m_pollTimer, &QTimer::timeout, this, &RemovableDrives::slotPoll);
++    m_pollTimer.start();
++}
++
++RemovableDrives::~RemovableDrives() = default;
++
++void RemovableDrives::slotPoll() {
++    for (const auto& pDrive : m_drives) {
++        const bool mounted = isMounted(pDrive->path);
++        if (mounted != (pDrive->pMounted->get() > 0)) {
++            pDrive->pMounted->forceSet(mounted ? 1.0 : 0.0);
++            if (!mounted) {
++                pDrive->pEjectError->forceSet(0.0);
++            }
++        }
++    }
++}
++
++QStringList RemovableDrives::playersWithTracksFrom(const QString& path, bool* pPlaying) const {
++    QStringList groups;
++    *pPlaying = false;
++    const QString prefix = path + QChar('/');
++    QStringList candidates;
++    for (int i = 0; i < m_pPlayerManager->numberOfDecks(); ++i) {
++        candidates.append(PlayerManager::groupForDeck(i));
++    }
++    for (int i = 0; i < m_pPlayerManager->numberOfSamplers(); ++i) {
++        candidates.append(PlayerManager::groupForSampler(i));
++    }
++    for (int i = 0; i < m_pPlayerManager->numberOfPreviewDecks(); ++i) {
++        candidates.append(PlayerManager::groupForPreviewDeck(i));
++    }
++    for (const QString& group : std::as_const(candidates)) {
++        BaseTrackPlayer* pPlayer = m_pPlayerManager->getPlayer(group);
++        const TrackPointer pTrack = pPlayer ? pPlayer->getLoadedTrack() : TrackPointer();
++        if (!pTrack || !pTrack->getLocation().startsWith(prefix)) {
++            continue;
++        }
++        groups.append(group);
++        if (ControlObject::get(ConfigKey(group, QStringLiteral("play"))) > 0) {
++            *pPlaying = true;
++        }
++    }
++    return groups;
++}
++
++void RemovableDrives::eject(Drive* pDrive) {
++    if (pDrive->ejecting || pDrive->pMounted->get() <= 0) {
++        return;
++    }
++    pDrive->pEjectError->forceSet(0.0);
++    bool playing = false;
++    const QStringList groups = playersWithTracksFrom(pDrive->path, &playing);
++    if (playing) {
++        qWarning() << "Not ejecting" << pDrive->path << ": a track from it is playing";
++        pDrive->pEjectError->forceSet(1.0);
++        return;
++    }
++    if (m_ejectCommand.isEmpty()) {
++        qWarning() << "No DECKSMITHOS_EJECT_COMMAND to eject" << pDrive->path;
++        pDrive->pEjectError->forceSet(1.0);
++        return;
++    }
++    // Close the files: unload the tracks from the stopped players
++    for (const QString& group : groups) {
++        ControlObject::set(ConfigKey(group, QStringLiteral("eject")), 1.0);
++        ControlObject::set(ConfigKey(group, QStringLiteral("eject")), 0.0);
++    }
++    pDrive->ejecting = true;
++    auto* pProcess = new QProcess(this);
++    QStringList arguments = m_ejectCommand.mid(1);
++    arguments.append(pDrive->path);
++    connect(pProcess,
++            &QProcess::finished,
++            this,
++            [this, pDrive, pProcess](int exitCode, QProcess::ExitStatus exitStatus) {
++                pDrive->ejecting = false;
++                const bool ok = exitStatus == QProcess::NormalExit && exitCode == 0;
++                qInfo() << "Eject" << pDrive->path << (ok ? "done" : "failed")
++                        << QString::fromLocal8Bit(pProcess->readAllStandardError()).trimmed();
++                if (!ok) {
++                    pDrive->pEjectError->forceSet(1.0);
++                }
++                slotPoll();
++                pProcess->deleteLater();
++            });
++    // The players release their files asynchronously: give them a moment
++    QTimer::singleShot(500, pProcess, [pProcess, this, arguments]() {
++        pProcess->start(m_ejectCommand.first(), arguments);
++    });
++    qInfo() << "Ejecting" << pDrive->path;
++}
+diff --git a/src/mixer/removabledrives.h b/src/mixer/removabledrives.h
+new file mode 100644
+index 00000000..858394ce
+--- /dev/null
++++ b/src/mixer/removabledrives.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include <QList>
++#include <QObject>
++#include <QString>
++#include <QTimer>
++#include <memory>
++#include <vector>
++
++class ControlObject;
++class ControlPushButton;
++class PlayerManager;
++
++/// DecksmithOS: removable drives at fixed mount points, with an eject button
++/// for the skin. DECKSMITHOS_DRIVES="/usb:/usb2" lists the mount points;
++/// DECKSMITHOS_EJECT_COMMAND is run with the mount point as last argument
++/// (e.g. "sudo -n /usr/local/sbin/decksmithos-system eject"). Per drive n
++/// (1-based, in that order):
++///   [Drives],mounted_<n>      1 while a drive is mounted there (read-only)
++///   [Drives],eject_<n>        eject it: tracks from it are unloaded from
++///                             stopped players first; refused while one of
++///                             them plays
++///   [Drives],eject_error_<n>  1 after a refused or failed eject, until the
++///                             next attempt or until the drive is gone
++/// Mount state is polled every second (a drive on "/" means none).
++class RemovableDrives : public QObject {
++    Q_OBJECT
++  public:
++    RemovableDrives(QObject* pParent, PlayerManager* pPlayerManager);
++    ~RemovableDrives() override;
++
++    static bool isEnabled();
++
++  private slots:
++    void slotPoll();
++
++  private:
++    struct Drive {
++        QString path; // without trailing '/'
++        std::unique_ptr<ControlObject> pMounted;
++        std::unique_ptr<ControlPushButton> pEject;
++        std::unique_ptr<ControlObject> pEjectError;
++        bool ejecting = false;
++    };
++    void eject(Drive* pDrive);
++    /// Groups of players with a track from `path`; `pPlaying` is set if one
++    /// of them is playing
++    QStringList playersWithTracksFrom(const QString& path, bool* pPlaying) const;
++
++    PlayerManager* const m_pPlayerManager;
++    std::vector<std::unique_ptr<Drive>> m_drives;
++    QStringList m_ejectCommand;
++    QTimer m_pollTimer;
++};

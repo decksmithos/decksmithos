@@ -1,0 +1,52 @@
+Description: No library scan window (DECKSMITHOS_NO_SCAN_DIALOG)
+ With DECKSMITHOS_NO_SCAN_DIALOG set, the library scanner never shows its
+ progress window (normally after 2 s of scanning): on a touch appliance a
+ drive plugged in mid-set starts a scan (patch 0016), and the window would
+ cover the screen. The scan runs in the background as before. Without the
+ variable nothing changes.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/src/library/scanner/libraryscannerdlg.cpp b/src/library/scanner/libraryscannerdlg.cpp
+index 0939ac9d..1edee652 100644
+--- a/src/library/scanner/libraryscannerdlg.cpp
++++ b/src/library/scanner/libraryscannerdlg.cpp
+@@ -8,6 +8,17 @@
+ #include "defs_urls.h"
+ #include "moc_libraryscannerdlg.cpp"
+ 
++namespace {
++
++/// DecksmithOS: no scan window over a touch appliance's screen (a drive
++/// plugged in mid-set starts a scan); the scan runs in the background.
++bool showScanWindow() {
++    static const bool show = qEnvironmentVariableIsEmpty("DECKSMITHOS_NO_SCAN_DIALOG");
++    return show;
++}
++
++} // namespace
++
+ LibraryScannerDlg::LibraryScannerDlg(QWidget* parent, Qt::WindowFlags f)
+         : QWidget(parent, f),
+           m_bCancelled(false) {
+@@ -41,7 +52,8 @@ LibraryScannerDlg::~LibraryScannerDlg() {
+ 
+ void LibraryScannerDlg::slotUpdate(const QString& path) {
+     //qDebug() << "LibraryScannerDlg slotUpdate" << m_timer.elapsed().formatMillisWithUnit() << path;
+-    if (!m_bCancelled && m_timer.elapsed() > mixxx::Duration::fromSeconds(2)) {
++    if (!m_bCancelled && showScanWindow() &&
++            m_timer.elapsed() > mixxx::Duration::fromSeconds(2)) {
+        setVisible(true);
+     }
+ 
+@@ -53,7 +65,8 @@ void LibraryScannerDlg::slotUpdate(const QString& path) {
+ 
+ void LibraryScannerDlg::slotUpdateCover(const QString& path) {
+     //qDebug() << "LibraryScannerDlg slotUpdate" << m_timer.elapsed() << path;
+-    if (!m_bCancelled && m_timer.elapsed() > mixxx::Duration::fromSeconds(2)) {
++    if (!m_bCancelled && showScanWindow() &&
++            m_timer.elapsed() > mixxx::Duration::fromSeconds(2)) {
+        setVisible(true);
+     }
+ 

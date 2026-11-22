@@ -1,0 +1,4067 @@
+Description: USB library import of rekordbox/Serato drives (DECKSMITHOS_USB_IMPORT)
+ With DECKSMITHOS_USB_IMPORT set to colon separated mount points ("/usb:/usb2";
+ labels USB, USB2, ...), Mixxx polls every 2 s whether a file system other
+ than "/" is mounted there. When a drive appears, a library rescan is
+ requested and, in a worker thread, the rekordbox export (export.pdb) and the
+ Serato crates (_Serato_/Subcrates/*.crate, order from neworder.pref) are
+ read. After the scan, rekordbox playlists and Serato crates become locked
+ Mixxx playlists named "USB ▸ Folder ▸ Playlist" in rekordbox/Serato order and
+ track order, listed first in the Playlists section (table
+ decksmithos_usb_playlists holds their sort order). The rekordbox analysis
+ (beat grid, hot cues, memory cues, loops, phrases) plus key and color is
+ read in the background and applied to the library tracks in small batches in
+ the GUI thread; rekordbox always wins, unchanged tracks are not touched. A
+ drive track loaded into a player before that gets its data right before
+ loading. Playlists of a drive are deleted when it is removed, when it
+ appears and at startup. Nothing is written to the drive.
+ The ANLZ/PDB reading of RekordboxFeature moved to rekordboxanalysis.cpp
+ (shared; cue lists are no longer imported twice from PCOB and PCO2, hot
+ loops keep their length, uncolored memory cues get the default color,
+ malformed files are logged instead of crashing) and Serato crate parsing to
+ seratocrate.cpp.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 026bfad3..6119b3ce 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1004,6 +1004,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/recording/dlgrecording.cpp
+   src/library/recording/dlgrecording.ui
+   src/library/recording/recordingfeature.cpp
++  src/library/rekordbox/rekordboxanalysis.cpp
+   src/library/rekordbox/rekordboxfeature.cpp
+   src/library/rhythmbox/rhythmboxfeature.cpp
+   src/library/scanner/importfilestask.cpp
+@@ -1013,6 +1014,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/scanner/scannertask.cpp
+   src/library/searchquery.cpp
+   src/library/searchqueryparser.cpp
++  src/library/serato/seratocrate.cpp
+   src/library/serato/seratofeature.cpp
+   src/library/serato/seratoplaylistmodel.cpp
+   src/library/sidebarmodel.cpp
+@@ -1043,6 +1045,8 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/trackset/setlogfeature.cpp
+   src/library/trackset/tracksettablemodel.cpp
+   src/library/traktor/traktorfeature.cpp
++  src/library/usbimport/usbimportutil.cpp
++  src/library/usbimport/usblibraryimporter.cpp
+   src/library/treeitem.cpp
+   src/library/treeitemmodel.cpp
+   src/mixer/auxiliary.cpp
+@@ -2234,6 +2238,7 @@ if(BUILD_TESTING)
+     src/test/tracknumberstest.cpp
+     src/test/trackreftest.cpp
+     src/test/trackstructuretest.cpp
++    src/test/usbimporttest.cpp
+     src/test/trackupdate_test.cpp
+     src/test/uuid_test.cpp
+     src/test/wbatterytest.cpp
+diff --git a/src/library/rekordbox/rekordboxanalysis.cpp b/src/library/rekordbox/rekordboxanalysis.cpp
+new file mode 100644
+index 00000000..81da1c66
+--- /dev/null
++++ b/src/library/rekordbox/rekordboxanalysis.cpp
+@@ -0,0 +1,893 @@
++#include "library/rekordbox/rekordboxanalysis.h"
++
++#include <mp3guessenc.h>
++#include <rekordbox_anlz.h>
++#include <rekordbox_pdb.h>
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QMutex>
++#include <QTextCodec>
++#include <QtDebug>
++#include <algorithm>
++#include <cmath>
++#include <exception>
++#include <fstream>
++#include <functional>
++#include <optional>
++#include <utility>
++
++#include "library/rekordbox/rekordboxconstants.h"
++#include "library/rekordbox/rekordboxpdbtext.h"
++#include "track/beats.h"
++#include "track/cue.h"
++#include "track/track.h"
++#include "util/assert.h"
++#include "util/color/predefinedcolorpalettes.h"
++#include "util/fileinfo.h"
++#include "util/sandbox.h"
++
++namespace mixxx {
++namespace rekordbox {
++
++namespace {
++
++// depending on the filesystem of the external media, rekordbox seems
++// to store its metadata in different paths:
++const QStringList kPdbPaths = {
++        QStringLiteral("PIONEER/rekordbox/export.pdb"),  // FAT32/exFat
++        QStringLiteral(".PIONEER/rekordbox/export.pdb"), // HFS+ media
++};
++
++enum class IDForColor : uint8_t {
++    Pink = 1,
++    Red,
++    Orange,
++    Yellow,
++    Green,
++    Aqua,
++    Blue,
++    Purple
++};
++
++constexpr mixxx::RgbColor kColorForIDPink(0xF870F8);
++constexpr mixxx::RgbColor kColorForIDRed(0xF870900);
++constexpr mixxx::RgbColor kColorForIDOrange(0xF8A030);
++constexpr mixxx::RgbColor kColorForIDYellow(0xF8E331);
++constexpr mixxx::RgbColor kColorForIDGreen(0x1EE000);
++constexpr mixxx::RgbColor kColorForIDAqua(0x16C0F8);
++constexpr mixxx::RgbColor kColorForIDBlue(0x0150F8);
++constexpr mixxx::RgbColor kColorForIDPurple(0x9808F8);
++constexpr mixxx::RgbColor kColorForIDNoColor(0x0);
++
++// Hot cue indices that Mixxx can show (hotcue_1 ... hotcue_36)
++constexpr int kNumHotCues = 36;
++
++// mp3guessenc uses global buffers
++QMutex s_mp3guessencMutex;
++
++template<typename Base, typename T>
++inline bool instanceof (const T* ptr) {
++    return dynamic_cast<const Base*>(ptr) != nullptr;
++}
++
++QString fromUtf16LeString(const std::string& toConvert) {
++    // Kaitai uses std::string as single container for all string encodings.
++    return QTextCodec::codecForName("UTF-16LE")
++            ->toUnicode(toConvert.data(), static_cast<int>(toConvert.length()));
++}
++
++/// Cue color of an extended (PCO2) memory cue or loop. 0 means no color.
++mixxx::RgbColor::optional_t memoryCueColor(int colorId) {
++    if (colorId == 0) {
++        return mixxx::RgbColor::nullopt();
++    }
++    return colorFromId(colorId);
++}
++
++/// Time corrected by the timing offset. Ensure no offset times are less than 1
++int correctedMillis(uint32_t time, int timingOffset) {
++    const int millis = static_cast<int>(time) - timingOffset;
++    return millis < 1 ? 1 : millis;
++}
++
++/// Cue lists found in ANLZ files, kept separately for the legacy (PCOB) and
++/// the extended (PCO2) format: files usually contain both, and the extended
++/// one (with labels and colors) is preferred.
++struct CueLists {
++    bool hotCuesFound = false;
++    bool memoryCuesFound = false;
++    QList<AnalysisCue> hotCues;
++    QList<AnalysisCue> memoryCues;
++};
++
++template<typename Entry>
++void addCue(CueLists* pLists,
++        rekordbox_anlz_t::cue_list_type_t listType,
++        const Entry& entry,
++        int timingOffset,
++        const QString& label,
++        mixxx::RgbColor::optional_t color) {
++    AnalysisCue cue;
++    cue.startMillis = correctedMillis(entry.time(), timingOffset);
++    if (entry.type() == rekordbox_anlz_t::CUE_ENTRY_TYPE_LOOP) {
++        cue.endMillis = correctedMillis(entry.loop_time(), timingOffset);
++    }
++    cue.label = label;
++    cue.color = color;
++    switch (listType) {
++    case rekordbox_anlz_t::CUE_LIST_TYPE_MEMORY_CUES:
++        pLists->memoryCues.append(cue);
++        break;
++    case rekordbox_anlz_t::CUE_LIST_TYPE_HOT_CUES:
++        cue.hotCueIndex = static_cast<int>(entry.hot_cue()) - 1;
++        pLists->hotCues.append(cue);
++        break;
++    }
++}
++
++void markListFound(CueLists* pLists, rekordbox_anlz_t::cue_list_type_t listType) {
++    switch (listType) {
++    case rekordbox_anlz_t::CUE_LIST_TYPE_MEMORY_CUES:
++        pLists->memoryCuesFound = true;
++        break;
++    case rekordbox_anlz_t::CUE_LIST_TYPE_HOT_CUES:
++        pLists->hotCuesFound = true;
++        break;
++    }
++}
++
++void parseAnlzFile(const QString& anlzPath,
++        int timingOffset,
++        bool readBeatGrid,
++        bool readCues,
++        Analysis* pAnalysis,
++        CueLists* pLegacyCues,
++        CueLists* pExtendedCues) {
++    if (!QFile(anlzPath).exists()) {
++        return;
++    }
++
++    // Hold sandbox access for the ANLZ file while it is read.
++    mixxx::FileInfo anlzFileInfo(anlzPath);
++    const auto securityToken = Sandbox::openSecurityToken(&anlzFileInfo, true);
++    std::ifstream ifs(anlzPath.toStdString(), std::ifstream::binary);
++    try {
++        kaitai::kstream ks(&ifs);
++        rekordbox_anlz_t anlz = rekordbox_anlz_t(&ks);
++
++        for (const auto& section : *anlz.sections()) {
++            switch (section->fourcc()) {
++            case rekordbox_anlz_t::SECTION_TAGS_BEAT_GRID: {
++                if (!readBeatGrid) {
++                    break;
++                }
++                auto* beatGridTag =
++                        static_cast<rekordbox_anlz_t::beat_grid_tag_t*>(
++                                section->body());
++                pAnalysis->beatMillis.clear();
++                pAnalysis->beatNumbers.clear();
++                for (const auto& beat : *beatGridTag->beats()) {
++                    pAnalysis->beatMillis.append(
++                            correctedMillis(beat->time(), timingOffset));
++                    pAnalysis->beatNumbers.append(
++                            static_cast<int>(beat->beat_number()));
++                }
++            } break;
++            case rekordbox_anlz_t::SECTION_TAGS_CUES: {
++                if (!readCues) {
++                    break;
++                }
++                auto* cuesTag =
++                        static_cast<rekordbox_anlz_t::cue_tag_t*>(
++                                section->body());
++                markListFound(pLegacyCues, cuesTag->type());
++                for (const auto& cueEntry : *cuesTag->cues()) {
++                    addCue(pLegacyCues,
++                            cuesTag->type(),
++                            *cueEntry,
++                            timingOffset,
++                            QString(),
++                            mixxx::RgbColor::nullopt());
++                }
++            } break;
++            case rekordbox_anlz_t::SECTION_TAGS_CUES_2: {
++                if (!readCues) {
++                    break;
++                }
++                auto* cuesExtendedTag =
++                        static_cast<rekordbox_anlz_t::cue_extended_tag_t*>(
++                                section->body());
++                markListFound(pExtendedCues, cuesExtendedTag->type());
++                for (const auto& cueEntry : *cuesExtendedTag->cues()) {
++                    mixxx::RgbColor::optional_t color;
++                    if (cuesExtendedTag->type() == rekordbox_anlz_t::CUE_LIST_TYPE_HOT_CUES) {
++                        color = mixxx::RgbColor(qRgb(
++                                static_cast<int>(cueEntry->color_red()),
++                                static_cast<int>(cueEntry->color_green()),
++                                static_cast<int>(cueEntry->color_blue())));
++                    } else {
++                        color = memoryCueColor(static_cast<int>(cueEntry->color_id()));
++                    }
++                    addCue(pExtendedCues,
++                            cuesExtendedTag->type(),
++                            *cueEntry,
++                            timingOffset,
++                            fromUtf16BeString(cueEntry->comment()),
++                            color);
++                }
++            } break;
++            case rekordbox_anlz_t::SECTION_TAGS_SONG_STRUCTURE: {
++                auto* songStructureTag =
++                        static_cast<rekordbox_anlz_t::song_structure_tag_t*>(
++                                section->body());
++                const auto* pBody = songStructureTag->body();
++                if (!pBody || !pBody->entries()) {
++                    break;
++                }
++                pAnalysis->hasStructure = true;
++                pAnalysis->mood = pBody->mood();
++                pAnalysis->endBeat = pBody->end_beat();
++                pAnalysis->phrases.clear();
++                for (const auto& entry : *pBody->entries()) {
++                    int kindId = 0;
++                    switch (pBody->mood()) {
++                    case rekordbox_anlz_t::TRACK_MOOD_HIGH:
++                        kindId = static_cast<rekordbox_anlz_t::phrase_high_t*>(
++                                entry->kind())
++                                         ->id();
++                        break;
++                    case rekordbox_anlz_t::TRACK_MOOD_LOW:
++                        kindId = static_cast<rekordbox_anlz_t::phrase_low_t*>(
++                                entry->kind())
++                                         ->id();
++                        break;
++                    default: // the parser reads unknown moods as mid
++                        kindId = static_cast<rekordbox_anlz_t::phrase_mid_t*>(
++                                entry->kind())
++                                         ->id();
++                        break;
++                    }
++                    pAnalysis->phrases.append(
++                            {static_cast<int>(entry->beat()), kindId});
++                }
++            } break;
++            default:
++                break;
++            }
++        }
++    } catch (const std::exception& e) {
++        qWarning() << "Failed to read rekordbox analysis file" << anlzPath
++                   << ":" << e.what();
++    }
++}
++
++/// Beat grid (PQTZ) and song structure (PSSI) collected from the ANLZ files
++struct rekordbox_structure_t {
++    QVector<mixxx::audio::FramePos> beats;
++    QVector<int> beatNumbers; // position in the bar, 1 to 4
++    rekordbox_anlz_t::track_mood_t mood{};
++    int endBeat = 0;
++    QVector<Analysis::PhraseEntry> entries;
++};
++
++mixxx::TrackStructure::Phrase rekordboxPhrase(
++        rekordbox_anlz_t::track_mood_t mood, int kindId) {
++    using Kind = mixxx::TrackStructure::PhraseKind;
++    const auto phrase = [](Kind kind, int number = 0) {
++        return mixxx::TrackStructure::Phrase{{}, {}, kind, static_cast<quint8>(number)};
++    };
++    switch (mood) {
++    case rekordbox_anlz_t::TRACK_MOOD_HIGH:
++        switch (kindId) {
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_INTRO:
++            return phrase(Kind::Intro);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_UP:
++            return phrase(Kind::Up);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_DOWN:
++            return phrase(Kind::Down);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_CHORUS:
++            return phrase(Kind::Chorus);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_OUTRO:
++            return phrase(Kind::Outro);
++        }
++        break;
++    case rekordbox_anlz_t::TRACK_MOOD_MID:
++        if (kindId >= rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_1 &&
++                kindId <= rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_6) {
++            return phrase(Kind::Verse,
++                    kindId - rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_1 + 1);
++        }
++        [[fallthrough]];
++    case rekordbox_anlz_t::TRACK_MOOD_LOW:
++        switch (kindId) {
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_INTRO:
++            return phrase(Kind::Intro);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1B:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1C:
++            return phrase(Kind::Verse, 1);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2B:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2C:
++            return phrase(Kind::Verse, 2);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_BRIDGE:
++            return phrase(Kind::Bridge);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_CHORUS:
++            return phrase(Kind::Chorus);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_OUTRO:
++            return phrase(Kind::Outro);
++        }
++        break;
++    }
++    return phrase(Kind::Other);
++}
++
++/// Position of a 1-based rekordbox beat number. Beats after the end of
++/// the grid are extrapolated with the last beat length.
++mixxx::audio::FramePos rekordboxBeatPosition(
++        const QVector<mixxx::audio::FramePos>& beats, int beat) {
++    const int index = beat - 1;
++    if (index < 0 || beats.isEmpty()) {
++        return {};
++    }
++    if (index < beats.size()) {
++        return beats[index];
++    }
++    if (beats.size() < 2) {
++        return {};
++    }
++    const double beatLength = beats.last() - beats[beats.size() - 2];
++    return beats.last() + beatLength * (index - beats.size() + 1);
++}
++
++mixxx::TrackStructurePointer makeTrackStructure(const rekordbox_structure_t& data) {
++    mixxx::audio::FramePos firstDownbeat;
++    for (int i = 0; i < data.beatNumbers.size(); ++i) {
++        if (data.beatNumbers[i] == 1) {
++            firstDownbeat = data.beats[i];
++            break;
++        }
++    }
++    QVector<mixxx::TrackStructure::Phrase> phrases;
++    for (int i = 0; i < data.entries.size(); ++i) {
++        const int endBeat = i + 1 < data.entries.size()
++                ? data.entries[i + 1].beat
++                : data.endBeat;
++        auto phrase = rekordboxPhrase(data.mood, data.entries[i].kindId);
++        phrase.start = rekordboxBeatPosition(data.beats, data.entries[i].beat);
++        phrase.end = rekordboxBeatPosition(data.beats, endBeat);
++        if (!phrase.start.isValid() || !phrase.end.isValid() ||
++                phrase.end <= phrase.start) {
++            continue;
++        }
++        phrases.append(phrase);
++    }
++    if (phrases.isEmpty() && !firstDownbeat.isValid()) {
++        return nullptr;
++    }
++    mixxx::TrackStructure::Mood mood = mixxx::TrackStructure::Mood::Unknown;
++    if (!phrases.isEmpty()) {
++        switch (data.mood) {
++        case rekordbox_anlz_t::TRACK_MOOD_HIGH:
++            mood = mixxx::TrackStructure::Mood::High;
++            break;
++        case rekordbox_anlz_t::TRACK_MOOD_MID:
++            mood = mixxx::TrackStructure::Mood::Mid;
++            break;
++        case rekordbox_anlz_t::TRACK_MOOD_LOW:
++            mood = mixxx::TrackStructure::Mood::Low;
++            break;
++        }
++    }
++    // rekordbox only knows 4/4
++    return std::make_shared<const mixxx::TrackStructure>(
++            mood, std::move(phrases), firstDownbeat, 4);
++}
++
++/// A cue as it is set on the track
++struct CueSpec {
++    mixxx::CueType type = mixxx::CueType::HotCue;
++    int hotCue = -1;
++    mixxx::audio::FramePos start;
++    mixxx::audio::FramePos end;
++    QString label;
++    mixxx::RgbColor::optional_t color;
++};
++
++/// Hot cues and the main cue from rekordbox, as RekordboxFeature maps them:
++/// the first memory cue (in time) becomes the main cue, all other memory cues
++/// and loops become hot cues after the last rekordbox hot cue.
++void cueSpecs(const Analysis& analysis,
++        mixxx::audio::SampleRate sampleRate,
++        QList<CueSpec>* pHotCues,
++        std::optional<CueSpec>* pMainCue) {
++    const double sampleRateKhz = sampleRate / 1000.0;
++    const auto framePos = [sampleRateKhz](int millis) {
++        return mixxx::audio::FramePos(sampleRateKhz * static_cast<double>(millis));
++    };
++    int lastHotCueIndex = 0;
++    for (const auto& cue : analysis.hotCues) {
++        if (cue.hotCueIndex < 0) {
++            continue;
++        }
++        lastHotCueIndex = std::max(lastHotCueIndex, cue.hotCueIndex);
++        CueSpec spec;
++        spec.hotCue = cue.hotCueIndex;
++        spec.start = framePos(cue.startMillis);
++        if (cue.endMillis >= 0) {
++            spec.type = mixxx::CueType::Loop;
++            spec.end = framePos(cue.endMillis);
++        }
++        spec.label = cue.label;
++        spec.color = cue.color;
++        pHotCues->append(spec);
++    }
++
++    QList<AnalysisCue> memoryCues = analysis.memoryCues;
++    std::stable_sort(memoryCues.begin(),
++            memoryCues.end(),
++            [](const AnalysisCue& a, const AnalysisCue& b) {
++                return a.startMillis < b.startMillis;
++            });
++    for (const auto& cue : std::as_const(memoryCues)) {
++        CueSpec spec;
++        spec.start = framePos(cue.startMillis);
++        spec.label = cue.label;
++        spec.color = cue.color;
++        if (!pMainCue->has_value() && cue.endMillis < 0) {
++            spec.type = mixxx::CueType::MainCue;
++            *pMainCue = spec;
++            continue;
++        }
++        lastHotCueIndex++;
++        spec.hotCue = lastHotCueIndex;
++        if (cue.endMillis >= 0) {
++            spec.type = mixxx::CueType::Loop;
++            spec.end = framePos(cue.endMillis);
++        }
++        pHotCues->append(spec);
++    }
++
++    // Drop what Mixxx cannot show
++    pHotCues->erase(std::remove_if(pHotCues->begin(),
++                            pHotCues->end(),
++                            [](const CueSpec& spec) {
++                                return spec.hotCue >= kNumHotCues;
++                            }),
++            pHotCues->end());
++}
++
++/// Update or add a hot cue by index (RekordboxFeature behaviour)
++void setHotCue(const TrackPointer& pTrack, const CueSpec& spec) {
++    CuePointer pCue;
++    const QList<CuePointer> cuePoints = pTrack->getCuePoints();
++    for (const CuePointer& trackCue : cuePoints) {
++        if (trackCue->getHotCue() == spec.hotCue) {
++            pCue = trackCue;
++            break;
++        }
++    }
++    if (pCue) {
++        pCue->setStartAndEndPosition(spec.start, spec.end);
++    } else {
++        pCue = pTrack->createAndAddCue(
++                spec.type,
++                spec.hotCue,
++                spec.start,
++                spec.end);
++    }
++    pCue->setLabel(spec.label);
++    if (spec.color) {
++        pCue->setColor(*spec.color);
++    }
++}
++
++bool samePosition(mixxx::audio::FramePos a, mixxx::audio::FramePos b) {
++    if (!a.isValid() || !b.isValid()) {
++        return a.isValid() == b.isValid();
++    }
++    return std::abs(a.value() - b.value()) < 0.5;
++}
++
++mixxx::RgbColor cueColor(const CueSpec& spec) {
++    return spec.color.value_or(mixxx::PredefinedColorPalettes::kDefaultCueColor);
++}
++
++/// True if the hot cues and saved loops of the track are exactly `specs`
++bool hasHotCues(const TrackPointer& pTrack, QList<CueSpec> specs) {
++    QList<CuePointer> cues;
++    const QList<CuePointer> cuePoints = pTrack->getCuePoints();
++    for (const CuePointer& pCue : cuePoints) {
++        if (pCue->getType() == mixxx::CueType::HotCue ||
++                pCue->getType() == mixxx::CueType::Loop) {
++            cues.append(pCue);
++        }
++    }
++    if (cues.size() != specs.size()) {
++        return false;
++    }
++    for (const CuePointer& pCue : std::as_const(cues)) {
++        const auto it = std::find_if(specs.begin(),
++                specs.end(),
++                [&pCue](const CueSpec& spec) {
++                    return spec.hotCue == pCue->getHotCue();
++                });
++        if (it == specs.end() ||
++                it->type != pCue->getType() ||
++                !samePosition(it->start, pCue->getPosition()) ||
++                (it->type == mixxx::CueType::Loop &&
++                        !samePosition(it->end, pCue->getEndPosition())) ||
++                it->label != pCue->getLabel() ||
++                cueColor(*it) != pCue->getColor()) {
++            return false;
++        }
++        specs.erase(it);
++    }
++    return specs.isEmpty();
++}
++
++void replaceHotCues(const TrackPointer& pTrack, const QList<CueSpec>& specs) {
++    if (hasHotCues(pTrack, specs)) {
++        return;
++    }
++    pTrack->removeCuesOfType(mixxx::CueType::HotCue);
++    pTrack->removeCuesOfType(mixxx::CueType::Loop);
++    for (const auto& spec : specs) {
++        CuePointer pCue = pTrack->createAndAddCue(
++                spec.type,
++                spec.hotCue,
++                spec.start,
++                spec.end,
++                cueColor(spec));
++        pCue->setLabel(spec.label);
++    }
++}
++
++void setMainCue(const TrackPointer& pTrack, const CueSpec& spec, ApplyMode mode) {
++    if (mode == ApplyMode::Replace) {
++        const CuePointer pMainCue = pTrack->findCueByType(mixxx::CueType::MainCue);
++        if (pMainCue &&
++                samePosition(pTrack->getMainCuePosition(), spec.start) &&
++                pMainCue->getLabel() == spec.label &&
++                (!spec.color || *spec.color == pMainCue->getColor())) {
++            return;
++        }
++    }
++    pTrack->setMainCuePosition(spec.start);
++    CuePointer pMainCue = pTrack->findCueByType(mixxx::CueType::MainCue);
++    if (!pMainCue) {
++        return;
++    }
++    pMainCue->setLabel(spec.label);
++    if (spec.color) {
++        pMainCue->setColor(*spec.color);
++    }
++}
++
++void forEachRow(rekordbox_pdb_t& db,
++        rekordbox_pdb_t::page_type_t type,
++        const std::function<void(kaitai::kstruct*)>& callback) {
++    for (const auto& table : *db.tables()) {
++        if (table->type() != type) {
++            continue;
++        }
++        const uint16_t lastIndex = table->last_page()->index();
++        rekordbox_pdb_t::page_ref_t* currentRef = table->first_page();
++        while (true) {
++            rekordbox_pdb_t::page_t* page = currentRef->body();
++            if (page->is_data_page()) {
++                for (const auto& rowgroup : *page->row_groups()) {
++                    for (const auto& rowRef : *rowgroup->rows()) {
++                        if (rowRef->present()) {
++                            callback(rowRef->body());
++                        }
++                    }
++                }
++            }
++            if (currentRef->index() == lastIndex) {
++                break;
++            }
++            currentRef = page->next_page();
++        }
++    }
++}
++
++} // anonymous namespace
++
++QString getText(rekordbox_pdb_t::device_sql_string_t* deviceString) {
++    QString text;
++
++    if (instanceof <rekordbox_pdb_t::device_sql_short_ascii_t>(deviceString->body())) {
++        rekordbox_pdb_t::device_sql_short_ascii_t* shortAsciiString =
++                static_cast<rekordbox_pdb_t::device_sql_short_ascii_t*>(deviceString->body());
++        text = QString::fromStdString(shortAsciiString->text());
++    } else if (instanceof <rekordbox_pdb_t::device_sql_long_ascii_t>(deviceString->body())) {
++        rekordbox_pdb_t::device_sql_long_ascii_t* longAsciiString =
++                static_cast<rekordbox_pdb_t::device_sql_long_ascii_t*>(deviceString->body());
++        text = QString::fromStdString(longAsciiString->text());
++    } else if (instanceof <rekordbox_pdb_t::device_sql_long_utf16le_t>(deviceString->body())) {
++        rekordbox_pdb_t::device_sql_long_utf16le_t* longUtf16leString =
++                static_cast<rekordbox_pdb_t::device_sql_long_utf16le_t*>(deviceString->body());
++        text = fromUtf16LeString(longUtf16leString->text());
++    }
++
++    // Some strings read from Rekordbox *.PDB files contain random null characters
++    // which if not removed cause Mixxx to crash when attempting to read file paths
++    return text.remove(QChar('\x0'));
++}
++
++QString fromUtf16BeString(const std::string& toConvert) {
++    // Kaitai uses std::string as single container for all string encodings.
++    int length = static_cast<int>(toConvert.length()) - 2; // strip off trailing nullbyte
++    if (length <= 0) {
++        return QString();
++    }
++    return QTextCodec::codecForName("UTF-16BE")->toUnicode(toConvert.data(), length);
++}
++
++QString findPdbPath(const QString& devicePath) {
++    const QDir deviceDir(devicePath);
++    for (const auto& pdbPath : kPdbPaths) {
++        const QFileInfo pdbFileInfo(deviceDir.filePath(pdbPath));
++        if (pdbFileInfo.exists() && pdbFileInfo.isFile()) {
++            return pdbFileInfo.filePath();
++        }
++    }
++    return {};
++}
++
++mixxx::RgbColor colorFromId(int colorId) {
++    switch (static_cast<IDForColor>(colorId)) {
++    case IDForColor::Pink:
++        return kColorForIDPink;
++    case IDForColor::Red:
++        return kColorForIDRed;
++    case IDForColor::Orange:
++        return kColorForIDOrange;
++    case IDForColor::Yellow:
++        return kColorForIDYellow;
++    case IDForColor::Green:
++        return kColorForIDGreen;
++    case IDForColor::Aqua:
++        return kColorForIDAqua;
++    case IDForColor::Blue:
++        return kColorForIDBlue;
++    case IDForColor::Purple:
++        return kColorForIDPurple;
++    }
++    return kColorForIDNoColor;
++}
++
++int timingOffsetMillis(const QString& location) {
++    // The following code accounts for timing offsets required to
++    // correctly align timing information (cue points, loops, beatgrids)
++    // exported from Rekordbox. This is caused by different MP3
++    // decoders treating MP3s encoded in a variety of different cases
++    // differently. The mp3guessenc library is used to determine which
++    // case the MP3 is classified in. See the following PR for more
++    // detailed information:
++    // https://github.com/mixxxdj/mixxx/pull/2119
++
++    int timingOffset = 0;
++
++    if (location.endsWith(".mp3", Qt::CaseInsensitive)) {
++        int timingShiftCase;
++        {
++            const QMutexLocker lock(&s_mp3guessencMutex);
++            timingShiftCase = mp3guessenc_timing_shift_case(location.toStdString().c_str());
++        }
++
++        qDebug() << "Timing shift case:" << timingShiftCase << "for MP3 file:" << location;
++
++        switch (timingShiftCase) {
++#ifdef __COREAUDIO__
++        case EXIT_CODE_CASE_A:
++            timingOffset = 12;
++            break;
++        case EXIT_CODE_CASE_B:
++            timingOffset = 13;
++            break;
++        case EXIT_CODE_CASE_C:
++            timingOffset = 26;
++            break;
++        case EXIT_CODE_CASE_D:
++            timingOffset = 50;
++            break;
++#elif defined(__MAD__)
++        case EXIT_CODE_CASE_A:
++        case EXIT_CODE_CASE_D:
++            timingOffset = 26;
++            break;
++#elif defined(__FFMPEG__)
++        case EXIT_CODE_CASE_D:
++            timingOffset = 26;
++            break;
++#endif
++        }
++    }
++
++#ifdef __COREAUDIO__
++    if (location.toLower().endsWith(".m4a")) {
++        timingOffset = 48;
++    }
++#endif
++
++    return timingOffset;
++}
++
++Analysis readAnalysis(const QString& anlzPath,
++        int timingOffset,
++        bool readBeatGridWithoutExt) {
++    Analysis analysis;
++    if (anlzPath.isEmpty() || !QFile(anlzPath).exists()) {
++        return analysis;
++    }
++    qDebug() << "Rekordbox ANLZ path:" << anlzPath;
++
++    CueLists legacyCues;
++    CueLists extendedCues;
++    const QString anlzPathExt = anlzPath.left(anlzPath.length() - 3) + "EXT";
++    if (QFile(anlzPathExt).exists()) {
++        // Beatgrids appear to be only correct in legacy ANLZ file
++        parseAnlzFile(anlzPath,
++                timingOffset,
++                true,
++                false,
++                &analysis,
++                &legacyCues,
++                &extendedCues);
++        parseAnlzFile(anlzPathExt,
++                timingOffset,
++                false,
++                true,
++                &analysis,
++                &legacyCues,
++                &extendedCues);
++    } else {
++        parseAnlzFile(anlzPath,
++                timingOffset,
++                readBeatGridWithoutExt,
++                true,
++                &analysis,
++                &legacyCues,
++                &extendedCues);
++    }
++
++    // Files contain the same cue list in both formats, prefer the extended
++    // one (it has labels and colors) instead of importing both.
++    analysis.hotCues = extendedCues.hotCuesFound ? extendedCues.hotCues : legacyCues.hotCues;
++    analysis.memoryCues = extendedCues.memoryCuesFound
++            ? extendedCues.memoryCues
++            : legacyCues.memoryCues;
++    analysis.cuesRead = extendedCues.hotCuesFound || extendedCues.memoryCuesFound ||
++            legacyCues.hotCuesFound || legacyCues.memoryCuesFound;
++    return analysis;
++}
++
++mixxx::TrackStructurePointer applyAnalysis(
++        const TrackPointer& pTrack,
++        const Analysis& analysis,
++        ApplyMode mode) {
++    VERIFY_OR_DEBUG_ASSERT(pTrack) {
++        return nullptr;
++    }
++    const mixxx::audio::SampleRate sampleRate = pTrack->getSampleRate();
++    if (!sampleRate.isValid()) {
++        qWarning() << "Cannot apply rekordbox analysis without a sample rate:"
++                   << pTrack->getLocation();
++        return nullptr;
++    }
++    const double sampleRateKhz = sampleRate / 1000.0;
++
++    rekordbox_structure_t structure;
++    for (int millis : analysis.beatMillis) {
++        structure.beats.append(
++                mixxx::audio::FramePos(sampleRateKhz * static_cast<double>(millis)));
++    }
++    structure.beatNumbers = analysis.beatNumbers;
++    structure.mood = static_cast<rekordbox_anlz_t::track_mood_t>(analysis.mood);
++    structure.endBeat = analysis.endBeat;
++    structure.entries = analysis.phrases;
++
++    if (!structure.beats.isEmpty()) {
++        const auto pBeats = mixxx::Beats::fromBeatPositions(
++                sampleRate,
++                structure.beats,
++                mixxx::rekordboxconstants::beatsSubversion);
++        if (mode == ApplyMode::Merge) {
++            pTrack->trySetBeats(pBeats);
++        } else if (pBeats) {
++            const auto pOldBeats = pTrack->getBeats();
++            if (!pOldBeats || !(*pOldBeats == *pBeats)) {
++                if (pTrack->isBpmLocked()) {
++                    pTrack->setBpmLocked(false);
++                }
++                pTrack->trySetBeats(pBeats);
++            }
++        }
++    }
++
++    if (analysis.cuesRead) {
++        QList<CueSpec> hotCues;
++        std::optional<CueSpec> mainCue;
++        cueSpecs(analysis, sampleRate, &hotCues, &mainCue);
++        if (mode == ApplyMode::Merge) {
++            for (const auto& spec : std::as_const(hotCues)) {
++                setHotCue(pTrack, spec);
++            }
++        } else {
++            replaceHotCues(pTrack, hotCues);
++        }
++        if (mainCue) {
++            setMainCue(pTrack, *mainCue, mode);
++        }
++    }
++
++    return makeTrackStructure(structure);
++}
++
++Export readExport(const QString& devicePath) {
++    Export result;
++    const QString dbPath = findPdbPath(devicePath);
++    if (dbPath.isEmpty()) {
++        return result;
++    }
++    qInfo() << "Reading rekordbox export" << dbPath;
++
++    mixxx::FileInfo fileInfo(dbPath);
++    const auto securityToken = Sandbox::openSecurityToken(&fileInfo, true);
++    std::ifstream ifs(dbPath.toStdString(), std::ifstream::binary);
++    try {
++        kaitai::kstream ks(&ifs);
++        rekordbox_pdb_t db = rekordbox_pdb_t(&ks);
++
++        QHash<quint32, QString> keys;
++        forEachRow(db, rekordbox_pdb_t::PAGE_TYPE_KEYS, [&keys](kaitai::kstruct* pRow) {
++            auto* key = static_cast<rekordbox_pdb_t::key_row_t*>(pRow);
++            keys.insert(key->id(), getText(key->name()));
++        });
++        forEachRow(db,
++                rekordbox_pdb_t::PAGE_TYPE_TRACKS,
++                [&result, &keys, &devicePath](kaitai::kstruct* pRow) {
++                    auto* track = static_cast<rekordbox_pdb_t::track_row_t*>(pRow);
++                    ExportTrack exportTrack;
++                    exportTrack.id = track->id();
++                    exportTrack.location = devicePath + getText(track->file_path());
++                    exportTrack.anlzPath = devicePath + getText(track->analyze_path());
++                    exportTrack.key = keys.value(track->key_id());
++                    exportTrack.colorId = static_cast<int>(track->color_id());
++                    result.tracks.append(exportTrack);
++                });
++        forEachRow(db,
++                rekordbox_pdb_t::PAGE_TYPE_PLAYLIST_TREE,
++                [&result](kaitai::kstruct* pRow) {
++                    auto* node = static_cast<rekordbox_pdb_t::playlist_tree_row_t*>(pRow);
++                    ExportPlaylistNode exportNode;
++                    exportNode.id = node->id();
++                    exportNode.parentId = node->parent_id();
++                    exportNode.sortOrder = node->sort_order();
++                    exportNode.isFolder = node->is_folder();
++                    exportNode.name = getText(node->name());
++                    result.playlistNodes.append(exportNode);
++                });
++        forEachRow(db,
++                rekordbox_pdb_t::PAGE_TYPE_PLAYLIST_ENTRIES,
++                [&result](kaitai::kstruct* pRow) {
++                    auto* entry = static_cast<rekordbox_pdb_t::playlist_entry_row_t*>(pRow);
++                    result.playlistEntries[entry->playlist_id()].insert(
++                            entry->entry_index(), entry->track_id());
++                });
++        result.valid = true;
++    } catch (const std::exception& e) {
++        qWarning() << "Failed to read rekordbox export" << dbPath << ":" << e.what();
++        return Export();
++    }
++    qInfo() << "rekordbox export" << dbPath << "has" << result.tracks.size()
++            << "tracks and" << result.playlistNodes.size() << "playlists/folders";
++    return result;
++}
++
++} // namespace rekordbox
++} // namespace mixxx
+diff --git a/src/library/rekordbox/rekordboxanalysis.h b/src/library/rekordbox/rekordboxanalysis.h
+new file mode 100644
+index 00000000..9c9f5242
+--- /dev/null
++++ b/src/library/rekordbox/rekordboxanalysis.h
+@@ -0,0 +1,139 @@
++#pragma once
++
++// Reading of rekordbox USB exports (export.pdb and the ANLZ analysis files)
++// that is shared by RekordboxFeature (the Rekordbox sidebar section) and the
++// DecksmithOS USB library import (library/usbimport).
++//
++// This header deliberately does not include the Kaitai generated parsers, so
++// it can be used outside of mixxx-lib (e.g. by tests).
++
++#include <QHash>
++#include <QList>
++#include <QMap>
++#include <QString>
++#include <QVector>
++
++#include "track/track_decl.h"
++#include "track/trackstructure.h"
++#include "util/color/rgbcolor.h"
++
++namespace mixxx {
++namespace rekordbox {
++
++/// Returns the path of the export.pdb of a rekordbox prepared device, or an
++/// empty string if the device has none.
++QString findPdbPath(const QString& devicePath);
++
++/// The track/cue colors of the rekordbox color table (0 is "no color" and
++/// returns black, as RekordboxFeature always did).
++mixxx::RgbColor colorFromId(int colorId);
++
++/// Timing offset in milliseconds that is subtracted from all rekordbox times
++/// (beats, cues, loops) of this file. It accounts for the different MP3
++/// decoders, see https://github.com/mixxxdj/mixxx/pull/2119
++///
++/// Thread-safe (the mp3guessenc library is not, calls are serialized).
++int timingOffsetMillis(const QString& audioFilePath);
++
++/// A hot cue, memory cue or loop. All times are in milliseconds and already
++/// corrected by the timing offset.
++struct AnalysisCue {
++    int hotCueIndex = -1; // 0-based; -1 for memory cues and loops
++    int startMillis = 0;
++    int endMillis = -1; // -1 if this is not a loop
++    QString label;
++    mixxx::RgbColor::optional_t color;
++};
++
++/// Everything that is read from the ANLZ files of a track, still independent
++/// of the sample rate of the track (so it can be read in any thread).
++struct Analysis {
++    /// Beat grid (PQTZ)
++    QVector<int> beatMillis;
++    QVector<int> beatNumbers; // position in the bar, 1 to 4
++
++    /// True if a cue list (PCOB/PCO2) was found
++    bool cuesRead = false;
++    QList<AnalysisCue> hotCues;
++    QList<AnalysisCue> memoryCues; // memory cues and loops
++
++    /// Song structure (PSSI)
++    bool hasStructure = false;
++    int mood = 0;
++    int endBeat = 0;
++    struct PhraseEntry {
++        int beat; // 1-based index into the beat grid
++        int kindId;
++    };
++    QVector<PhraseEntry> phrases;
++};
++
++/// Reads the ANLZ files of a track. `anlzPath` is the path of the .DAT file;
++/// a .EXT file next to it is read as well if it exists: the beat grid is then
++/// taken from the .DAT file and the cues and phrases from the .EXT file.
++///
++/// `readBeatGridWithoutExt`: whether the beat grid is read from a .DAT file
++/// without a .EXT file. RekordboxFeature never did that.
++///
++/// Never throws, malformed files are logged and skipped.
++Analysis readAnalysis(const QString& anlzPath,
++        int timingOffsetMillis,
++        bool readBeatGridWithoutExt);
++
++enum class ApplyMode {
++    /// What RekordboxFeature does when a track is loaded from its view: set
++    /// the beats unless they are locked, update or add the hot cues by index
++    /// and keep all other cues.
++    Merge,
++    /// rekordbox always wins (like a CDJ): the beats are replaced even if
++    /// they are locked, and all hot cues and saved loops are replaced by the
++    /// ones from rekordbox if the analysis contains cue lists. Nothing is
++    /// changed (or marked dirty) if the track already has exactly this data.
++    Replace,
++};
++
++/// Applies the beat grid and the cues to the track. The memory cues follow
++/// RekordboxFeature: the first memory cue becomes the main cue, all other
++/// memory cues and loops become hot cues after the last rekordbox hot cue.
++///
++/// Returns the track structure (phrases, first downbeat) built from the
++/// analysis, or nullptr. It is not set on the track: the caller sets and
++/// stores it.
++mixxx::TrackStructurePointer applyAnalysis(
++        const TrackPointer& pTrack,
++        const Analysis& analysis,
++        ApplyMode mode);
++
++/// A track of export.pdb
++struct ExportTrack {
++    quint32 id = 0;
++    QString location;  // absolute path of the audio file
++    QString anlzPath;  // absolute path of the .DAT file
++    QString key;       // key text as shown by rekordbox
++    int colorId = 0;   // see colorFromId(), 0 = no color
++};
++
++/// A node of the playlist tree of export.pdb
++struct ExportPlaylistNode {
++    quint32 id = 0;
++    quint32 parentId = 0; // 0 = root
++    quint32 sortOrder = 0;
++    bool isFolder = false;
++    QString name;
++};
++
++/// The parts of export.pdb used by the USB library import.
++struct Export {
++    bool valid = false;
++    QList<ExportTrack> tracks;
++    QList<ExportPlaylistNode> playlistNodes;
++    /// playlist id -> (entry index -> track id)
++    QHash<quint32, QMap<quint32, quint32>> playlistEntries;
++};
++
++/// Reads export.pdb of a rekordbox prepared device mounted at `devicePath`.
++/// Never throws, returns an invalid Export if there is none or it is broken.
++Export readExport(const QString& devicePath);
++
++} // namespace rekordbox
++} // namespace mixxx
+diff --git a/src/library/rekordbox/rekordboxfeature.cpp b/src/library/rekordbox/rekordboxfeature.cpp
+index e6859a80..907fca80 100644
+--- a/src/library/rekordbox/rekordboxfeature.cpp
++++ b/src/library/rekordbox/rekordboxfeature.cpp
+@@ -1,7 +1,5 @@
+ #include "library/rekordbox/rekordboxfeature.h"
+ 
+-#include <mp3guessenc.h>
+-#include <rekordbox_anlz.h>
+ #include <rekordbox_pdb.h>
+ 
+ #include <QDir>
+@@ -17,7 +15,9 @@
+ #include "library/dao/trackschema.h"
+ #include "library/library.h"
+ #include "library/queryutil.h"
++#include "library/rekordbox/rekordboxanalysis.h"
+ #include "library/rekordbox/rekordboxconstants.h"
++#include "library/rekordbox/rekordboxpdbtext.h"
+ #include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+ #include "library/treeitem.h"
+@@ -44,54 +44,8 @@ namespace {
+ const QString kRekordboxLibraryTable = QStringLiteral("rekordbox_library");
+ const QString kRekordboxPlaylistsTable = QStringLiteral("rekordbox_playlists");
+ const QString kRekordboxPlaylistTracksTable = QStringLiteral("rekordbox_playlist_tracks");
+-
+-// depending on the filesystem of the external media, rekordbox seems
+-// to store its metadata in different paths:
+-const QStringList kPdbPaths = {
+-        QStringLiteral("PIONEER/rekordbox/export.pdb"),  // FAT32/exFat
+-        QStringLiteral(".PIONEER/rekordbox/export.pdb"), // HFS+ media
+-};
+ const QString kPLaylistPathDelimiter = QStringLiteral("-->");
+ 
+-QString findRekordboxPdbPath(const QString& devicePath) {
+-    const QDir deviceDir(devicePath);
+-    for (const auto& pdbPath : kPdbPaths) {
+-        const QFileInfo pdbFileInfo(deviceDir.filePath(pdbPath));
+-        if (pdbFileInfo.exists() && pdbFileInfo.isFile()) {
+-            return pdbFileInfo.filePath();
+-        }
+-    }
+-    return {};
+-}
+-
+-enum class IDForColor : uint8_t {
+-    Pink = 1,
+-    Red,
+-    Orange,
+-    Yellow,
+-    Green,
+-    Aqua,
+-    Blue,
+-    Purple
+-};
+-
+-constexpr mixxx::RgbColor kColorForIDPink(0xF870F8);
+-constexpr mixxx::RgbColor kColorForIDRed(0xF870900);
+-constexpr mixxx::RgbColor kColorForIDOrange(0xF8A030);
+-constexpr mixxx::RgbColor kColorForIDYellow(0xF8E331);
+-constexpr mixxx::RgbColor kColorForIDGreen(0x1EE000);
+-constexpr mixxx::RgbColor kColorForIDAqua(0x16C0F8);
+-constexpr mixxx::RgbColor kColorForIDBlue(0x0150F8);
+-constexpr mixxx::RgbColor kColorForIDPurple(0x9808F8);
+-constexpr mixxx::RgbColor kColorForIDNoColor(0x0);
+-
+-struct memory_cue_loop_t {
+-    mixxx::audio::FramePos startPosition;
+-    mixxx::audio::FramePos endPosition;
+-    QString comment;
+-    mixxx::RgbColor::optional_t color;
+-};
+-
+ bool createLibraryTable(QSqlDatabase& database, const QString& tableName) {
+     qDebug() << "Creating Rekordbox library table: " << tableName;
+ 
+@@ -206,7 +160,7 @@ QList<TreeItem*> findRekordboxDevices() {
+         // drive.filePath() doesn't make any access to the filesystem and consequently
+         // shorten the delay
+ 
+-        if (!findRekordboxPdbPath(drive.filePath()).isEmpty()) {
++        if (!mixxx::rekordbox::findPdbPath(drive.filePath()).isEmpty()) {
+             QString displayPath = drive.filePath();
+             if (displayPath.endsWith("/")) {
+                 displayPath.chop(1);
+@@ -239,7 +193,7 @@ QList<TreeItem*> findRekordboxDevices() {
+             QDir::AllDirs | QDir::NoDotAndDotDot);
+ 
+     foreach (QFileInfo device, devices) {
+-        if (!findRekordboxPdbPath(device.filePath()).isEmpty()) {
++        if (!mixxx::rekordbox::findPdbPath(device.filePath()).isEmpty()) {
+             auto* pFoundDevice = new TreeItem(
+                     device.fileName(),
+                     QVariant(QList<QString>{device.filePath(), IS_RECORDBOX_DEVICE}));
+@@ -250,7 +204,7 @@ QList<TreeItem*> findRekordboxDevices() {
+     QFileInfoList devices = QDir(QStringLiteral("/Volumes")).entryInfoList(QDir::AllDirs | QDir::NoDotAndDotDot);
+ 
+     foreach (QFileInfo device, devices) {
+-        if (!findRekordboxPdbPath(device.filePath()).isEmpty()) {
++        if (!mixxx::rekordbox::findPdbPath(device.filePath()).isEmpty()) {
+             QList<QString> data;
+             data << device.filePath();
+             data << IS_RECORDBOX_DEVICE;
+@@ -265,49 +219,6 @@ QList<TreeItem*> findRekordboxDevices() {
+     return foundDevices;
+ }
+ 
+-template<typename Base, typename T>
+-inline bool instanceof (const T* ptr) {
+-    return dynamic_cast<const Base*>(ptr) != nullptr;
+-}
+-
+-QString fromUtf16LeString(const std::string& toConvert) {
+-    // Kaitai uses std::string as single container for all string encodings.
+-    return QTextCodec::codecForName("UTF-16LE")
+-            ->toUnicode(toConvert.data(), static_cast<int>(toConvert.length()));
+-}
+-
+-QString fromUtf16BeString(const std::string& toConvert) {
+-    // Kaitai uses std::string as single container for all string encodings.
+-    int length = static_cast<int>(toConvert.length()) - 2; // strip off trailing nullbyte
+-    return QTextCodec::codecForName("UTF-16BE")->toUnicode(toConvert.data(), length);
+-}
+-
+-// Functions getText and parseDeviceDB are roughly based on the following Java file:
+-// https://github.com/Deep-Symmetry/crate-digger/commit/f09fa9fc097a2a428c43245ddd542ac1370c1adc
+-// getText is needed because the strings in the PDB file "have a variety of obscure representations".
+-
+-QString getText(rekordbox_pdb_t::device_sql_string_t* deviceString) {
+-    QString text;
+-
+-    if (instanceof <rekordbox_pdb_t::device_sql_short_ascii_t>(deviceString->body())) {
+-        rekordbox_pdb_t::device_sql_short_ascii_t* shortAsciiString =
+-                static_cast<rekordbox_pdb_t::device_sql_short_ascii_t*>(deviceString->body());
+-        text = QString::fromStdString(shortAsciiString->text());
+-    } else if (instanceof <rekordbox_pdb_t::device_sql_long_ascii_t>(deviceString->body())) {
+-        rekordbox_pdb_t::device_sql_long_ascii_t* longAsciiString =
+-                static_cast<rekordbox_pdb_t::device_sql_long_ascii_t*>(deviceString->body());
+-        text = QString::fromStdString(longAsciiString->text());
+-    } else if (instanceof <rekordbox_pdb_t::device_sql_long_utf16le_t>(deviceString->body())) {
+-        rekordbox_pdb_t::device_sql_long_utf16le_t* longUtf16leString =
+-                static_cast<rekordbox_pdb_t::device_sql_long_utf16le_t*>(deviceString->body());
+-        text = fromUtf16LeString(longUtf16leString->text());
+-    }
+-
+-    // Some strings read from Rekordbox *.PDB files contain random null characters
+-    // which if not removed cause Mixxx to crash when attempting to read file paths
+-    return text.remove(QChar('\x0'));
+-}
+-
+ int createDevicePlaylist(QSqlDatabase& database, const QString& devicePath) {
+     int playlistID = kInvalidPlaylistId;
+ 
+@@ -342,28 +253,6 @@ int createDevicePlaylist(QSqlDatabase& database, const QString& devicePath) {
+     return playlistID;
+ }
+ 
+-mixxx::RgbColor colorFromID(int colorID) {
+-    switch (static_cast<IDForColor>(colorID)) {
+-    case IDForColor::Pink:
+-        return kColorForIDPink;
+-    case IDForColor::Red:
+-        return kColorForIDRed;
+-    case IDForColor::Orange:
+-        return kColorForIDOrange;
+-    case IDForColor::Yellow:
+-        return kColorForIDYellow;
+-    case IDForColor::Green:
+-        return kColorForIDGreen;
+-    case IDForColor::Aqua:
+-        return kColorForIDAqua;
+-    case IDForColor::Blue:
+-        return kColorForIDBlue;
+-    case IDForColor::Purple:
+-        return kColorForIDPurple;
+-    }
+-    return kColorForIDNoColor;
+-}
+-
+ void insertTrack(
+         QSqlDatabase& database,
+         rekordbox_pdb_t::track_row_t* track,
+@@ -377,20 +266,20 @@ void insertTrack(
+         const QString& device,
+         int audioFilesCount) {
+     int rbID = static_cast<int>(track->id());
+-    QString title = getText(track->title());
++    QString title = mixxx::rekordbox::getText(track->title());
+     QString artist = artistsMap[track->artist_id()];
+     QString album = albumsMap[track->album_id()];
+     QString year = QString::number(track->year());
+     QString genre = genresMap[track->genre_id()];
+-    QString location = devicePath + getText(track->file_path());
++    QString location = devicePath + mixxx::rekordbox::getText(track->file_path());
+     float bpm = static_cast<float>(track->tempo() / 100.0);
+     int bitrate = static_cast<int>(track->bitrate());
+     QString key = keysMap[track->key_id()];
+     int playtime = static_cast<int>(track->duration());
+     int rating = static_cast<int>(track->rating());
+-    QString comment = getText(track->comment());
++    QString comment = mixxx::rekordbox::getText(track->comment());
+     QString tracknumber = QString::number(track->track_number());
+-    QString anlzPath = devicePath + getText(track->analyze_path());
++    QString anlzPath = devicePath + mixxx::rekordbox::getText(track->analyze_path());
+ 
+     query.bindValue(":rb_id", rbID);
+     query.bindValue(":artist", artist);
+@@ -415,7 +304,7 @@ void insertTrack(
+     query.bindValue(":device", device);
+     query.bindValue(":color",
+             mixxx::RgbColor::toQVariant(
+-                    colorFromID(static_cast<int>(track->color_id()))));
++                    mixxx::rekordbox::colorFromId(static_cast<int>(track->color_id()))));
+ 
+     if (!query.exec()) {
+         LOG_FAILED_QUERY(query);
+@@ -465,7 +354,7 @@ QString parseDeviceDB(mixxx::DbConnectionPoolPtr dbConnectionPool, TreeItem* dev
+ 
+     qDebug() << "parseDeviceDB device: " << device << " devicePath: " << devicePath;
+ 
+-    const QString dbPath = findRekordboxPdbPath(devicePath);
++    const QString dbPath = mixxx::rekordbox::findPdbPath(devicePath);
+ 
+     if (dbPath.isEmpty()) {
+         return devicePath;
+@@ -572,25 +461,25 @@ QString parseDeviceDB(mixxx::DbConnectionPoolPtr dbConnectionPool, TreeItem* dev
+                                         auto* key =
+                                                 static_cast<rekordbox_pdb_t::key_row_t*>(
+                                                         rowRef->body());
+-                                        keysMap[key->id()] = getText(key->name());
++                                        keysMap[key->id()] = mixxx::rekordbox::getText(key->name());
+                                     } break;
+                                     case rekordbox_pdb_t::PAGE_TYPE_GENRES: {
+                                         auto* genre =
+                                                 static_cast<rekordbox_pdb_t::genre_row_t*>(
+                                                         rowRef->body());
+-                                        genresMap[genre->id()] = getText(genre->name());
++                                        genresMap[genre->id()] = mixxx::rekordbox::getText(genre->name());
+                                     } break;
+                                     case rekordbox_pdb_t::PAGE_TYPE_ARTISTS: {
+                                         auto* artist =
+                                                 static_cast<rekordbox_pdb_t::artist_row_t*>(
+                                                         rowRef->body());
+-                                        artistsMap[artist->id()] = getText(artist->name());
++                                        artistsMap[artist->id()] = mixxx::rekordbox::getText(artist->name());
+                                     } break;
+                                     case rekordbox_pdb_t::PAGE_TYPE_ALBUMS: {
+                                         auto* album =
+                                                 static_cast<rekordbox_pdb_t::album_row_t*>(
+                                                         rowRef->body());
+-                                        albumsMap[album->id()] = getText(album->name());
++                                        albumsMap[album->id()] = mixxx::rekordbox::getText(album->name());
+                                     } break;
+                                     case rekordbox_pdb_t::PAGE_TYPE_PLAYLIST_ENTRIES: {
+                                         auto* playlistEntry =
+@@ -624,7 +513,7 @@ QString parseDeviceDB(mixxx::DbConnectionPoolPtr dbConnectionPool, TreeItem* dev
+                                                         rowRef->body());
+ 
+                                         playlistNameMap[playlistTree->id()] =
+-                                                getText(playlistTree->name());
++                                                mixxx::rekordbox::getText(playlistTree->name());
+                                         playlistIsFolderMap[playlistTree
+                                                                     ->id()] =
+                                                 playlistTree->is_folder();
+@@ -859,436 +748,6 @@ void clearDeviceTables(QSqlDatabase& database, TreeItem* child) {
+     transaction.commit();
+ }
+ 
+-void setHotCue(TrackPointer track,
+-        mixxx::audio::FramePos startPosition,
+-        mixxx::audio::FramePos endPosition,
+-        int id,
+-        const QString& label,
+-        mixxx::RgbColor::optional_t color) {
+-    CuePointer pCue;
+-    const QList<CuePointer> cuePoints = track->getCuePoints();
+-    for (const CuePointer& trackCue : cuePoints) {
+-        if (trackCue->getHotCue() == id) {
+-            pCue = trackCue;
+-            break;
+-        }
+-    }
+-
+-    mixxx::CueType type = mixxx::CueType::HotCue;
+-    if (endPosition.isValid()) {
+-        type = mixxx::CueType::Loop;
+-    }
+-
+-    if (pCue) {
+-        pCue->setStartAndEndPosition(startPosition, endPosition);
+-    } else {
+-        pCue = track->createAndAddCue(
+-                type,
+-                id,
+-                startPosition,
+-                endPosition);
+-    }
+-    pCue->setLabel(label);
+-    if (color) {
+-        pCue->setColor(*color);
+-    }
+-}
+-
+-/// Beat grid (PQTZ) and song structure (PSSI) collected from the ANLZ files
+-struct rekordbox_structure_t {
+-    QVector<mixxx::audio::FramePos> beats;
+-    QVector<int> beatNumbers; // position in the bar, 1 to 4
+-    rekordbox_anlz_t::track_mood_t mood{};
+-    int endBeat = 0;
+-    struct entry_t {
+-        int beat; // 1-based index into beats
+-        int kindId;
+-    };
+-    QVector<entry_t> entries;
+-};
+-
+-mixxx::TrackStructure::Phrase rekordboxPhrase(
+-        rekordbox_anlz_t::track_mood_t mood, int kindId) {
+-    using Kind = mixxx::TrackStructure::PhraseKind;
+-    const auto phrase = [](Kind kind, int number = 0) {
+-        return mixxx::TrackStructure::Phrase{{}, {}, kind, static_cast<quint8>(number)};
+-    };
+-    switch (mood) {
+-    case rekordbox_anlz_t::TRACK_MOOD_HIGH:
+-        switch (kindId) {
+-        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_INTRO:
+-            return phrase(Kind::Intro);
+-        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_UP:
+-            return phrase(Kind::Up);
+-        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_DOWN:
+-            return phrase(Kind::Down);
+-        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_CHORUS:
+-            return phrase(Kind::Chorus);
+-        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_OUTRO:
+-            return phrase(Kind::Outro);
+-        }
+-        break;
+-    case rekordbox_anlz_t::TRACK_MOOD_MID:
+-        if (kindId >= rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_1 &&
+-                kindId <= rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_6) {
+-            return phrase(Kind::Verse,
+-                    kindId - rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_1 + 1);
+-        }
+-        [[fallthrough]];
+-    case rekordbox_anlz_t::TRACK_MOOD_LOW:
+-        switch (kindId) {
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_INTRO:
+-            return phrase(Kind::Intro);
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1:
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1B:
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1C:
+-            return phrase(Kind::Verse, 1);
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2:
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2B:
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2C:
+-            return phrase(Kind::Verse, 2);
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_BRIDGE:
+-            return phrase(Kind::Bridge);
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_CHORUS:
+-            return phrase(Kind::Chorus);
+-        case rekordbox_anlz_t::MOOD_LOW_PHRASE_OUTRO:
+-            return phrase(Kind::Outro);
+-        }
+-        break;
+-    }
+-    return phrase(Kind::Other);
+-}
+-
+-/// Position of a 1-based rekordbox beat number. Beats after the end of
+-/// the grid are extrapolated with the last beat length.
+-mixxx::audio::FramePos rekordboxBeatPosition(
+-        const QVector<mixxx::audio::FramePos>& beats, int beat) {
+-    const int index = beat - 1;
+-    if (index < 0 || beats.isEmpty()) {
+-        return {};
+-    }
+-    if (index < beats.size()) {
+-        return beats[index];
+-    }
+-    if (beats.size() < 2) {
+-        return {};
+-    }
+-    const double beatLength = beats.last() - beats[beats.size() - 2];
+-    return beats.last() + beatLength * (index - beats.size() + 1);
+-}
+-
+-mixxx::TrackStructurePointer makeTrackStructure(const rekordbox_structure_t& data) {
+-    mixxx::audio::FramePos firstDownbeat;
+-    for (int i = 0; i < data.beatNumbers.size(); ++i) {
+-        if (data.beatNumbers[i] == 1) {
+-            firstDownbeat = data.beats[i];
+-            break;
+-        }
+-    }
+-    QVector<mixxx::TrackStructure::Phrase> phrases;
+-    for (int i = 0; i < data.entries.size(); ++i) {
+-        const int endBeat = i + 1 < data.entries.size()
+-                ? data.entries[i + 1].beat
+-                : data.endBeat;
+-        auto phrase = rekordboxPhrase(data.mood, data.entries[i].kindId);
+-        phrase.start = rekordboxBeatPosition(data.beats, data.entries[i].beat);
+-        phrase.end = rekordboxBeatPosition(data.beats, endBeat);
+-        if (!phrase.start.isValid() || !phrase.end.isValid() ||
+-                phrase.end <= phrase.start) {
+-            continue;
+-        }
+-        phrases.append(phrase);
+-    }
+-    if (phrases.isEmpty() && !firstDownbeat.isValid()) {
+-        return nullptr;
+-    }
+-    mixxx::TrackStructure::Mood mood = mixxx::TrackStructure::Mood::Unknown;
+-    if (!phrases.isEmpty()) {
+-        switch (data.mood) {
+-        case rekordbox_anlz_t::TRACK_MOOD_HIGH:
+-            mood = mixxx::TrackStructure::Mood::High;
+-            break;
+-        case rekordbox_anlz_t::TRACK_MOOD_MID:
+-            mood = mixxx::TrackStructure::Mood::Mid;
+-            break;
+-        case rekordbox_anlz_t::TRACK_MOOD_LOW:
+-            mood = mixxx::TrackStructure::Mood::Low;
+-            break;
+-        }
+-    }
+-    // rekordbox only knows 4/4
+-    return std::make_shared<const mixxx::TrackStructure>(
+-            mood, std::move(phrases), firstDownbeat, 4);
+-}
+-
+-void readAnalyze(TrackPointer track,
+-        mixxx::audio::SampleRate sampleRate,
+-        int timingOffset,
+-        bool ignoreCues,
+-        const QString& anlzPath,
+-        rekordbox_structure_t* pStructure) {
+-    if (!QFile(anlzPath).exists()) {
+-        return;
+-    }
+-
+-    qDebug() << "Rekordbox ANLZ path:" << anlzPath << " for: " << track->getTitle();
+-
+-    // Hold sandbox access for the ANLZ file while it is read.
+-    mixxx::FileInfo anlzFileInfo(anlzPath);
+-    const auto securityToken = Sandbox::openSecurityToken(&anlzFileInfo, true);
+-    std::ifstream ifs(anlzPath.toStdString(), std::ifstream::binary);
+-    kaitai::kstream ks(&ifs);
+-
+-    rekordbox_anlz_t anlz = rekordbox_anlz_t(&ks);
+-
+-    const double sampleRateKhz = sampleRate / 1000.0;
+-
+-    QList<memory_cue_loop_t> memoryCuesAndLoops;
+-    int lastHotCueIndex = 0;
+-
+-    for (const auto& section : *anlz.sections()) {
+-        switch (section->fourcc()) {
+-        case rekordbox_anlz_t::SECTION_TAGS_BEAT_GRID: {
+-            if (!ignoreCues) {
+-                break;
+-            }
+-
+-            auto* beatGridTag =
+-                    static_cast<rekordbox_anlz_t::beat_grid_tag_t*>(
+-                            section->body());
+-
+-            QVector<mixxx::audio::FramePos> beats;
+-            QVector<int> beatNumbers;
+-
+-            for (const auto& beat : *beatGridTag->beats()) {
+-                int time = static_cast<int>(beat->time()) - timingOffset;
+-                // Ensure no offset times are less than 1
+-                if (time < 1) {
+-                    time = 1;
+-                }
+-                beats << mixxx::audio::FramePos(sampleRateKhz * static_cast<double>(time));
+-                beatNumbers << static_cast<int>(beat->beat_number());
+-            }
+-            if (pStructure) {
+-                pStructure->beats = beats;
+-                pStructure->beatNumbers = beatNumbers;
+-            }
+-
+-            const auto pBeats = mixxx::Beats::fromBeatPositions(
+-                    sampleRate,
+-                    beats,
+-                    mixxx::rekordboxconstants::beatsSubversion);
+-            track->trySetBeats(pBeats);
+-        } break;
+-        case rekordbox_anlz_t::SECTION_TAGS_CUES: {
+-            if (ignoreCues) {
+-                break;
+-            }
+-
+-            auto* cuesTag =
+-                    static_cast<rekordbox_anlz_t::cue_tag_t*>(
+-                            section->body());
+-
+-            for (const auto& cueEntry : *cuesTag->cues()) {
+-                int time = static_cast<int>(cueEntry->time()) - timingOffset;
+-                // Ensure no offset times are less than 1
+-                if (time < 1) {
+-                    time = 1;
+-                }
+-                const auto position = mixxx::audio::FramePos(
+-                        sampleRateKhz * static_cast<double>(time));
+-
+-                switch (cuesTag->type()) {
+-                case rekordbox_anlz_t::CUE_LIST_TYPE_MEMORY_CUES: {
+-                    switch (cueEntry->type()) {
+-                    case rekordbox_anlz_t::CUE_ENTRY_TYPE_MEMORY_CUE: {
+-                        memory_cue_loop_t memoryCue;
+-                        memoryCue.startPosition = position;
+-                        memoryCue.endPosition = mixxx::audio::kInvalidFramePos;
+-                        memoryCue.color = mixxx::RgbColor::nullopt();
+-                        memoryCuesAndLoops << memoryCue;
+-                    } break;
+-                    case rekordbox_anlz_t::CUE_ENTRY_TYPE_LOOP: {
+-                        int endTime = static_cast<int>(cueEntry->loop_time()) - timingOffset;
+-                        // Ensure no offset times are less than 1
+-                        if (endTime < 1) {
+-                            endTime = 1;
+-                        }
+-
+-                        memory_cue_loop_t loop;
+-                        loop.startPosition = position;
+-                        loop.endPosition = mixxx::audio::FramePos(
+-                                sampleRateKhz * static_cast<double>(endTime));
+-                        loop.color = mixxx::RgbColor::nullopt();
+-                        memoryCuesAndLoops << loop;
+-                    } break;
+-                    }
+-                } break;
+-                case rekordbox_anlz_t::CUE_LIST_TYPE_HOT_CUES: {
+-                    int hotCueIndex = static_cast<int>(cueEntry->hot_cue() - 1);
+-                    if (hotCueIndex > lastHotCueIndex) {
+-                        lastHotCueIndex = hotCueIndex;
+-                    }
+-                    setHotCue(
+-                            track,
+-                            position,
+-                            mixxx::audio::kInvalidFramePos,
+-                            hotCueIndex,
+-                            QString(),
+-                            mixxx::RgbColor::nullopt());
+-                } break;
+-                }
+-            }
+-        } break;
+-        case rekordbox_anlz_t::SECTION_TAGS_CUES_2: {
+-            if (ignoreCues) {
+-                break;
+-            }
+-
+-            auto* cuesExtendedTag =
+-                    static_cast<rekordbox_anlz_t::cue_extended_tag_t*>(
+-                            section->body());
+-
+-            for (const auto& cueExtendedEntry : *cuesExtendedTag->cues()) {
+-                int time = static_cast<int>(cueExtendedEntry->time()) - timingOffset;
+-                // Ensure no offset times are less than 1
+-                if (time < 1) {
+-                    time = 1;
+-                }
+-                const auto position = mixxx::audio::FramePos(
+-                        sampleRateKhz * static_cast<double>(time));
+-
+-                switch (cuesExtendedTag->type()) {
+-                case rekordbox_anlz_t::CUE_LIST_TYPE_MEMORY_CUES: {
+-                    switch (cueExtendedEntry->type()) {
+-                    case rekordbox_anlz_t::CUE_ENTRY_TYPE_MEMORY_CUE: {
+-                        memory_cue_loop_t memoryCue;
+-                        memoryCue.startPosition = position;
+-                        memoryCue.endPosition = mixxx::audio::kInvalidFramePos;
+-                        memoryCue.comment = fromUtf16BeString(cueExtendedEntry->comment());
+-                        memoryCue.color = colorFromID(static_cast<int>(
+-                                cueExtendedEntry->color_id()));
+-                        memoryCuesAndLoops << memoryCue;
+-                    } break;
+-                    case rekordbox_anlz_t::CUE_ENTRY_TYPE_LOOP: {
+-                        int endTime =
+-                                static_cast<int>(
+-                                        cueExtendedEntry->loop_time()) -
+-                                timingOffset;
+-                        // Ensure no offset times are less than 1
+-                        if (endTime < 1) {
+-                            endTime = 1;
+-                        }
+-
+-                        memory_cue_loop_t loop;
+-                        loop.startPosition = position;
+-                        loop.endPosition = mixxx::audio::FramePos(
+-                                sampleRateKhz * static_cast<double>(endTime));
+-                        loop.comment = fromUtf16BeString(cueExtendedEntry->comment());
+-                        loop.color = colorFromID(static_cast<int>(cueExtendedEntry->color_id()));
+-                        memoryCuesAndLoops << loop;
+-                    } break;
+-                    }
+-                } break;
+-                case rekordbox_anlz_t::CUE_LIST_TYPE_HOT_CUES: {
+-                    int hotCueIndex = static_cast<int>(cueExtendedEntry->hot_cue() - 1);
+-                    if (hotCueIndex > lastHotCueIndex) {
+-                        lastHotCueIndex = hotCueIndex;
+-                    }
+-                    setHotCue(track,
+-                            position,
+-                            mixxx::audio::kInvalidFramePos,
+-                            hotCueIndex,
+-                            fromUtf16BeString(cueExtendedEntry->comment()),
+-                            mixxx::RgbColor(qRgb(
+-                                    static_cast<int>(
+-                                            cueExtendedEntry->color_red()),
+-                                    static_cast<int>(
+-                                            cueExtendedEntry->color_green()),
+-                                    static_cast<int>(cueExtendedEntry
+-                                                    ->color_blue()))));
+-                } break;
+-                }
+-            }
+-        } break;
+-        case rekordbox_anlz_t::SECTION_TAGS_SONG_STRUCTURE: {
+-            if (!pStructure) {
+-                break;
+-            }
+-            auto* songStructureTag =
+-                    static_cast<rekordbox_anlz_t::song_structure_tag_t*>(
+-                            section->body());
+-            const auto* pBody = songStructureTag->body();
+-            if (!pBody || !pBody->entries()) {
+-                break;
+-            }
+-            pStructure->mood = pBody->mood();
+-            pStructure->endBeat = pBody->end_beat();
+-            pStructure->entries.clear();
+-            for (const auto& entry : *pBody->entries()) {
+-                int kindId = 0;
+-                switch (pBody->mood()) {
+-                case rekordbox_anlz_t::TRACK_MOOD_HIGH:
+-                    kindId = static_cast<rekordbox_anlz_t::phrase_high_t*>(
+-                            entry->kind())
+-                                     ->id();
+-                    break;
+-                case rekordbox_anlz_t::TRACK_MOOD_LOW:
+-                    kindId = static_cast<rekordbox_anlz_t::phrase_low_t*>(
+-                            entry->kind())
+-                                     ->id();
+-                    break;
+-                default: // the parser reads unknown moods as mid
+-                    kindId = static_cast<rekordbox_anlz_t::phrase_mid_t*>(
+-                            entry->kind())
+-                                     ->id();
+-                    break;
+-                }
+-                pStructure->entries.append({static_cast<int>(entry->beat()), kindId});
+-            }
+-        } break;
+-        default:
+-            break;
+-        }
+-    }
+-
+-    if (memoryCuesAndLoops.size() > 0) {
+-        std::sort(memoryCuesAndLoops.begin(),
+-                memoryCuesAndLoops.end(),
+-                [](const memory_cue_loop_t& a, const memory_cue_loop_t& b)
+-                        -> bool { return a.startPosition < b.startPosition; });
+-
+-        bool mainCueFound = false;
+-
+-        // Add memory cues and loops
+-        for (int memoryCueOrLoopIndex = 0;
+-                memoryCueOrLoopIndex < memoryCuesAndLoops.size();
+-                memoryCueOrLoopIndex++) {
+-            memory_cue_loop_t memoryCueOrLoop = memoryCuesAndLoops[memoryCueOrLoopIndex];
+-
+-            if (!mainCueFound && !memoryCueOrLoop.endPosition.isValid()) {
+-                // Set first chronological memory cue as Mixxx MainCue
+-                track->setMainCuePosition(memoryCueOrLoop.startPosition);
+-                CuePointer pMainCue = track->findCueByType(mixxx::CueType::MainCue);
+-                pMainCue->setLabel(memoryCueOrLoop.comment);
+-                pMainCue->setColor(*memoryCueOrLoop.color);
+-                mainCueFound = true;
+-            } else {
+-                // Mixxx v2.4 will feature multiple loops, so these saved here will be usable
+-                // For 2.3, Mixxx treats them as hotcues and the first one will be loaded as the single loop Mixxx supports
+-                lastHotCueIndex++;
+-                setHotCue(
+-                        track,
+-                        memoryCueOrLoop.startPosition,
+-                        memoryCueOrLoop.endPosition,
+-                        lastHotCueIndex,
+-                        memoryCueOrLoop.comment,
+-                        memoryCueOrLoop.color);
+-            }
+-        }
+-    }
+-}
+-
+ } // anonymous namespace
+ 
+ RekordboxPlaylistModel::RekordboxPlaylistModel(QObject* parent,
+@@ -1410,74 +869,18 @@ TrackPointer RekordboxPlaylistModel::getTrack(const QModelIndex& index) const {
+         return track;
+     }
+ 
+-    // The following code accounts for timing offsets required to
+-    // correctly align timing information (cue points, loops, beatgrids)
+-    // exported from Rekordbox. This is caused by different MP3
+-    // decoders treating MP3s encoded in a variety of different cases
+-    // differently. The mp3guessenc library is used to determine which
+-    // case the MP3 is classified in. See the following PR for more
+-    // detailed information:
+-    // https://github.com/mixxxdj/mixxx/pull/2119
+-
+-    int timingOffset = 0;
+-
+-    if (location.endsWith(".mp3", Qt::CaseInsensitive)) {
+-        int timingShiftCase = mp3guessenc_timing_shift_case(location.toStdString().c_str());
+-
+-        qDebug() << "Timing shift case:" << timingShiftCase << "for MP3 file:" << location;
+-
+-        switch (timingShiftCase) {
+-#ifdef __COREAUDIO__
+-        case EXIT_CODE_CASE_A:
+-            timingOffset = 12;
+-            break;
+-        case EXIT_CODE_CASE_B:
+-            timingOffset = 13;
+-            break;
+-        case EXIT_CODE_CASE_C:
+-            timingOffset = 26;
+-            break;
+-        case EXIT_CODE_CASE_D:
+-            timingOffset = 50;
+-            break;
+-#elif defined(__MAD__)
+-        case EXIT_CODE_CASE_A:
+-        case EXIT_CODE_CASE_D:
+-            timingOffset = 26;
+-            break;
+-#elif defined(__FFMPEG__)
+-        case EXIT_CODE_CASE_D:
+-            timingOffset = 26;
+-            break;
+-#endif
+-        }
+-    }
+-
+-#ifdef __COREAUDIO__
+-    if (location.toLower().endsWith(".m4a")) {
+-        timingOffset = 48;
+-    }
+-#endif
+-
+-    mixxx::audio::SampleRate sampleRate = track->getSampleRate();
++    const int timingOffset = mixxx::rekordbox::timingOffsetMillis(location);
+ 
+-    QString anlzPath =
++    const QString anlzPath =
+             getFieldVariant(index, ColumnCache::COLUMN_REKORDBOX_ANALYZE_PATH)
+                     .toString();
+-    QString anlzPathExt = anlzPath.left(anlzPath.length() - 3) + "EXT";
+-
+-    rekordbox_structure_t structure;
+-    if (QFile(anlzPathExt).exists()) {
+-        // Beatgrids appear to be only correct in legacy ANLZ file
+-        readAnalyze(track, sampleRate, timingOffset, true, anlzPath, &structure);
+-        readAnalyze(track, sampleRate, timingOffset, false, anlzPathExt, &structure);
+-    } else {
+-        readAnalyze(track, sampleRate, timingOffset, false, anlzPath, &structure);
+-    }
++    const mixxx::rekordbox::Analysis analysis =
++            mixxx::rekordbox::readAnalysis(anlzPath, timingOffset, false);
+ 
+     // DecksmithOS: phrases (PSSI, in the .EXT file) and the first downbeat
+     // (PQTZ), shown by the waveform overview and the beat renderer
+-    const auto pTrackStructure = makeTrackStructure(structure);
++    const auto pTrackStructure = mixxx::rekordbox::applyAnalysis(
++            track, analysis, mixxx::rekordbox::ApplyMode::Merge);
+     if (pTrackStructure) {
+         track->setStructure(pTrackStructure);
+         m_pTrackCollectionManager->internalCollection()
+diff --git a/src/library/rekordbox/rekordboxpdbtext.h b/src/library/rekordbox/rekordboxpdbtext.h
+new file mode 100644
+index 00000000..472e1273
+--- /dev/null
++++ b/src/library/rekordbox/rekordboxpdbtext.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++#include <rekordbox_pdb.h>
++
++#include <QString>
++
++namespace mixxx {
++namespace rekordbox {
++
++/// Decodes one of the "variety of obscure representations" of strings in
++/// export.pdb files.
++QString getText(rekordbox_pdb_t::device_sql_string_t* deviceString);
++
++/// UTF-16BE string of an ANLZ file (with a trailing null character)
++QString fromUtf16BeString(const std::string& toConvert);
++
++} // namespace rekordbox
++} // namespace mixxx
+diff --git a/src/library/serato/seratocrate.cpp b/src/library/serato/seratocrate.cpp
+new file mode 100644
+index 00000000..87b75235
+--- /dev/null
++++ b/src/library/serato/seratocrate.cpp
+@@ -0,0 +1,101 @@
++#include "library/serato/seratocrate.h"
++
++#include <QBuffer>
++#include <QByteArray>
++#include <QIODevice>
++#include <QTextCodec>
++#include <QtDebug>
++#include <QtEndian>
++
++namespace mixxx {
++namespace serato {
++
++namespace {
++
++// Serato database field IDs, see SeratoFeature
++constexpr quint32 kFieldVersion = 0x7672736e;   // vrsn
++constexpr quint32 kFieldTrack = 0x6f74726b;     // otrk
++constexpr quint32 kFieldTrackPath = 0x7074726b; // ptrk
++
++constexpr int kHeaderSize = 2 * sizeof(quint32);
++
++QString utf16beToQString(const QByteArray& data) {
++    return QTextCodec::codecForName("UTF-16BE")->toUnicode(data);
++}
++
++quint32 bytesToUInt32(const QByteArray& data, int offset) {
++    return qFromBigEndian<quint32>(data.constData() + offset);
++}
++
++/// Reads all fields of a device, calls `handleField` for each one.
++/// Returns false if the data ends in the middle of a field.
++template<typename Handler>
++bool readFields(QIODevice* pDevice, Handler handleField) {
++    QByteArray headerData = pDevice->read(kHeaderSize);
++    while (headerData.length() == kHeaderSize) {
++        const quint32 fieldId = bytesToUInt32(headerData, 0);
++        const quint32 fieldSize = bytesToUInt32(headerData, sizeof(quint32));
++        const QByteArray data = pDevice->read(fieldSize);
++        if (static_cast<quint32>(data.length()) != fieldSize) {
++            qWarning() << "Serato crate: failed to read" << fieldSize
++                       << "bytes for field" << headerData.left(sizeof(quint32));
++            return false;
++        }
++        handleField(fieldId, data);
++        headerData = pDevice->read(kHeaderSize);
++    }
++    if (headerData.length() != 0) {
++        qWarning() << "Serato crate: found" << headerData.length()
++                   << "extra bytes at the end";
++        return false;
++    }
++    return true;
++}
++
++QString parseCrateTrackPath(const QByteArray& trackData, bool* pOk) {
++    QByteArray data = trackData;
++    QBuffer buffer(&data);
++    buffer.open(QIODevice::ReadOnly);
++    QString location;
++    const bool ok = readFields(&buffer, [&location](quint32 fieldId, const QByteArray& fieldData) {
++        if (fieldId == kFieldTrackPath) {
++            location = utf16beToQString(fieldData);
++        }
++    });
++    if (!ok) {
++        *pOk = false;
++        return QString();
++    }
++    return location;
++}
++
++} // anonymous namespace
++
++QStringList readCrateTrackPaths(QIODevice* pDevice, bool* pOk) {
++    QStringList paths;
++    bool ok = true;
++    const bool complete = readFields(pDevice,
++            [&paths, &ok](quint32 fieldId, const QByteArray& data) {
++                switch (fieldId) {
++                case kFieldVersion:
++                    qDebug() << "Serato crate version:" << utf16beToQString(data);
++                    break;
++                case kFieldTrack: {
++                    const QString path = parseCrateTrackPath(data, &ok);
++                    if (!path.isEmpty()) {
++                        paths.append(path);
++                    }
++                } break;
++                default:
++                    // Column definitions etc.
++                    break;
++                }
++            });
++    if (pOk) {
++        *pOk = ok && complete;
++    }
++    return paths;
++}
++
++} // namespace serato
++} // namespace mixxx
+diff --git a/src/library/serato/seratocrate.h b/src/library/serato/seratocrate.h
+new file mode 100644
+index 00000000..1e61a7ee
+--- /dev/null
++++ b/src/library/serato/seratocrate.h
+@@ -0,0 +1,20 @@
++#pragma once
++
++#include <QStringList>
++
++class QIODevice;
++
++namespace mixxx {
++namespace serato {
++
++/// Reads the track paths of a Serato .crate file (_Serato_/Subcrates/*.crate)
++/// in crate order. The paths are relative to the root of the drive that
++/// holds the _Serato_ directory.
++///
++/// Shared by SeratoFeature and the DecksmithOS USB library import.
++/// `pOk` is set to false if the file is truncated or malformed; the paths read
++/// up to that point are returned.
++QStringList readCrateTrackPaths(QIODevice* pDevice, bool* pOk = nullptr);
++
++} // namespace serato
++} // namespace mixxx
+diff --git a/src/library/serato/seratofeature.cpp b/src/library/serato/seratofeature.cpp
+index 005e3cf4..8eaa4b53 100644
+--- a/src/library/serato/seratofeature.cpp
++++ b/src/library/serato/seratofeature.cpp
+@@ -11,6 +11,7 @@
+ #include "library/dao/trackschema.h"
+ #include "library/library.h"
+ #include "library/queryutil.h"
++#include "library/serato/seratocrate.h"
+ #include "library/serato/seratoplaylistmodel.h"
+ #include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+@@ -282,53 +283,6 @@ inline bool parseTrack(serato_track_t* track, QIODevice* buffer) {
+     return true;
+ }
+ 
+-inline QString parseCrateTrackPath(QIODevice* buffer) {
+-    QString location;
+-    QByteArray headerData = buffer->read(kHeaderSize);
+-    while (headerData.length() == kHeaderSize) {
+-        quint32 fieldId = bytesToUInt32(headerData.mid(0, sizeof(quint32)));
+-        quint32 fieldSize = bytesToUInt32(headerData.mid(sizeof(quint32), kHeaderSize));
+-
+-        // Read field data
+-        QByteArray data = buffer->read(fieldSize);
+-        if (static_cast<quint32>(data.length()) != fieldSize) {
+-            QString fieldName = QString(headerData.mid(0, sizeof(quint32)));
+-            qWarning() << "Failed to read "
+-                       << fieldSize
+-                       << " bytes for "
+-                       << fieldName
+-                       << " field.";
+-            return QString();
+-        }
+-
+-        // Parse field data
+-        switch (static_cast<FieldId>(fieldId)) {
+-        case FieldId::TrackPath:
+-            location = utf16beToQString(data, fieldSize);
+-            break;
+-        default: {
+-            QString fieldName = QString(headerData.mid(0, sizeof(quint32)));
+-            qDebug() << "Ignoring unknown field "
+-                     << fieldName
+-                     << " ("
+-                     << fieldSize
+-                     << " bytes).";
+-        }
+-        }
+-
+-        headerData = buffer->read(kHeaderSize);
+-    }
+-
+-    if (headerData.length() != 0) {
+-        qWarning() << "Found "
+-                   << headerData.length()
+-                   << " extra bytes at end of track definition.";
+-        return QString();
+-    }
+-
+-    return location;
+-}
+-
+ QString parseCrate(
+         const QSqlDatabase& database,
+         const QString& databasePath,
+@@ -363,67 +317,17 @@ QString parseCrate(
+         return QString();
+     }
+ 
++    bool ok = true;
++    const QStringList locations = mixxx::serato::readCrateTrackPaths(&crateFile, &ok);
+     int trackCount = 0;
+-    QByteArray headerData = crateFile.read(kHeaderSize);
+-    while (headerData.length() == kHeaderSize) {
+-        quint32 fieldId = bytesToUInt32(headerData.mid(0, sizeof(quint32)));
+-        quint32 fieldSize = bytesToUInt32(headerData.mid(sizeof(quint32), kHeaderSize));
+-
+-        // Read field data
+-        QByteArray data = crateFile.read(fieldSize);
+-        if (static_cast<quint32>(data.length()) != fieldSize) {
+-            QString fieldName = QString(headerData.mid(0, sizeof(quint32)));
+-            qWarning() << "Failed to read "
+-                       << fieldSize
+-                       << " bytes for "
+-                       << fieldName
+-                       << " field from "
+-                       << crateFilePath
+-                       << ".";
+-            return QString();
+-        }
+-
+-        // Parse field data
+-        switch (static_cast<FieldId>(fieldId)) {
+-        case FieldId::Version: {
+-            QString version = utf16beToQString(data, fieldSize);
+-            qDebug() << "Serato Database Version: "
+-                     << version;
+-            break;
+-        }
+-        case FieldId::Track: {
+-            QBuffer buffer(&data);
+-            buffer.open(QIODevice::ReadOnly);
+-            QString location = parseCrateTrackPath(&buffer);
+-            if (!location.isEmpty()) {
+-                int trackId = trackIdMap.value(location, -1);
+-                insertTrackIntoPlaylist(database, playlistId, trackId, trackCount);
+-                trackCount++;
+-                break;
+-            }
+-            break;
+-        }
+-        default: {
+-            QString fieldName = QString(headerData.mid(0, sizeof(quint32)));
+-            qDebug() << "Ignoring unknown field "
+-                     << fieldName
+-                     << " ("
+-                     << fieldSize
+-                     << " bytes) in database "
+-                     << crateFilePath
+-                     << ".";
+-        }
+-        }
+-
+-        headerData = crateFile.read(kHeaderSize);
++    for (const QString& location : locations) {
++        int trackId = trackIdMap.value(location, -1);
++        insertTrackIntoPlaylist(database, playlistId, trackId, trackCount);
++        trackCount++;
+     }
+-
+-    if (headerData.length() != 0) {
+-        qWarning() << "Found "
+-                   << headerData.length()
+-                   << " extra bytes at end of Serato database file "
+-                   << crateFilePath
+-                   << ".";
++    if (!ok) {
++        qWarning() << "Failed to parse Serato crate file" << crateFilePath;
++        return QString();
+     }
+ 
+     return crateName;
+diff --git a/src/library/trackset/playlistfeature.cpp b/src/library/trackset/playlistfeature.cpp
+index aa903fd0..98055e44 100644
+--- a/src/library/trackset/playlistfeature.cpp
++++ b/src/library/trackset/playlistfeature.cpp
+@@ -11,6 +11,7 @@
+ #include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+ #include "library/treeitem.h"
++#include "library/usbimport/usblibraryimporter.h"
+ #include "moc_playlistfeature.cpp"
+ #include "sources/soundsourceproxy.h"
+ #include "util/db/dbconnection.h"
+@@ -126,17 +127,24 @@ QList<BasePlaylistFeature::IdAndLabel> PlaylistFeature::createPlaylistLabels() {
+             m_pLibrary->trackCollectionManager()->internalCollection()->database();
+ 
+     QList<BasePlaylistFeature::IdAndLabel> playlistLabels;
++    // DecksmithOS: with the USB library import, the playlists of the drives
++    // come first, in rekordbox/Serato order (sort_order of their table),
++    // followed by all other playlists sorted by name.
++    const bool usbImport = mixxx::usbimport::UsbLibraryImporter::isEnabled() &&
++            mixxx::usbimport::UsbLibraryImporter::ensureSchema(database);
+     QString queryString = QStringLiteral(
+             "CREATE TEMPORARY VIEW IF NOT EXISTS %1 "
+             "AS SELECT "
+             "  Playlists.id AS id, "
+             "  Playlists.name AS name, "
+             "  LOWER(Playlists.name) AS sort_name, "
++            "%3"
+             "  COUNT(case library.mixxx_deleted when 0 then 1 else null end) "
+             "    AS count, "
+             "  SUM(case library.mixxx_deleted "
+             "    when 0 then library.duration else 0 end) AS durationSeconds "
+             "FROM Playlists "
++            "%4"
+             "LEFT JOIN PlaylistTracks "
+             "  ON PlaylistTracks.playlist_id = Playlists.id "
+             "LEFT JOIN library "
+@@ -145,10 +153,22 @@ QList<BasePlaylistFeature::IdAndLabel> PlaylistFeature::createPlaylistLabels() {
+             "  GROUP BY Playlists.id")
+                                   .arg(m_countsDurationTableName,
+                                           QString::number(
+-                                                  PlaylistDAO::PLHT_NOT_HIDDEN));
++                                                  PlaylistDAO::PLHT_NOT_HIDDEN),
++                                          usbImport
++                                                  ? QStringLiteral(
++                                                            "  usb.playlist_id IS NULL AS usb_last, "
++                                                            "  usb.sort_order AS usb_order, ")
++                                                  : QString(),
++                                          usbImport
++                                                  ? QStringLiteral(
++                                                            "LEFT JOIN %1 AS usb "
++                                                            "  ON usb.playlist_id = Playlists.id ")
++                                                            .arg(mixxx::usbimport::kPlaylistTable)
++                                                  : QString());
+     queryString.append(
+             mixxx::DbConnection::collateLexicographically(
+-                    " ORDER BY sort_name"));
++                    usbImport ? QStringLiteral(" ORDER BY usb_last, usb_order, sort_name")
++                              : QStringLiteral(" ORDER BY sort_name")));
+     QSqlQuery query(database);
+     if (!query.exec(queryString)) {
+         LOG_FAILED_QUERY(query);
+@@ -315,6 +335,31 @@ void PlaylistFeature::slotPlaylistTableChanged(int playlistId) {
+     }
+ }
+ 
++void PlaylistFeature::refreshAfterBulkChange(const QSet<int>& removedPlaylistIds) {
++    int selectedPlaylistId = kInvalidPlaylistId;
++    if (isChildIndexSelectedInSidebar(m_lastClickedIndex)) {
++        selectedPlaylistId = playlistIdFromIndex(m_lastClickedIndex);
++    }
++    const bool selectedRemoved = selectedPlaylistId != kInvalidPlaylistId &&
++            removedPlaylistIds.contains(selectedPlaylistId);
++    if (selectedRemoved) {
++        selectedPlaylistId = kInvalidPlaylistId;
++    }
++
++    clearChildModel();
++    const QModelIndex newIndex = constructChildModel(selectedPlaylistId);
++    m_playlistDao.getPlaylistsTrackIsIn(m_selectedTrackId, &m_playlistIdsOfSelectedTrack);
++    if (selectedRemoved) {
++        // The shown playlist is gone: show the Playlists root view
++        activate();
++        emit featureSelect(this, QModelIndex());
++    } else if (selectedPlaylistId != kInvalidPlaylistId && newIndex.isValid()) {
++        // Keep the selection, like slotPlaylistTableChanged()
++        activateChild(newIndex);
++        emit featureSelect(this, newIndex);
++    }
++}
++
+ void PlaylistFeature::slotPlaylistContentOrLockChanged(const QSet<int>& playlistIds) {
+     // qDebug() << "PlaylistFeature::slotPlaylistContentOrLockChanged() playlistId:" << playlistIds;
+     QSet<int> idsToBeUpdated;
+diff --git a/src/library/trackset/playlistfeature.h b/src/library/trackset/playlistfeature.h
+index 99c05107..3fa8173a 100644
+--- a/src/library/trackset/playlistfeature.h
++++ b/src/library/trackset/playlistfeature.h
+@@ -27,6 +27,10 @@ class PlaylistFeature : public BasePlaylistFeature {
+             QObject* pSource) override;
+     bool dragMoveAcceptChild(const QModelIndex& index, const QUrl& url) override;
+ 
++    /// DecksmithOS: rebuilds the sidebar after playlists were created or
++    /// deleted with blocked PlaylistDAO signals (USB library import).
++    void refreshAfterBulkChange(const QSet<int>& removedPlaylistIds);
++
+   public slots:
+     void onRightClick(const QPoint& globalPos) override;
+     void onRightClickChild(const QPoint& globalPos, const QModelIndex& index) override;
+diff --git a/src/library/usbimport/usbimportutil.cpp b/src/library/usbimport/usbimportutil.cpp
+new file mode 100644
+index 00000000..ff27d46e
+--- /dev/null
++++ b/src/library/usbimport/usbimportutil.cpp
+@@ -0,0 +1,226 @@
++#include "library/usbimport/usbimportutil.h"
++
++#include <QDir>
++#include <QHash>
++#include <QStorageInfo>
++#include <QFileInfo>
++#include <QRegularExpression>
++#include <QTextCodec>
++#include <algorithm>
++
++namespace mixxx {
++namespace usbimport {
++
++const char* const kEnvVar = "DECKSMITHOS_USB_IMPORT";
++
++const QString kNameSeparator = QStringLiteral(" ▸ ");
++
++const QString kSeratoCrateSeparator = QStringLiteral("%%");
++
++namespace {
++
++QString removeTrailingSlashes(QString path) {
++    while (path.size() > 1 && path.endsWith(QChar('/'))) {
++        path.chop(1);
++    }
++    return path;
++}
++
++/// Case-insensitive comparison of crate paths, level by level
++bool lessCratePath(const QStringList& a, const QStringList& b) {
++    const int count = std::min(a.size(), b.size());
++    for (int i = 0; i < count; ++i) {
++        const int result = a[i].compare(b[i], Qt::CaseInsensitive);
++        if (result != 0) {
++            return result < 0;
++        }
++        const int exactResult = a[i].compare(b[i], Qt::CaseSensitive);
++        if (exactResult != 0) {
++            return exactResult < 0;
++        }
++    }
++    // The parent before its children
++    return a.size() < b.size();
++}
++
++void flattenChildren(const QHash<quint32, QList<const PlaylistTreeNode*>>& children,
++        quint32 parentId,
++        const QStringList& parentPath,
++        QSet<quint32>* pVisited,
++        QList<FlatPlaylist>* pResult) {
++    const auto it = children.constFind(parentId);
++    if (it == children.constEnd()) {
++        return;
++    }
++    for (const PlaylistTreeNode* pNode : it.value()) {
++        if (pVisited->contains(pNode->id)) {
++            continue; // broken tree with a cycle
++        }
++        pVisited->insert(pNode->id);
++        const QStringList path = parentPath + QStringList{pNode->name};
++        if (pNode->isFolder) {
++            flattenChildren(children, pNode->id, path, pVisited, pResult);
++        } else {
++            pResult->append(FlatPlaylist{path, pNode->id});
++        }
++    }
++}
++
++} // anonymous namespace
++
++QString driveLabel(int index) {
++    if (index <= 0) {
++        return QStringLiteral("USB");
++    }
++    return QStringLiteral("USB") + QString::number(index + 1);
++}
++
++QList<Drive> parseDriveList(const QString& value) {
++    QList<Drive> drives;
++    QSet<QString> seen;
++    const QStringList entries = value.split(QChar(':'), Qt::SkipEmptyParts);
++    for (const QString& entry : entries) {
++        const QString mountPoint = removeTrailingSlashes(entry.trimmed());
++        if (mountPoint.isEmpty() || seen.contains(mountPoint)) {
++            continue;
++        }
++        seen.insert(mountPoint);
++        drives.append(Drive{mountPoint, driveLabel(static_cast<int>(drives.size()))});
++    }
++    return drives;
++}
++
++QString playlistName(const QString& driveLabel, const QStringList& path) {
++    return (QStringList{driveLabel} + path).join(kNameSeparator);
++}
++
++QString locationKey(const QString& location) {
++    return location.normalized(QString::NormalizationForm_C).toCaseFolded();
++}
++
++bool isOnDrive(const QString& location, const QString& mountPoint) {
++    return location.startsWith(mountPoint + QChar('/'));
++}
++
++QString driveLocation(const QString& mountPoint, const QString& relativePath) {
++    QString path = relativePath;
++    while (path.startsWith(QChar('/'))) {
++        path.remove(0, 1);
++    }
++    return mountPoint + QChar('/') + path;
++}
++
++QList<FlatPlaylist> flattenPlaylistTree(const QList<PlaylistTreeNode>& nodes) {
++    QHash<quint32, QList<const PlaylistTreeNode*>> children;
++    for (const auto& node : nodes) {
++        if (node.id == 0) {
++            continue;
++        }
++        children[node.parentId].append(&node);
++    }
++    for (auto& siblings : children) {
++        std::stable_sort(siblings.begin(),
++                siblings.end(),
++                [](const PlaylistTreeNode* a, const PlaylistTreeNode* b) {
++                    return a->sortOrder < b->sortOrder;
++                });
++    }
++    QList<FlatPlaylist> result;
++    QSet<quint32> visited;
++    flattenChildren(children, 0, QStringList(), &visited, &result);
++    return result;
++}
++
++QStringList parseSeratoNewOrder(const QByteArray& data) {
++    QString text;
++    if (data.startsWith("\xFE\xFF")) {
++        text = QTextCodec::codecForName("UTF-16BE")->toUnicode(data.mid(2));
++    } else if (data.startsWith("\xFF\xFE")) {
++        text = QTextCodec::codecForName("UTF-16LE")->toUnicode(data.mid(2));
++    } else if (data.size() >= 2 && data.at(0) == '\0' && data.at(1) != '\0') {
++        // UTF-16BE without BOM: "\0[\0c..."
++        text = QTextCodec::codecForName("UTF-16BE")->toUnicode(data);
++    } else if (data.size() >= 2 && data.at(0) != '\0' && data.at(1) == '\0') {
++        text = QTextCodec::codecForName("UTF-16LE")->toUnicode(data);
++    } else {
++        text = QString::fromUtf8(data);
++    }
++
++    const QString kCratePrefix = QStringLiteral("[crate]");
++    QStringList crates;
++    const QStringList lines = text.split(QRegularExpression(QStringLiteral("[\r\n]+")),
++            Qt::SkipEmptyParts);
++    for (const QString& rawLine : lines) {
++        const QString line = rawLine.trimmed();
++        if (line.startsWith(kCratePrefix, Qt::CaseInsensitive)) {
++            const QString name = line.mid(kCratePrefix.size()).trimmed();
++            if (!name.isEmpty() && !crates.contains(name)) {
++                crates.append(name);
++            }
++        }
++    }
++    return crates;
++}
++
++QStringList orderSeratoCrates(const QStringList& crateNames, const QStringList& newOrder) {
++    QStringList ordered;
++    QStringList remaining = crateNames;
++    for (const QString& name : newOrder) {
++        int index = remaining.indexOf(name);
++        if (index < 0) {
++            // Accept a different case (FAT file names)
++            for (int i = 0; i < remaining.size(); ++i) {
++                if (remaining[i].compare(name, Qt::CaseInsensitive) == 0) {
++                    index = i;
++                    break;
++                }
++            }
++        }
++        if (index >= 0) {
++            ordered.append(remaining.takeAt(index));
++        }
++    }
++    std::sort(remaining.begin(),
++            remaining.end(),
++            [](const QString& a, const QString& b) {
++                return lessCratePath(seratoCratePath(a), seratoCratePath(b));
++            });
++    return ordered + remaining;
++}
++
++QStringList seratoCratePath(const QString& crateName) {
++    return crateName.split(kSeratoCrateSeparator, Qt::SkipEmptyParts);
++}
++
++DriveWatcher::DriveWatcher(QList<Drive> drives,
++        std::function<bool(const QString&)> isPresent)
++        : m_drives(std::move(drives)),
++          m_isPresent(std::move(isPresent)) {
++    for (int i = 0; i < m_drives.size(); ++i) {
++        m_present.append(false);
++    }
++}
++
++QList<DriveWatcher::Change> DriveWatcher::poll() {
++    QList<Change> changes;
++    for (int i = 0; i < m_drives.size(); ++i) {
++        const bool present = m_isPresent(m_drives[i].mountPoint);
++        if (present != m_present[i]) {
++            m_present[i] = present;
++            changes.append(Change{i, present});
++        }
++    }
++    return changes;
++}
++
++bool isMountedFilesystem(const QString& path) {
++    if (!QFileInfo::exists(path)) {
++        return false;
++    }
++    const QStorageInfo storage(path);
++    return storage.isValid() && storage.isReady() &&
++            storage.rootPath() != QDir::rootPath();
++}
++
++} // namespace usbimport
++} // namespace mixxx
+diff --git a/src/library/usbimport/usbimportutil.h b/src/library/usbimport/usbimportutil.h
+new file mode 100644
+index 00000000..997761f0
+--- /dev/null
++++ b/src/library/usbimport/usbimportutil.h
+@@ -0,0 +1,124 @@
++#pragma once
++
++// Pure helpers of the DecksmithOS USB library import (see
++// usblibraryimporter.h). Kept free of database and GUI dependencies so they
++// can be unit tested.
++
++#include <QByteArray>
++#include <QList>
++#include <QMap>
++#include <QSet>
++#include <QString>
++#include <QStringList>
++#include <functional>
++
++namespace mixxx {
++namespace usbimport {
++
++/// Environment variable with the colon separated mount points of the drives
++/// to import, e.g. "/usb:/usb2". The import is disabled if it is not set.
++extern const char* const kEnvVar;
++
++/// A configured import drive
++struct Drive {
++    QString mountPoint; // without trailing slash
++    QString label;      // "USB", "USB2", ...
++};
++
++/// The label of the n-th (0-based) configured drive: "USB" for the first
++/// one, "USB2", "USB3", ... for the others. It matches how DecksmithOS names
++/// the mount points /usb and /usb2.
++QString driveLabel(int index);
++
++/// Parses the value of kEnvVar. Empty entries and duplicates are skipped,
++/// trailing slashes are removed. The label follows the position in the list.
++QList<Drive> parseDriveList(const QString& value);
++
++/// Separator between the levels of flattened playlist names
++extern const QString kNameSeparator; // " ▸ "
++
++/// "USB ▸ Folder ▸ Playlist"
++QString playlistName(const QString& driveLabel, const QStringList& path);
++
++/// Key used to match file paths of rekordbox/Serato with the locations of the
++/// Mixxx library: Unicode NFC and case folded, because the drives are mostly
++/// FAT/exFAT (case insensitive) and prepared on macOS (NFD file names).
++QString locationKey(const QString& location);
++
++/// True if `location` lies on the drive mounted at `mountPoint`
++bool isOnDrive(const QString& location, const QString& mountPoint);
++
++/// Absolute location of a path relative to the drive root
++QString driveLocation(const QString& mountPoint, const QString& relativePath);
++
++/// A node of the rekordbox playlist tree
++struct PlaylistTreeNode {
++    quint32 id = 0;
++    quint32 parentId = 0; // 0 = root
++    quint32 sortOrder = 0;
++    bool isFolder = false;
++    QString name;
++};
++
++/// A playlist of a flattened playlist tree
++struct FlatPlaylist {
++    QStringList path; // folder names and the playlist name
++    quint32 id = 0;
++};
++
++/// Flattens the rekordbox playlist tree depth-first in rekordbox order
++/// (sort order of the siblings). Folders are not playlists themselves; they
++/// only contribute their name to the path.
++QList<FlatPlaylist> flattenPlaylistTree(const QList<PlaylistTreeNode>& nodes);
++
++/// Separator of the hierarchy levels in Serato crate names
++/// ("Parent%%Child.crate")
++extern const QString kSeratoCrateSeparator;
++
++/// The crate names listed in _Serato_/neworder.pref (the crate order of the
++/// Serato sidebar), in file order. Lines look like "[crate]Parent%%Child".
++/// The file is UTF-16 (with or without BOM); UTF-8 is accepted as well.
++QStringList parseSeratoNewOrder(const QByteArray& data);
++
++/// Orders crate names (file names without ".crate") like the Serato
++/// sidebar: first the crates listed in neworder.pref in that order, then all
++/// others depth-first, siblings sorted case-insensitively by name.
++QStringList orderSeratoCrates(const QStringList& crateNames, const QStringList& newOrder);
++
++/// "Parent%%Child" -> {"Parent", "Child"}
++QStringList seratoCratePath(const QString& crateName);
++
++/// Detects drives appearing and disappearing. The presence check is
++/// injectable for tests; in Mixxx it is isMountedFilesystem().
++class DriveWatcher {
++  public:
++    struct Change {
++        int driveIndex;
++        bool present;
++    };
++
++    DriveWatcher(QList<Drive> drives, std::function<bool(const QString&)> isPresent);
++
++    const QList<Drive>& drives() const {
++        return m_drives;
++    }
++    bool isPresent(int driveIndex) const {
++        return m_present.value(driveIndex, false);
++    }
++
++    /// Checks all drives and returns the ones whose presence changed since
++    /// the last call. Initially all drives are considered absent.
++    QList<Change> poll();
++
++  private:
++    const QList<Drive> m_drives;
++    const std::function<bool(const QString&)> m_isPresent;
++    QList<bool> m_present;
++};
++
++/// True if `path` is (inside) a mounted file system other than the root
++/// file system, i.e. a drive is mounted at the mount point `path`.
++bool isMountedFilesystem(const QString& path);
++
++} // namespace usbimport
++} // namespace mixxx
+diff --git a/src/library/usbimport/usblibraryimporter.cpp b/src/library/usbimport/usblibraryimporter.cpp
+new file mode 100644
+index 00000000..4c109e52
+--- /dev/null
++++ b/src/library/usbimport/usblibraryimporter.cpp
+@@ -0,0 +1,806 @@
++#include "library/usbimport/usblibraryimporter.h"
++
++#include <QDir>
++#include <QElapsedTimer>
++#include <QFile>
++#include <QFileInfo>
++#include <QMutex>
++#include <QSignalBlocker>
++#include <QSqlQuery>
++#include <QThread>
++#include <QWaitCondition>
++#include <QtDebug>
++#include <atomic>
++#include <deque>
++
++#include "library/dao/analysisdao.h"
++#include "library/dao/playlistdao.h"
++#include "library/queryutil.h"
++#include "library/serato/seratocrate.h"
++#include "library/trackcollection.h"
++#include "library/trackcollectionmanager.h"
++#include "moc_usblibraryimporter.cpp"
++#include "track/keyfactory.h"
++#include "track/track.h"
++#include "track/trackref.h"
++
++namespace mixxx {
++namespace usbimport {
++
++const QString kPlaylistTable = QStringLiteral("decksmithos_usb_playlists");
++
++namespace {
++
++constexpr int kPollIntervalMillis = 2000;
++constexpr int kQueueIntervalMillis = 50;
++/// GUI thread time per queue tick for applying analysis results
++constexpr int kQueueBudgetMillis = 15;
++/// Maximum number of analysis results waiting for the GUI thread
++constexpr size_t kMaxQueuedResults = 32;
++/// Sort order offset between drives, so the lists of the first drive come
++/// first
++constexpr int kSortOrderPerDrive = 1000000;
++/// Give up waiting for a requested library scan that does not start
++constexpr qint64 kScanStartTimeoutMillis = 15000;
++
++const QString kSeratoDirectory = QStringLiteral("_Serato_");
++const QString kSeratoCrateDirectory = QStringLiteral("Subcrates");
++const QString kSeratoNewOrderFile = QStringLiteral("neworder.pref");
++const QString kSeratoCrateSuffix = QStringLiteral(".crate");
++
++void readRekordbox(const Drive& drive, DriveIndex* pIndex) {
++    const rekordbox::Export rbExport = rekordbox::readExport(drive.mountPoint);
++    if (!rbExport.valid) {
++        return;
++    }
++    QHash<quint32, QString> locationsById;
++    for (const auto& track : rbExport.tracks) {
++        pIndex->rekordboxTracks.insert(locationKey(track.location), track);
++        pIndex->rekordboxTrackList.append(track);
++        locationsById.insert(track.id, track.location);
++    }
++
++    QList<PlaylistTreeNode> nodes;
++    for (const auto& exportNode : rbExport.playlistNodes) {
++        nodes.append(PlaylistTreeNode{exportNode.id,
++                exportNode.parentId,
++                exportNode.sortOrder,
++                exportNode.isFolder,
++                exportNode.name});
++    }
++    const QList<FlatPlaylist> flatPlaylists = flattenPlaylistTree(nodes);
++    for (const auto& flatPlaylist : flatPlaylists) {
++        DrivePlaylist playlist;
++        playlist.name = playlistName(drive.label, flatPlaylist.path);
++        // QMap: ordered by the entry index
++        const QMap<quint32, quint32> entries =
++                rbExport.playlistEntries.value(flatPlaylist.id);
++        for (const quint32 trackId : entries) {
++            const QString location = locationsById.value(trackId);
++            if (!location.isEmpty()) {
++                playlist.locations.append(location);
++            }
++        }
++        pIndex->playlists.append(playlist);
++    }
++    qInfo() << "USB import:" << drive.mountPoint << "has a rekordbox export with"
++            << rbExport.tracks.size() << "tracks and" << flatPlaylists.size()
++            << "playlists";
++}
++
++void readSerato(const Drive& drive, DriveIndex* pIndex) {
++    const QDir seratoDir(QDir(drive.mountPoint).filePath(kSeratoDirectory));
++    QDir crateDir(seratoDir.filePath(kSeratoCrateDirectory));
++    if (!seratoDir.exists() || !crateDir.exists()) {
++        return;
++    }
++
++    // Crate name (file name without suffix) -> file name
++    QHash<QString, QString> crateFiles;
++    const QStringList entries = crateDir.entryList(
++            QStringList{QStringLiteral("*") + kSeratoCrateSuffix}, QDir::Files);
++    for (const QString& fileName : entries) {
++        if (!fileName.endsWith(kSeratoCrateSuffix, Qt::CaseInsensitive)) {
++            continue;
++        }
++        crateFiles.insert(fileName.left(fileName.size() - kSeratoCrateSuffix.size()),
++                fileName);
++    }
++
++    QStringList newOrder;
++    QFile newOrderFile(seratoDir.filePath(kSeratoNewOrderFile));
++    if (newOrderFile.open(QIODevice::ReadOnly)) {
++        newOrder = parseSeratoNewOrder(newOrderFile.readAll());
++    }
++
++    const QStringList crateNames = orderSeratoCrates(crateFiles.keys(), newOrder);
++    for (const QString& crateName : crateNames) {
++        QFile crateFile(crateDir.filePath(crateFiles.value(crateName)));
++        if (!crateFile.open(QIODevice::ReadOnly)) {
++            qWarning() << "USB import: cannot open Serato crate" << crateFile.fileName();
++            continue;
++        }
++        bool ok = true;
++        const QStringList paths = serato::readCrateTrackPaths(&crateFile, &ok);
++        if (!ok) {
++            qWarning() << "USB import: Serato crate" << crateFile.fileName()
++                       << "is damaged, importing" << paths.size() << "tracks";
++        }
++        DrivePlaylist playlist;
++        playlist.name = playlistName(drive.label, seratoCratePath(crateName));
++        for (const QString& path : paths) {
++            playlist.locations.append(driveLocation(drive.mountPoint, path));
++        }
++        pIndex->playlists.append(playlist);
++    }
++    qInfo() << "USB import:" << drive.mountPoint << "has" << crateNames.size()
++            << "Serato crates," << newOrder.size() << "listed in neworder.pref";
++}
++
++QString sqlLikeEscaped(QString text) {
++    text.replace(QChar('\\'), QStringLiteral("\\\\"));
++    text.replace(QChar('%'), QStringLiteral("\\%"));
++    text.replace(QChar('_'), QStringLiteral("\\_"));
++    return text;
++}
++
++} // anonymous namespace
++
++std::shared_ptr<const DriveIndex> readDriveIndex(const Drive& drive) {
++    auto pIndex = std::make_shared<DriveIndex>();
++    readRekordbox(drive, pIndex.get());
++    readSerato(drive, pIndex.get());
++    return pIndex;
++}
++
++/// Phase 2: reads the ANLZ files of the tracks of a drive in a worker thread.
++/// The results are queued for the GUI thread; the worker waits while the
++/// queue is full.
++struct UsbLibraryImporter::AnalysisJob {
++    struct Result {
++        QString key;
++        rekordbox::ExportTrack track;
++        rekordbox::Analysis analysis;
++    };
++
++    std::atomic<bool> canceled{false};
++    std::atomic<bool> finished{false};
++    QMutex mutex;
++    QWaitCondition notFull;
++    std::deque<Result> results;
++
++    void run(const QList<rekordbox::ExportTrack>& tracks) {
++        QThread::currentThread()->setPriority(QThread::LowPriority);
++        for (const auto& track : tracks) {
++            if (canceled) {
++                break;
++            }
++            if (!QFileInfo::exists(track.location)) {
++                continue;
++            }
++            Result result;
++            result.key = locationKey(track.location);
++            result.track = track;
++            result.analysis = rekordbox::readAnalysis(track.anlzPath,
++                    rekordbox::timingOffsetMillis(track.location),
++                    true);
++            QMutexLocker lock(&mutex);
++            while (results.size() >= kMaxQueuedResults && !canceled) {
++                notFull.wait(&mutex, 200);
++            }
++            results.push_back(std::move(result));
++        }
++        finished = true;
++    }
++
++    bool takeResult(Result* pResult) {
++        QMutexLocker lock(&mutex);
++        if (results.empty()) {
++            return false;
++        }
++        *pResult = std::move(results.front());
++        results.pop_front();
++        notFull.wakeAll();
++        return true;
++    }
++
++    bool isDone() {
++        QMutexLocker lock(&mutex);
++        return finished && results.empty();
++    }
++};
++
++struct UsbLibraryImporter::DriveState {
++    enum class Scan {
++        WaitForStart,
++        WaitForFinish,
++        Done,
++    };
++
++    explicit DriveState(Drive drive)
++            : drive(std::move(drive)) {
++    }
++
++    void reset() {
++        scan = Scan::Done;
++        scanRequested.invalidate();
++        pIndex.reset();
++        loadedBeforeIndex.clear();
++        applied.clear();
++        importStarted = false;
++        trackIds.clear();
++        nextPlaylist = -1;
++        appliedCount = 0;
++    }
++
++    const Drive drive;
++    bool present = false;
++    /// Incremented whenever the drive appears or disappears, results of
++    /// older background jobs are discarded.
++    quint64 generation = 0;
++    Scan scan = Scan::Done;
++    QElapsedTimer scanRequested;
++    std::shared_ptr<const DriveIndex> pIndex;
++    /// Tracks loaded into a player before the index was read (key -> location)
++    QHash<QString, QString> loadedBeforeIndex;
++    /// Location keys of the tracks whose rekordbox data has been applied in
++    /// this session
++    QSet<QString> applied;
++    bool importStarted = false;
++    /// Library track ids of the drive by location key
++    QHash<QString, TrackId> trackIds;
++    /// Next playlist to create, -1 if none
++    int nextPlaylist = -1;
++    int appliedCount = 0;
++    std::shared_ptr<AnalysisJob> pJob;
++};
++
++UsbLibraryImporter* UsbLibraryImporter::s_pInstance = nullptr;
++
++bool UsbLibraryImporter::isEnabled() {
++    return !qEnvironmentVariableIsEmpty(kEnvVar);
++}
++
++bool UsbLibraryImporter::ensureSchema(const QSqlDatabase& database) {
++    QSqlQuery query(database);
++    if (!query.exec(QStringLiteral(
++                "CREATE TABLE IF NOT EXISTS %1 ("
++                "playlist_id INTEGER PRIMARY KEY, "
++                "mount_point TEXT NOT NULL, "
++                "sort_order INTEGER NOT NULL)")
++                            .arg(kPlaylistTable))) {
++        LOG_FAILED_QUERY(query);
++        return false;
++    }
++    return true;
++}
++
++void UsbLibraryImporter::beforeTrackLoad(const TrackPointer& pTrack) {
++    if (s_pInstance && pTrack) {
++        s_pInstance->applyBeforeLoad(pTrack);
++    }
++}
++
++UsbLibraryImporter::UsbLibraryImporter(
++        QObject* parent, TrackCollectionManager* pTrackCollectionManager)
++        : QObject(parent),
++          m_pTrackCollectionManager(pTrackCollectionManager),
++          m_watcher(parseDriveList(qEnvironmentVariable(kEnvVar)), isMountedFilesystem),
++          m_libraryScanRunning(false) {
++    for (const auto& drive : m_watcher.drives()) {
++        m_states.append(std::make_shared<DriveState>(drive));
++    }
++    // Phase 1 and phase 2 jobs of both drives
++    m_threadPool.setMaxThreadCount(2);
++
++    m_pollTimer.setInterval(kPollIntervalMillis);
++    connect(&m_pollTimer, &QTimer::timeout, this, &UsbLibraryImporter::slotPoll);
++    m_queueTimer.setInterval(kQueueIntervalMillis);
++    connect(&m_queueTimer, &QTimer::timeout, this, &UsbLibraryImporter::slotProcessQueue);
++
++    connect(m_pTrackCollectionManager,
++            &TrackCollectionManager::libraryScanStarted,
++            this,
++            &UsbLibraryImporter::slotLibraryScanStarted);
++    connect(m_pTrackCollectionManager,
++            &TrackCollectionManager::libraryScanFinished,
++            this,
++            &UsbLibraryImporter::slotLibraryScanFinished);
++
++    DEBUG_ASSERT(!s_pInstance);
++    s_pInstance = this;
++}
++
++UsbLibraryImporter::~UsbLibraryImporter() {
++    s_pInstance = nullptr;
++    m_pollTimer.stop();
++    m_queueTimer.stop();
++    for (const auto& pState : std::as_const(m_states)) {
++        cancelJob(pState.get());
++    }
++    m_threadPool.waitForDone();
++}
++
++QSqlDatabase UsbLibraryImporter::database() const {
++    return m_pTrackCollectionManager->internalCollection()->database();
++}
++
++void UsbLibraryImporter::start() {
++    QStringList mountPoints;
++    for (const auto& drive : m_watcher.drives()) {
++        mountPoints.append(drive.mountPoint);
++    }
++    qInfo() << "USB import enabled for" << mountPoints;
++
++    ensureSchema(database());
++    // Forget playlists that were deleted by the user
++    QSqlQuery query(database());
++    if (!query.exec(QStringLiteral(
++                "DELETE FROM %1 WHERE playlist_id NOT IN (SELECT id FROM Playlists)")
++                            .arg(kPlaylistTable))) {
++        LOG_FAILED_QUERY(query);
++    }
++    // Playlists of the last session (or a crash) are never kept: the drives
++    // that are present are imported again.
++    QSet<int> removed;
++    if (query.exec(QStringLiteral("SELECT DISTINCT mount_point FROM %1").arg(kPlaylistTable))) {
++        QStringList oldMountPoints;
++        while (query.next()) {
++            oldMountPoints.append(query.value(0).toString());
++        }
++        for (const QString& mountPoint : std::as_const(oldMountPoints)) {
++            removed += deletePlaylists(mountPoint);
++        }
++    } else {
++        LOG_FAILED_QUERY(query);
++    }
++    if (!removed.isEmpty()) {
++        qInfo() << "USB import: deleted" << removed.size() << "playlists of the last session";
++        emit playlistsChanged(removed);
++    }
++
++    slotPoll();
++    m_pollTimer.start();
++}
++
++void UsbLibraryImporter::slotPoll() {
++    const QList<DriveWatcher::Change> changes = m_watcher.poll();
++    for (const auto& change : changes) {
++        if (change.present) {
++            driveAppeared(change.driveIndex);
++        } else {
++            driveRemoved(change.driveIndex);
++        }
++    }
++
++    for (int i = 0; i < m_states.size(); ++i) {
++        DriveState* pState = m_states[i].get();
++        if (pState->present && pState->scan == DriveState::Scan::WaitForStart &&
++                !m_libraryScanRunning &&
++                pState->scanRequested.isValid() &&
++                pState->scanRequested.elapsed() > kScanStartTimeoutMillis) {
++            qWarning() << "USB import: the library scan for" << pState->drive.mountPoint
++                       << "did not start, importing without it";
++            pState->scan = DriveState::Scan::Done;
++            maybeStartImport(i);
++        }
++    }
++}
++
++void UsbLibraryImporter::driveAppeared(int driveIndex) {
++    DriveState* pState = m_states[driveIndex].get();
++    qInfo() << "USB import: drive" << pState->drive.label << "appeared at"
++            << pState->drive.mountPoint;
++    cancelJob(pState);
++    pState->reset();
++    pState->present = true;
++    pState->generation++;
++
++    const QSet<int> removed = deletePlaylists(pState->drive.mountPoint);
++    if (!removed.isEmpty()) {
++        emit playlistsChanged(removed);
++    }
++
++    // The files of the drive must be in the library before playlists can be
++    // created and analysis data can be applied.
++    pState->scan = DriveState::Scan::WaitForStart;
++    requestLibraryScan();
++
++    const Drive drive = pState->drive;
++    const quint64 generation = pState->generation;
++    m_threadPool.start([this, drive, driveIndex, generation]() {
++        QThread::currentThread()->setPriority(QThread::LowPriority);
++        QElapsedTimer timer;
++        timer.start();
++        std::shared_ptr<const DriveIndex> pIndex = readDriveIndex(drive);
++        qInfo() << "USB import: read" << drive.mountPoint << "in"
++                << timer.elapsed() << "ms";
++        QMetaObject::invokeMethod(
++                this,
++                [this, driveIndex, generation, pIndex]() {
++                    driveIndexRead(driveIndex, generation, pIndex);
++                },
++                Qt::QueuedConnection);
++    });
++}
++
++void UsbLibraryImporter::driveRemoved(int driveIndex) {
++    DriveState* pState = m_states[driveIndex].get();
++    qInfo() << "USB import: drive" << pState->drive.label << "removed from"
++            << pState->drive.mountPoint;
++    cancelJob(pState);
++    pState->reset();
++    pState->present = false;
++    pState->generation++;
++
++    const QSet<int> removed = deletePlaylists(pState->drive.mountPoint);
++    if (!removed.isEmpty()) {
++        emit playlistsChanged(removed);
++    }
++    updateQueueTimer();
++}
++
++void UsbLibraryImporter::driveIndexRead(int driveIndex,
++        quint64 generation,
++        std::shared_ptr<const DriveIndex> pIndex) {
++    DriveState* pState = m_states[driveIndex].get();
++    if (!pState->present || pState->generation != generation) {
++        return; // the drive was removed in the meantime
++    }
++    pState->pIndex = std::move(pIndex);
++
++    // Tracks that were loaded before the index was available
++    const QHash<QString, QString> loaded = pState->loadedBeforeIndex;
++    pState->loadedBeforeIndex.clear();
++    for (auto it = loaded.constBegin(); it != loaded.constEnd(); ++it) {
++        if (pState->applied.contains(it.key())) {
++            continue;
++        }
++        const TrackPointer pTrack = m_pTrackCollectionManager->getTrackByRef(
++                TrackRef::fromFilePath(it.value()));
++        if (pTrack) {
++            applyNow(pState, pTrack, it.key());
++        }
++    }
++
++    maybeStartImport(driveIndex);
++}
++
++void UsbLibraryImporter::requestLibraryScan() {
++    if (m_libraryScanRunning) {
++        // Requested again when the running scan has finished
++        return;
++    }
++    for (const auto& pState : std::as_const(m_states)) {
++        if (pState->present && pState->scan == DriveState::Scan::WaitForStart) {
++            pState->scanRequested.start();
++        }
++    }
++    qInfo() << "USB import: requesting a library scan";
++    m_pTrackCollectionManager->startLibraryScan();
++}
++
++void UsbLibraryImporter::slotLibraryScanStarted() {
++    m_libraryScanRunning = true;
++    for (const auto& pState : std::as_const(m_states)) {
++        if (pState->present && pState->scan == DriveState::Scan::WaitForStart) {
++            pState->scan = DriveState::Scan::WaitForFinish;
++        }
++    }
++}
++
++void UsbLibraryImporter::slotLibraryScanFinished() {
++    m_libraryScanRunning = false;
++    bool rescan = false;
++    for (int i = 0; i < m_states.size(); ++i) {
++        DriveState* pState = m_states[i].get();
++        if (!pState->present) {
++            continue;
++        }
++        if (pState->scan == DriveState::Scan::WaitForFinish) {
++            pState->scan = DriveState::Scan::Done;
++            maybeStartImport(i);
++        } else if (pState->scan == DriveState::Scan::WaitForStart) {
++            // Appeared while a scan was running, which may have missed it
++            rescan = true;
++        }
++    }
++    if (rescan) {
++        requestLibraryScan();
++    }
++}
++
++void UsbLibraryImporter::maybeStartImport(int driveIndex) {
++    DriveState* pState = m_states[driveIndex].get();
++    if (!pState->present || !pState->pIndex ||
++            pState->scan != DriveState::Scan::Done || pState->importStarted) {
++        return;
++    }
++    pState->importStarted = true;
++
++    // Library tracks of the drive
++    QSqlQuery query(database());
++    query.prepare(QStringLiteral(
++            "SELECT library.id, track_locations.location FROM library "
++            "INNER JOIN track_locations ON library.location = track_locations.id "
++            "WHERE track_locations.location LIKE :prefix ESCAPE '\\'"));
++    const QString prefix =
++            sqlLikeEscaped(pState->drive.mountPoint + QChar('/')) + QChar('%');
++    query.bindValue(QStringLiteral(":prefix"), prefix);
++    if (query.exec()) {
++        while (query.next()) {
++            const QString location = query.value(1).toString();
++            if (isOnDrive(location, pState->drive.mountPoint)) {
++                pState->trackIds.insert(locationKey(location), TrackId(query.value(0)));
++            }
++        }
++    } else {
++        LOG_FAILED_QUERY(query);
++    }
++
++    const DriveIndex& index = *pState->pIndex;
++    if (!index.playlists.isEmpty()) {
++        pState->nextPlaylist = 0;
++    }
++
++    QList<rekordbox::ExportTrack> tracks;
++    for (const auto& track : index.rekordboxTrackList) {
++        const QString key = locationKey(track.location);
++        if (pState->trackIds.contains(key) && !pState->applied.contains(key)) {
++            tracks.append(track);
++        }
++    }
++    qInfo() << "USB import:" << pState->drive.mountPoint << "has"
++            << pState->trackIds.size() << "library tracks; importing"
++            << index.playlists.size() << "playlists and the rekordbox data of"
++            << tracks.size() << "tracks";
++
++    if (!tracks.isEmpty()) {
++        auto pJob = std::make_shared<AnalysisJob>();
++        pState->pJob = pJob;
++        m_threadPool.start([pJob, tracks]() {
++            pJob->run(tracks);
++        });
++    }
++    updateQueueTimer();
++}
++
++void UsbLibraryImporter::slotProcessQueue() {
++    QElapsedTimer timer;
++    timer.start();
++    for (int i = 0; i < m_states.size(); ++i) {
++        DriveState* pState = m_states[i].get();
++        if (!pState->present || !pState->importStarted) {
++            continue;
++        }
++        // One playlist per tick, it takes a few database transactions
++        if (pState->nextPlaylist >= 0) {
++            createPlaylist(i, pState->nextPlaylist);
++            pState->nextPlaylist++;
++            if (pState->nextPlaylist >= pState->pIndex->playlists.size()) {
++                pState->nextPlaylist = -1;
++                qInfo() << "USB import: created" << pState->pIndex->playlists.size()
++                        << "playlists of" << pState->drive.mountPoint;
++                emit playlistsChanged(QSet<int>());
++            }
++        }
++        const int remaining = kQueueBudgetMillis - static_cast<int>(timer.elapsed());
++        if (remaining > 0) {
++            applyAnalysisResults(i, remaining);
++        }
++    }
++    updateQueueTimer();
++}
++
++void UsbLibraryImporter::createPlaylist(int driveIndex, int listIndex) {
++    DriveState* pState = m_states[driveIndex].get();
++    const DrivePlaylist& playlist = pState->pIndex->playlists[listIndex];
++
++    QList<TrackId> trackIds;
++    for (const QString& location : playlist.locations) {
++        const TrackId trackId = pState->trackIds.value(locationKey(location));
++        if (trackId.isValid()) {
++            trackIds.append(trackId);
++        }
++    }
++
++    PlaylistDAO& playlistDao = m_pTrackCollectionManager->internalCollection()->getPlaylistDAO();
++    // The sidebar is rebuilt once after all playlists have been created
++    // (playlistsChanged()) instead of after every single change.
++    const QSignalBlocker blocker(&playlistDao);
++    const int playlistId = playlistDao.createPlaylist(playlist.name);
++    if (playlistId == kInvalidPlaylistId) {
++        qWarning() << "USB import: failed to create playlist" << playlist.name;
++        return;
++    }
++    QSqlQuery query(database());
++    query.prepare(QStringLiteral(
++            "INSERT OR REPLACE INTO %1 (playlist_id, mount_point, sort_order) "
++            "VALUES (:id, :mount_point, :sort_order)")
++                    .arg(kPlaylistTable));
++    query.bindValue(QStringLiteral(":id"), playlistId);
++    query.bindValue(QStringLiteral(":mount_point"), pState->drive.mountPoint);
++    query.bindValue(QStringLiteral(":sort_order"),
++            static_cast<int>(driveIndex) * kSortOrderPerDrive + listIndex);
++    if (!query.exec()) {
++        LOG_FAILED_QUERY(query);
++    }
++    if (!trackIds.isEmpty()) {
++        playlistDao.appendTracksToPlaylist(trackIds, playlistId);
++    }
++    // Import only: the list is a copy of what is on the drive
++    playlistDao.setPlaylistLocked(playlistId, true);
++    if (trackIds.size() != playlist.locations.size()) {
++        qInfo() << "USB import: playlist" << playlist.name << "has"
++                << playlist.locations.size() - trackIds.size()
++                << "tracks that are not in the library";
++    }
++}
++
++void UsbLibraryImporter::applyAnalysisResults(int driveIndex, int maxMillis) {
++    DriveState* pState = m_states[driveIndex].get();
++    const std::shared_ptr<AnalysisJob> pJob = pState->pJob;
++    if (!pJob) {
++        return;
++    }
++    QElapsedTimer timer;
++    timer.start();
++    AnalysisJob::Result result;
++    while (timer.elapsed() < maxMillis && pJob->takeResult(&result)) {
++        if (pState->applied.contains(result.key)) {
++            continue; // loaded into a player meanwhile
++        }
++        pState->applied.insert(result.key);
++        const TrackId trackId = pState->trackIds.value(result.key);
++        if (!trackId.isValid()) {
++            continue;
++        }
++        const TrackPointer pTrack = m_pTrackCollectionManager->getTrackById(trackId);
++        if (!pTrack) {
++            continue;
++        }
++        applyToTrack(pTrack, result.track, result.analysis);
++        pState->appliedCount++;
++        // The track is saved when pTrack is released and it is not used
++        // elsewhere.
++    }
++    if (pJob->isDone()) {
++        qInfo() << "USB import: applied the rekordbox data of"
++                << pState->appliedCount << "tracks of" << pState->drive.mountPoint;
++        pState->pJob.reset();
++    }
++}
++
++void UsbLibraryImporter::applyBeforeLoad(const TrackPointer& pTrack) {
++    const QString location = pTrack->getLocation();
++    for (const auto& pState : std::as_const(m_states)) {
++        if (!pState->present || !isOnDrive(location, pState->drive.mountPoint)) {
++            continue;
++        }
++        const QString key = locationKey(location);
++        if (pState->applied.contains(key)) {
++            return;
++        }
++        if (!pState->pIndex) {
++            // Applied as soon as the drive has been read
++            qInfo() << "USB import: track loaded before the drive has been read:"
++                    << location;
++            pState->loadedBeforeIndex.insert(key, location);
++            return;
++        }
++        applyNow(pState.get(), pTrack, key);
++        return;
++    }
++}
++
++void UsbLibraryImporter::applyNow(
++        DriveState* pState, const TrackPointer& pTrack, const QString& key) {
++    pState->applied.insert(key);
++    const auto it = pState->pIndex->rekordboxTracks.constFind(key);
++    if (it == pState->pIndex->rekordboxTracks.constEnd()) {
++        return; // not in the rekordbox export
++    }
++    const rekordbox::ExportTrack& track = it.value();
++    qInfo() << "USB import: applying rekordbox data before loading" << track.location;
++    const rekordbox::Analysis analysis = rekordbox::readAnalysis(
++            track.anlzPath, rekordbox::timingOffsetMillis(track.location), true);
++    applyToTrack(pTrack, track, analysis);
++}
++
++void UsbLibraryImporter::applyToTrack(const TrackPointer& pTrack,
++        const rekordbox::ExportTrack& exportTrack,
++        const rekordbox::Analysis& analysis) {
++    const auto pStructure = rekordbox::applyAnalysis(
++            pTrack, analysis, rekordbox::ApplyMode::Replace);
++    if (pStructure) {
++        const auto pOldStructure = pTrack->getStructure();
++        if (!pOldStructure || pOldStructure->toByteArray() != pStructure->toByteArray()) {
++            pTrack->setStructure(pStructure);
++            if (pTrack->getId().isValid()) {
++                m_pTrackCollectionManager->internalCollection()
++                        ->getAnalysisDAO()
++                        .saveTrackStructure(pTrack->getId(), pStructure);
++            }
++        }
++    }
++
++    // Normalized like RekordboxPlaylistModel::getTrack() does
++    if (!exportTrack.key.isEmpty()) {
++        const Keys keys = KeyFactory::makeBasicKeysNormalized(
++                exportTrack.key, mixxx::track::io::key::USER);
++        if (keys.getGlobalKey() != mixxx::track::io::key::INVALID &&
++                keys.getGlobalKey() != pTrack->getKeys().getGlobalKey()) {
++            pTrack->setKeys(keys);
++        }
++    }
++
++    const mixxx::RgbColor::optional_t color = exportTrack.colorId != 0
++            ? mixxx::RgbColor::optional(rekordbox::colorFromId(exportTrack.colorId))
++            : mixxx::RgbColor::nullopt();
++    if (pTrack->getColor() != color) {
++        pTrack->setColor(color);
++    }
++}
++
++QSet<int> UsbLibraryImporter::deletePlaylists(const QString& mountPoint) {
++    QSet<int> playlistIds;
++    QSqlQuery query(database());
++    query.prepare(QStringLiteral("SELECT playlist_id FROM %1 WHERE mount_point = :mount_point")
++                    .arg(kPlaylistTable));
++    query.bindValue(QStringLiteral(":mount_point"), mountPoint);
++    if (!query.exec()) {
++        LOG_FAILED_QUERY(query);
++        return playlistIds;
++    }
++    while (query.next()) {
++        playlistIds.insert(query.value(0).toInt());
++    }
++    if (playlistIds.isEmpty()) {
++        return playlistIds;
++    }
++
++    PlaylistDAO& playlistDao = m_pTrackCollectionManager->internalCollection()->getPlaylistDAO();
++    {
++        // The sidebar is rebuilt once (playlistsChanged())
++        const QSignalBlocker blocker(&playlistDao);
++        for (const int playlistId : std::as_const(playlistIds)) {
++            playlistDao.deletePlaylist(playlistId);
++        }
++    }
++    query.prepare(QStringLiteral("DELETE FROM %1 WHERE mount_point = :mount_point")
++                    .arg(kPlaylistTable));
++    query.bindValue(QStringLiteral(":mount_point"), mountPoint);
++    if (!query.exec()) {
++        LOG_FAILED_QUERY(query);
++    }
++    qInfo() << "USB import: deleted" << playlistIds.size() << "playlists of" << mountPoint;
++    return playlistIds;
++}
++
++void UsbLibraryImporter::cancelJob(DriveState* pState) {
++    if (!pState->pJob) {
++        return;
++    }
++    pState->pJob->canceled = true;
++    pState->pJob->notFull.wakeAll();
++    pState->pJob.reset();
++}
++
++void UsbLibraryImporter::updateQueueTimer() {
++    bool hasWork = false;
++    for (const auto& pState : std::as_const(m_states)) {
++        if (pState->present && pState->importStarted &&
++                (pState->nextPlaylist >= 0 || pState->pJob)) {
++            hasWork = true;
++            break;
++        }
++    }
++    if (hasWork && !m_queueTimer.isActive()) {
++        m_queueTimer.start();
++    } else if (!hasWork && m_queueTimer.isActive()) {
++        m_queueTimer.stop();
++    }
++}
++
++} // namespace usbimport
++} // namespace mixxx
+diff --git a/src/library/usbimport/usblibraryimporter.h b/src/library/usbimport/usblibraryimporter.h
+new file mode 100644
+index 00000000..dd69614f
+--- /dev/null
++++ b/src/library/usbimport/usblibraryimporter.h
+@@ -0,0 +1,147 @@
++#pragma once
++
++// DecksmithOS: "transparent layers" for USB drives prepared in rekordbox or
++// Serato.
++//
++// Enabled by the environment variable DECKSMITHOS_USB_IMPORT, a colon
++// separated list of mount points ("/usb:/usb2"); without it Mixxx behaves
++// exactly as upstream. The mount points are library root directories, so the
++// audio files of a drive are scanned into the normal library.
++//
++// When a drive appears (a file system other than "/" is mounted at the mount
++// point, polled every 2 s):
++//  1. A library rescan is requested, so the files of the drive are in the
++//     library.
++//  2. In the background, export.pdb (rekordbox) and the Serato crates are
++//     read (phase 1, "drive index").
++//  3. When both are done, the rekordbox playlists and the Serato crates
++//     become locked Mixxx playlists named "USB ▸ Folder ▸ Playlist", listed at
++//     the top of the Playlists section in rekordbox/Serato order. The
++//     rekordbox analysis (beat grid, hot cues, memory cues, loops, phrases,
++//     key, color) of every track of the export is read in the background
++//     (phase 2) and applied to the library track in the GUI thread, in small
++//     batches. rekordbox always wins over existing Mixxx data.
++//  4. A track of the drive that is loaded into a player before the
++//     background import reached it gets its rekordbox data applied right
++//     before loading (beforeTrackLoad()).
++// When the drive disappears its playlists are deleted. Playlists of drives
++// are also deleted at startup and when a drive appears, so they never get
++// stale.
++//
++// Nothing is ever written to the drive.
++//
++// The playlists that belong to a drive are recorded in the table
++// decksmithos_usb_playlists (playlist id, mount point, sort order), which
++// PlaylistFeature uses to list them first.
++
++#include <QHash>
++#include <QList>
++#include <QObject>
++#include <QSet>
++#include <QSqlDatabase>
++#include <QString>
++#include <QThreadPool>
++#include <QTimer>
++#include <memory>
++
++#include "library/rekordbox/rekordboxanalysis.h"
++#include "library/usbimport/usbimportutil.h"
++#include "track/track_decl.h"
++#include "track/trackid.h"
++
++class TrackCollectionManager;
++
++namespace mixxx {
++namespace usbimport {
++
++/// Table that records the playlists created for drives
++extern const QString kPlaylistTable;
++
++/// A playlist of a drive, before it is created in the library
++struct DrivePlaylist {
++    QString name;
++    QStringList locations; // absolute paths in list order
++};
++
++/// What is read from a drive in phase 1
++struct DriveIndex {
++    /// rekordbox tracks by locationKey()
++    QHash<QString, rekordbox::ExportTrack> rekordboxTracks;
++    /// rekordbox tracks in export order (for phase 2)
++    QList<rekordbox::ExportTrack> rekordboxTrackList;
++    /// rekordbox playlists, then Serato crates, in their order
++    QList<DrivePlaylist> playlists;
++};
++
++/// Reads a drive (rekordbox export and Serato crates). Runs in a worker
++/// thread.
++std::shared_ptr<const DriveIndex> readDriveIndex(const Drive& drive);
++
++class UsbLibraryImporter : public QObject {
++    Q_OBJECT
++  public:
++    /// True if DECKSMITHOS_USB_IMPORT is set
++    static bool isEnabled();
++
++    /// Creates kPlaylistTable if it does not exist
++    static bool ensureSchema(const QSqlDatabase& database);
++
++    /// Called right before a track is loaded into a player (GUI thread).
++    /// Applies the rekordbox data of a drive track that has not been
++    /// imported in this session. No-op if the import is disabled.
++    static void beforeTrackLoad(const TrackPointer& pTrack);
++
++    UsbLibraryImporter(QObject* parent, TrackCollectionManager* pTrackCollectionManager);
++    ~UsbLibraryImporter() override;
++
++    /// Deletes the playlists of all drives and starts watching the drives
++    void start();
++
++  signals:
++    /// Playlists of drives were created or deleted. The ids are the ones of
++    /// the deleted playlists (empty if playlists were only created).
++    void playlistsChanged(const QSet<int>& removedPlaylistIds);
++
++  private slots:
++    void slotPoll();
++    void slotLibraryScanStarted();
++    void slotLibraryScanFinished();
++    void slotProcessQueue();
++
++  private:
++    struct AnalysisJob;
++    struct DriveState;
++
++    void driveAppeared(int driveIndex);
++    void driveRemoved(int driveIndex);
++    void driveIndexRead(int driveIndex,
++            quint64 generation,
++            std::shared_ptr<const DriveIndex> pIndex);
++    void requestLibraryScan();
++    void maybeStartImport(int driveIndex);
++    void createPlaylist(int driveIndex, int listIndex);
++    void applyAnalysisResults(int driveIndex, int maxMillis);
++    void applyBeforeLoad(const TrackPointer& pTrack);
++    void applyNow(DriveState* pState, const TrackPointer& pTrack, const QString& key);
++    void applyToTrack(const TrackPointer& pTrack,
++            const rekordbox::ExportTrack& exportTrack,
++            const rekordbox::Analysis& analysis);
++    QSet<int> deletePlaylists(const QString& mountPoint);
++    void cancelJob(DriveState* pState);
++    void updateQueueTimer();
++
++    QSqlDatabase database() const;
++
++    static UsbLibraryImporter* s_pInstance;
++
++    TrackCollectionManager* const m_pTrackCollectionManager;
++    DriveWatcher m_watcher;
++    QList<std::shared_ptr<DriveState>> m_states;
++    QTimer m_pollTimer;
++    QTimer m_queueTimer;
++    QThreadPool m_threadPool;
++    bool m_libraryScanRunning;
++};
++
++} // namespace usbimport
++} // namespace mixxx
+diff --git a/src/mixer/basetrackplayer.cpp b/src/mixer/basetrackplayer.cpp
+index 10b8e952..173bbbc3 100644
+--- a/src/mixer/basetrackplayer.cpp
++++ b/src/mixer/basetrackplayer.cpp
+@@ -11,6 +11,7 @@
+ #include "engine/enginebuffer.h"
+ #include "engine/enginemixer.h"
+ #include "engine/sync/enginesync.h"
++#include "library/usbimport/usblibraryimporter.h"
+ #include "mixer/playerinfo.h"
+ #include "mixer/playermanager.h"
+ #include "moc_basetrackplayer.cpp"
+@@ -525,6 +526,10 @@ void BaseTrackPlayerImpl::slotLoadTrack(TrackPointer pNewTrack, bool bPlay) {
+             // We don't have access.
+             return;
+         }
++        // DecksmithOS: apply the rekordbox data of a USB drive track that
++        // the background import has not reached yet (no-op without
++        // DECKSMITHOS_USB_IMPORT).
++        mixxx::usbimport::UsbLibraryImporter::beforeTrackLoad(pNewTrack);
+     }
+ 
+     auto pOldTrack = unloadTrack();
+diff --git a/src/test/usbimporttest.cpp b/src/test/usbimporttest.cpp
+new file mode 100644
+index 00000000..5c465271
+--- /dev/null
++++ b/src/test/usbimporttest.cpp
+@@ -0,0 +1,358 @@
++#include <gtest/gtest.h>
++
++#include <QBuffer>
++#include <QtEndian>
++
++#include "library/rekordbox/rekordboxanalysis.h"
++#include "library/serato/seratocrate.h"
++#include "library/usbimport/usbimportutil.h"
++#include "test/mixxxtest.h"
++#include "track/beats.h"
++#include "track/cue.h"
++#include "track/track.h"
++
++using namespace mixxx::usbimport;
++
++namespace {
++
++QByteArray serAtoField(const char* id, const QByteArray& data) {
++    QByteArray field(id, 4);
++    quint32 size = qToBigEndian<quint32>(static_cast<quint32>(data.size()));
++    field.append(reinterpret_cast<const char*>(&size), sizeof(size));
++    field.append(data);
++    return field;
++}
++
++QByteArray utf16be(const QString& text) {
++    QByteArray result;
++    for (const QChar c : text) {
++        result.append(static_cast<char>(c.unicode() >> 8));
++        result.append(static_cast<char>(c.unicode() & 0xFF));
++    }
++    return result;
++}
++
++QByteArray utf16le(const QString& text) {
++    QByteArray result;
++    for (const QChar c : text) {
++        result.append(static_cast<char>(c.unicode() & 0xFF));
++        result.append(static_cast<char>(c.unicode() >> 8));
++    }
++    return result;
++}
++
++QByteArray seratoCrate(const QStringList& paths) {
++    QByteArray crate = serAtoField("vrsn", utf16be(QStringLiteral("1.0/Serato ScratchLive Crate")));
++    // A column definition, ignored
++    crate.append(serAtoField("ovct",
++            serAtoField("tvcn", utf16be(QStringLiteral("song"))) +
++                    serAtoField("tvcw", utf16be(QStringLiteral("0")))));
++    for (const QString& path : paths) {
++        crate.append(serAtoField("otrk", serAtoField("ptrk", utf16be(path))));
++    }
++    return crate;
++}
++
++} // namespace
++
++TEST(UsbImportTest, DriveList) {
++    const QList<Drive> drives = parseDriveList(QStringLiteral("/usb:/usb2/::/usb:/media/x"));
++    ASSERT_EQ(3, drives.size());
++    EXPECT_EQ(QStringLiteral("/usb"), drives[0].mountPoint);
++    EXPECT_EQ(QStringLiteral("USB"), drives[0].label);
++    EXPECT_EQ(QStringLiteral("/usb2"), drives[1].mountPoint);
++    EXPECT_EQ(QStringLiteral("USB2"), drives[1].label);
++    EXPECT_EQ(QStringLiteral("/media/x"), drives[2].mountPoint);
++    EXPECT_EQ(QStringLiteral("USB3"), drives[2].label);
++    EXPECT_TRUE(parseDriveList(QString()).isEmpty());
++}
++
++TEST(UsbImportTest, PlaylistName) {
++    EXPECT_EQ(QStringLiteral("USB ▸ Folder ▸ Playlist"),
++            playlistName(QStringLiteral("USB"),
++                    {QStringLiteral("Folder"), QStringLiteral("Playlist")}));
++    EXPECT_EQ(QStringLiteral("USB2 ▸ Crate"),
++            playlistName(QStringLiteral("USB2"), {QStringLiteral("Crate")}));
++}
++
++TEST(UsbImportTest, Locations) {
++    EXPECT_TRUE(isOnDrive(QStringLiteral("/usb/Contents/a.mp3"), QStringLiteral("/usb")));
++    EXPECT_FALSE(isOnDrive(QStringLiteral("/usb2/Contents/a.mp3"), QStringLiteral("/usb")));
++    EXPECT_FALSE(isOnDrive(QStringLiteral("/usb"), QStringLiteral("/usb")));
++    EXPECT_EQ(QStringLiteral("/usb/Music/a.mp3"),
++            driveLocation(QStringLiteral("/usb"), QStringLiteral("Music/a.mp3")));
++    EXPECT_EQ(QStringLiteral("/usb/Music/a.mp3"),
++            driveLocation(QStringLiteral("/usb"), QStringLiteral("/Music/a.mp3")));
++    // NFD (macOS) and NFC, different case (FAT)
++    EXPECT_EQ(locationKey(QStringLiteral("/usb/Café/A.MP3")),
++            locationKey(QStringLiteral("/usb/café/a.mp3")));
++}
++
++TEST(UsbImportTest, FlattenPlaylistTree) {
++    QList<PlaylistTreeNode> nodes;
++    // Root: folder "B" (sort 1), playlist "A" (sort 0), playlist "C" (sort 2)
++    nodes.append({10, 0, 1, true, QStringLiteral("B")});
++    nodes.append({11, 0, 0, false, QStringLiteral("A")});
++    nodes.append({12, 0, 2, false, QStringLiteral("C")});
++    // In "B": sub folder "Sub" (sort 0) with "Deep", playlist "B2" (sort 1)
++    nodes.append({20, 10, 1, false, QStringLiteral("B2")});
++    nodes.append({21, 10, 0, true, QStringLiteral("Sub")});
++    nodes.append({30, 21, 0, false, QStringLiteral("Deep")});
++    // Empty folder
++    nodes.append({40, 0, 3, true, QStringLiteral("Empty")});
++
++    const QList<FlatPlaylist> flat = flattenPlaylistTree(nodes);
++    ASSERT_EQ(4, flat.size());
++    EXPECT_EQ(QStringList{QStringLiteral("A")}, flat[0].path);
++    EXPECT_EQ(11u, flat[0].id);
++    EXPECT_EQ((QStringList{QStringLiteral("B"), QStringLiteral("Sub"), QStringLiteral("Deep")}),
++            flat[1].path);
++    EXPECT_EQ((QStringList{QStringLiteral("B"), QStringLiteral("B2")}), flat[2].path);
++    EXPECT_EQ(QStringList{QStringLiteral("C")}, flat[3].path);
++}
++
++TEST(UsbImportTest, FlattenPlaylistTreeWithCycle) {
++    QList<PlaylistTreeNode> nodes;
++    nodes.append({1, 0, 0, true, QStringLiteral("F")});
++    nodes.append({2, 1, 0, true, QStringLiteral("G")});
++    nodes.append({1, 2, 0, true, QStringLiteral("F again")});
++    nodes.append({3, 2, 1, false, QStringLiteral("P")});
++    const QList<FlatPlaylist> flat = flattenPlaylistTree(nodes);
++    ASSERT_EQ(1, flat.size());
++    EXPECT_EQ((QStringList{QStringLiteral("F"), QStringLiteral("G"), QStringLiteral("P")}),
++            flat[0].path);
++}
++
++TEST(UsbImportTest, SeratoNewOrder) {
++    const QString text = QStringLiteral(
++            "[begin record]\n[crate]Zeta\n[end record]\n"
++            "[begin record]\r\n[crate]Alpha%%Child\r\n[end record]\r\n"
++            "[begin record]\n[crate]Alpha\n[end record]\n");
++    const QStringList expected{QStringLiteral("Zeta"),
++            QStringLiteral("Alpha%%Child"),
++            QStringLiteral("Alpha")};
++    EXPECT_EQ(expected, parseSeratoNewOrder(utf16be(text)));
++    EXPECT_EQ(expected, parseSeratoNewOrder(QByteArray("\xFE\xFF", 2) + utf16be(text)));
++    EXPECT_EQ(expected, parseSeratoNewOrder(QByteArray("\xFF\xFE", 2) + utf16le(text)));
++    EXPECT_EQ(expected, parseSeratoNewOrder(utf16le(text)));
++    EXPECT_EQ(expected, parseSeratoNewOrder(text.toUtf8()));
++    EXPECT_TRUE(parseSeratoNewOrder(QByteArray()).isEmpty());
++}
++
++TEST(UsbImportTest, SeratoCrateOrder) {
++    const QStringList crates{QStringLiteral("beta"),
++            QStringLiteral("Alpha%%Child"),
++            QStringLiteral("Alpha"),
++            QStringLiteral("Alpha B"),
++            QStringLiteral("Zeta"),
++            QStringLiteral("Gamma")};
++    // Without neworder.pref: depth-first, case-insensitive
++    EXPECT_EQ((QStringList{QStringLiteral("Alpha"),
++                      QStringLiteral("Alpha%%Child"),
++                      QStringLiteral("Alpha B"),
++                      QStringLiteral("beta"),
++                      QStringLiteral("Gamma"),
++                      QStringLiteral("Zeta")}),
++            orderSeratoCrates(crates, {}));
++    // neworder.pref first (unknown entries ignored, case-insensitive match),
++    // the rest after it
++    EXPECT_EQ((QStringList{QStringLiteral("Zeta"),
++                      QStringLiteral("Alpha"),
++                      QStringLiteral("beta"),
++                      QStringLiteral("Alpha%%Child"),
++                      QStringLiteral("Alpha B"),
++                      QStringLiteral("Gamma")}),
++            orderSeratoCrates(crates,
++                    {QStringLiteral("Zeta"),
++                            QStringLiteral("Deleted"),
++                            QStringLiteral("Alpha"),
++                            QStringLiteral("BETA")}));
++    EXPECT_EQ((QStringList{QStringLiteral("Alpha"), QStringLiteral("Child")}),
++            seratoCratePath(QStringLiteral("Alpha%%Child")));
++}
++
++TEST(UsbImportTest, SeratoCrateTrackOrder) {
++    const QStringList paths{QStringLiteral("Music/z.mp3"),
++            QStringLiteral("Music/a.mp3"),
++            QStringLiteral("Music/été.flac"),
++            QStringLiteral("Music/a.mp3")};
++    QByteArray data = seratoCrate(paths);
++    QBuffer buffer(&data);
++    buffer.open(QIODevice::ReadOnly);
++    bool ok = false;
++    EXPECT_EQ(paths, mixxx::serato::readCrateTrackPaths(&buffer, &ok));
++    EXPECT_TRUE(ok);
++
++    // Truncated: the complete tracks are returned
++    QByteArray truncated = data.left(data.size() - 3);
++    QBuffer truncatedBuffer(&truncated);
++    truncatedBuffer.open(QIODevice::ReadOnly);
++    EXPECT_EQ(paths.mid(0, 3), mixxx::serato::readCrateTrackPaths(&truncatedBuffer, &ok));
++    EXPECT_FALSE(ok);
++}
++
++TEST(UsbImportTest, DriveWatcher) {
++    QSet<QString> mounted;
++    DriveWatcher watcher(parseDriveList(QStringLiteral("/usb:/usb2")),
++            [&mounted](const QString& path) { return mounted.contains(path); });
++    EXPECT_TRUE(watcher.poll().isEmpty());
++
++    mounted.insert(QStringLiteral("/usb2"));
++    auto changes = watcher.poll();
++    ASSERT_EQ(1, changes.size());
++    EXPECT_EQ(1, changes[0].driveIndex);
++    EXPECT_TRUE(changes[0].present);
++    EXPECT_TRUE(watcher.isPresent(1));
++    EXPECT_FALSE(watcher.isPresent(0));
++    EXPECT_TRUE(watcher.poll().isEmpty());
++
++    mounted.insert(QStringLiteral("/usb"));
++    mounted.remove(QStringLiteral("/usb2"));
++    changes = watcher.poll();
++    ASSERT_EQ(2, changes.size());
++    EXPECT_EQ(0, changes[0].driveIndex);
++    EXPECT_TRUE(changes[0].present);
++    EXPECT_EQ(1, changes[1].driveIndex);
++    EXPECT_FALSE(changes[1].present);
++}
++
++TEST(UsbImportTest, RootIsNotAMountedDrive) {
++    EXPECT_FALSE(isMountedFilesystem(QStringLiteral("/")));
++    EXPECT_FALSE(isMountedFilesystem(QStringLiteral("/does/not/exist/decksmithos")));
++}
++
++class UsbImportApplyTest : public MixxxTest {
++  protected:
++    UsbImportApplyTest()
++            : m_pTrack(Track::newTemporary()) {
++        m_pTrack->setAudioProperties(
++                mixxx::audio::ChannelCount(2),
++                mixxx::audio::SampleRate(44100),
++                mixxx::audio::Bitrate(),
++                mixxx::Duration::fromSeconds(180));
++    }
++
++    static mixxx::rekordbox::Analysis analysis() {
++        mixxx::rekordbox::Analysis analysis;
++        // 120 BPM, starting at 100 ms
++        for (int i = 0; i < 64; ++i) {
++            analysis.beatMillis.append(100 + i * 500);
++            analysis.beatNumbers.append(i % 4 + 1);
++        }
++        analysis.cuesRead = true;
++        mixxx::rekordbox::AnalysisCue hotCue;
++        hotCue.hotCueIndex = 0;
++        hotCue.startMillis = 1000;
++        hotCue.label = QStringLiteral("Drop");
++        hotCue.color = mixxx::RgbColor(0xFF0000);
++        analysis.hotCues.append(hotCue);
++        mixxx::rekordbox::AnalysisCue hotLoop;
++        hotLoop.hotCueIndex = 2;
++        hotLoop.startMillis = 2000;
++        hotLoop.endMillis = 4000;
++        analysis.hotCues.append(hotLoop);
++        // Memory cues: the first one becomes the main cue, the loop a hot cue
++        // after the last hot cue
++        mixxx::rekordbox::AnalysisCue memoryLoop;
++        memoryLoop.startMillis = 8000;
++        memoryLoop.endMillis = 10000;
++        analysis.memoryCues.append(memoryLoop);
++        mixxx::rekordbox::AnalysisCue memoryCue;
++        memoryCue.startMillis = 500;
++        memoryCue.label = QStringLiteral("Start");
++        analysis.memoryCues.append(memoryCue);
++        return analysis;
++    }
++
++    QList<CuePointer> hotCues() const {
++        QList<CuePointer> cues;
++        for (const auto& pCue : m_pTrack->getCuePoints()) {
++            if (pCue->getHotCue() >= 0) {
++                cues.append(pCue);
++            }
++        }
++        std::sort(cues.begin(), cues.end(), [](const CuePointer& a, const CuePointer& b) {
++            return a->getHotCue() < b->getHotCue();
++        });
++        return cues;
++    }
++
++    TrackPointer m_pTrack;
++};
++
++TEST_F(UsbImportApplyTest, ReplaceWins) {
++    // Mixxx data that rekordbox replaces
++    m_pTrack->createAndAddCue(mixxx::CueType::HotCue,
++            5,
++            mixxx::audio::FramePos(1234),
++            mixxx::audio::kInvalidFramePos);
++    m_pTrack->trySetAndLockBeats(mixxx::Beats::fromConstTempo(
++            mixxx::audio::SampleRate(44100),
++            mixxx::audio::FramePos(0),
++            mixxx::Bpm(100)));
++    ASSERT_TRUE(m_pTrack->isBpmLocked());
++
++    const auto pStructure = mixxx::rekordbox::applyAnalysis(
++            m_pTrack, analysis(), mixxx::rekordbox::ApplyMode::Replace);
++
++    ASSERT_NE(nullptr, m_pTrack->getBeats());
++    EXPECT_NEAR(120.0, m_pTrack->getBeats()->getBpmInRange(
++                               mixxx::audio::kStartFramePos,
++                               mixxx::audio::FramePos(44100 * 30))
++                               .value(),
++            0.01);
++    EXPECT_FALSE(m_pTrack->isBpmLocked());
++
++    const QList<CuePointer> cues = hotCues();
++    ASSERT_EQ(3, cues.size());
++    EXPECT_EQ(0, cues[0]->getHotCue());
++    EXPECT_EQ(mixxx::CueType::HotCue, cues[0]->getType());
++    EXPECT_DOUBLE_EQ(44100.0, cues[0]->getPosition().value());
++    EXPECT_EQ(QStringLiteral("Drop"), cues[0]->getLabel());
++    EXPECT_EQ(mixxx::RgbColor(0xFF0000), cues[0]->getColor());
++    EXPECT_EQ(2, cues[1]->getHotCue());
++    EXPECT_EQ(mixxx::CueType::Loop, cues[1]->getType());
++    EXPECT_DOUBLE_EQ(44100.0 * 4, cues[1]->getEndPosition().value());
++    EXPECT_EQ(3, cues[2]->getHotCue());
++    EXPECT_EQ(mixxx::CueType::Loop, cues[2]->getType());
++    EXPECT_DOUBLE_EQ(44100.0 * 8, cues[2]->getPosition().value());
++
++    EXPECT_DOUBLE_EQ(44100.0 * 0.5, m_pTrack->getMainCuePosition().value());
++    EXPECT_EQ(QStringLiteral("Start"),
++            m_pTrack->findCueByType(mixxx::CueType::MainCue)->getLabel());
++
++    // The first downbeat
++    ASSERT_NE(nullptr, pStructure);
++    EXPECT_DOUBLE_EQ(44100.0 * 0.1, pStructure->firstDownbeat().value());
++
++    // Applying the same data again changes nothing
++    m_pTrack->markClean();
++    mixxx::rekordbox::applyAnalysis(
++            m_pTrack, analysis(), mixxx::rekordbox::ApplyMode::Replace);
++    EXPECT_FALSE(m_pTrack->isDirty());
++    EXPECT_EQ(3, hotCues().size());
++}
++
++TEST_F(UsbImportApplyTest, MergeKeepsOtherCues) {
++    m_pTrack->createAndAddCue(mixxx::CueType::HotCue,
++            5,
++            mixxx::audio::FramePos(1234),
++            mixxx::audio::kInvalidFramePos);
++    mixxx::rekordbox::applyAnalysis(
++            m_pTrack, analysis(), mixxx::rekordbox::ApplyMode::Merge);
++    const QList<CuePointer> cues = hotCues();
++    ASSERT_EQ(4, cues.size());
++    EXPECT_EQ(5, cues[3]->getHotCue());
++}
++
++TEST_F(UsbImportApplyTest, NoCuesKeepsCues) {
++    m_pTrack->createAndAddCue(mixxx::CueType::HotCue,
++            5,
++            mixxx::audio::FramePos(1234),
++            mixxx::audio::kInvalidFramePos);
++    mixxx::rekordbox::Analysis noCues = analysis();
++    noCues.cuesRead = false;
++    mixxx::rekordbox::applyAnalysis(
++            m_pTrack, noCues, mixxx::rekordbox::ApplyMode::Replace);
++    EXPECT_EQ(1, hotCues().size());
++}
+diff --git a/src/library/library.cpp b/src/library/library.cpp
+--- a/src/library/library.cpp
++++ b/src/library/library.cpp
+@@ -34,6 +34,7 @@
+ #include "library/trackset/crate/cratefeature.h"
+ #include "library/trackset/playlistfeature.h"
+ #include "library/trackset/setlogfeature.h"
++#include "library/usbimport/usblibraryimporter.h"
+ #include "library/traktor/traktorfeature.h"
+ #include "mixer/playermanager.h"
+ #include "moc_library.cpp"
+@@ -306,6 +307,19 @@
+             kEditMetadataSelectedClickDefault);
+ 
+     addFeaturesToSidebar();
++
++    // DecksmithOS: rekordbox/Serato data and playlists of USB drives
++    if (mixxx::usbimport::UsbLibraryImporter::isEnabled()) {
++        m_pUsbLibraryImporter = std::make_unique<mixxx::usbimport::UsbLibraryImporter>(
++                nullptr, m_pTrackCollectionManager);
++        connect(m_pUsbLibraryImporter.get(),
++                &mixxx::usbimport::UsbLibraryImporter::playlistsChanged,
++                this,
++                [this](const QSet<int>& removedPlaylistIds) {
++                    m_pPlaylistFeature->refreshAfterBulkChange(removedPlaylistIds);
++                });
++        m_pUsbLibraryImporter->start();
++    }
+ }
+ 
+ void Library::addFeaturesToSidebar() {
+diff --git a/src/library/library.h b/src/library/library.h
+--- a/src/library/library.h
++++ b/src/library/library.h
+@@ -43,6 +43,12 @@
+ } // namespace mixxx
+ #endif
+ 
++namespace mixxx {
++namespace usbimport {
++class UsbLibraryImporter;
++} // namespace usbimport
++} // namespace mixxx
++
+ // A Library class is a container for all the model-side aspects of the library.
+ // A library widget can be attached to the Library object by calling bindLibraryWidget.
+ class ControlPushButton;
+@@ -217,4 +223,7 @@
+     int m_iTrackTableRowHeight;
+     bool m_editMetadataSelectedClick;
+     QScopedPointer<ControlObject> m_pKeyNotation;
++    // DecksmithOS USB library import (DECKSMITHOS_USB_IMPORT), destroyed
++    // first because it uses the playlist feature and the track collection.
++    std::unique_ptr<mixxx::usbimport::UsbLibraryImporter> m_pUsbLibraryImporter;
+ };
