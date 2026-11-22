@@ -119,6 +119,71 @@
               <Size>0me,1f</Size>
             </WidgetGroup>
 
+            <!-- AUTO DJ REQUEST — learn the console button for REQUEST
+                 ([Library],AutoDjAddRequest). LEARN lights up until a button
+                 is pressed on a MIDI controller; that button then sends
+                 requests only. Controls from build/mixxx/patches/0011. -->
+            <WidgetGroup>
+              <ObjectName>ShortcutSectionRequest</ObjectName>
+              <Layout>vertical</Layout>
+              <Size>0me,110f</Size>
+              <Children>
+                <WidgetGroup><Size>0me,0me</Size></WidgetGroup>
+                <Label>
+                  <ObjectName>ShortcutSectionTitle</ObjectName>
+                  <Text>AUTO DJ REQUEST BUTTON</Text>
+                  <Size>me,22f</Size>
+                </Label>
+                <WidgetGroup>
+                  <ObjectName>RequestButtons</ObjectName>
+                  <Layout>horizontal</Layout>
+                  <Size>me,65f</Size>
+                  <Children>
+                    <PushButton>
+                      <ObjectName>RequestLearnBtn</ObjectName>
+                      <NumberStates>2</NumberStates>
+                      <Size>me,55f</Size>
+                      <State><Number>0</Number><Text>LEARN</Text></State>
+                      <State><Number>1</Number><Text>PRESS A CONSOLE BUTTON</Text></State>
+                      <Connection>
+                        <ConfigKey>[AutoDJ],request_learn</ConfigKey>
+                      </Connection>
+                    </PushButton>
+                    <WidgetGroup><Size>8f,55f</Size></WidgetGroup>
+                    <PushButton>
+                      <ObjectName>RequestLearnedBtn</ObjectName>
+                      <NumberStates>2</NumberStates>
+                      <Size>me,55f</Size>
+                      <State><Number>0</Number><Text>NOT SET</Text></State>
+                      <State><Number>1</Number><Text>SET</Text></State>
+                      <Connection>
+                        <ConfigKey>[AutoDJ],request_learned</ConfigKey>
+                        <ConnectValueFromWidget>false</ConnectValueFromWidget>
+                      </Connection>
+                    </PushButton>
+                    <WidgetGroup><Size>8f,55f</Size></WidgetGroup>
+                    <PushButton>
+                      <ObjectName>RequestClearBtn</ObjectName>
+                      <NumberStates>1</NumberStates>
+                      <Size>me,55f</Size>
+                      <State><Number>0</Number><Text>CLEAR</Text></State>
+                      <Connection>
+                        <ConfigKey>[AutoDJ],request_learn_clear</ConfigKey>
+                        <ButtonState>LeftButton</ButtonState>
+                      </Connection>
+                    </PushButton>
+                  </Children>
+                </WidgetGroup>
+                <WidgetGroup><Size>0me,0me</Size></WidgetGroup>
+              </Children>
+            </WidgetGroup>
+
+            <!-- Separator -->
+            <WidgetGroup>
+              <ObjectName>ShortcutColumnDivider</ObjectName>
+              <Size>0me,1f</Size>
+            </WidgetGroup>
+
             <!-- MIXXX — the preferences dialog (sound, controllers, library,
                  skin...). [Controls],show_preferences is added by the DecksmithOS
                  Mixxx package (build/mixxx/patches/0001, ronso0's commit). -->

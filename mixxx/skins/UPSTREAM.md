@@ -54,8 +54,12 @@ panel (reference pixel sizes x 1.19), touch targets are 30-44 px tall.
   effects of unit 1, X-PAD 1/32-2 beats while held), RELEASE FX per deck
   (brake and backspin short/long, BUILD UP, MUTE, DUCKING while held). X-PAD
   and RELEASE FX go through the skin bridge.
-- Library page: 26 px text in ~50 px rows (10 rows), LOAD 1 / LOAD 2 next to
-  the search box, 44 px sidebar rows, compact deck strip at the bottom.
+- Library page: 26 px text in ~50 px rows (10 rows), LOAD 1 / LOAD 2 and
+  REQUEST (Auto DJ request, Mixxx patch 0010) next to the search box, 44 px
+  sidebar rows, compact deck strip at the bottom; 12 px scroll bars (the
+  lists scroll by dragging with Mixxx patch 0012).
+- MENU page: AUTO DJ REQUEST BUTTON, LEARN / SET / CLEAR, binds one console
+  button to REQUEST (Mixxx patch 0011).
 - Scrolling waveforms: red downbeats and a bar.beat counter (Mixxx patch 0007).
 - Fonts: `Liberation Sans Narrow` (condensed, like the reference), falling
   back to `Open Sans Condensed` and `Liberation Sans`.

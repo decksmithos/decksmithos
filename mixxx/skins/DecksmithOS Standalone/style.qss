@@ -412,9 +412,18 @@ WPushButton[value="1"] {
   width: 0;
 }
 
+/* 12 px: visible position, wide enough for a finger; lists also scroll by
+   dragging them (DECKSMITHOS_TOUCH_SCROLL, Mixxx patch 0012) */
 #LibraryWrapper QScrollBar:vertical {
   border: 0;
-  width: 4px;
+  width: 12px;
+}
+
+#LibraryWrapper QScrollBar::handle:vertical {
+  background-color: #6a6a72;
+  border-radius: 4px;
+  min-height: 40px;
+  margin: 0 2px;
 }
 
 #LibraryWrapper QScrollBar::add-page,
@@ -1113,6 +1122,8 @@ font-size:25px;
 #SearchBox { font-size: 20px; padding: 4px 8px; text-transform: none; border: 1px solid #45454d; margin: 2px 0px; }
 #LibLoadBtn { font-size: 18px; color: #000; background-color: #d8d8dc; border: 1px solid #fff; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibLoadBtn[value="1"] { background-color: #4b93ff; color: #fff; }
+#LibRequestBtn { font-size: 18px; color: #000; background-color: #f0a020; border: 1px solid #fff; border-radius: 3px; margin: 2px 0px; padding: 0px; }
+#LibRequestBtn[value="1"] { background-color: #ffd27a; }
 #LibraryWrapper QTableView, #LibraryWrapper WLibraryTextBrowser { font-size: 26px; font-weight: 400; }
 #LibraryWrapper WTrackTableViewHeader::section { font-size: 15px; }
 #LibraryWrapper WLibrarySidebar { font-size: 22px; }
@@ -1132,6 +1143,10 @@ font-size:25px;
 /* Settings page (MENU) */
 #ShortcutSectionTitle { font-size: 15px; color: #9a9aa0; }
 #ShortcutPanel WPushButton#DecksModeBtn, #ShortcutPanel WPushButton#RecordingToggleBtn, #ShortcutPanel WPushButton#MixxxSettingsBtn { font-size: 20px; }
+#RequestButtons WPushButton { font-size: 20px; font-weight: 600; border-radius: 3px; padding: 2px; }
+#RequestLearnBtn[value="1"] { color: #000; background-color: #f0a020; border-color: #f0a020; }
+#RequestLearnedBtn { color: #9a9aa0; background-color: transparent; border: 1px solid #3a3a42; }
+#RequestLearnedBtn[value="1"] { color: #f0a020; border-color: #f0a020; }
 #ShortcutRecDuration { font-size: 22px; }
 
 /* Pad row pages, BEAT FX and RELEASE FX */

@@ -132,4 +132,11 @@ renice -n -5 $$ >/dev/null 2>&1 || true
 # is turned off by [Soundcard] HideNoOutputWarning (decksmithos-mixxx-autoconf,
 # patch 0003).
 export DECKSMITHOS_NO_SOUND_DIALOGS=1
+# Library lists scroll by dragging them with a finger (patch 0012), the
+# browse tree ("Sources") lists only the music on the console and the USB
+# drives, each USB slot only while a drive is mounted there (patch 0013), and
+# the search box brings up an on-screen keyboard (patch 0014).
+export DECKSMITHOS_TOUCH_SCROLL=1
+export DECKSMITHOS_TOUCH_KEYBOARD=1
+export DECKSMITHOS_BROWSE_SOURCES="CONSOLE=/storage/library:USB=/usb:USB2=/usb2"
 exec taskset -c "${CORES}" mixxx "${ARGS[@]}"

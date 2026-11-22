@@ -63,6 +63,21 @@
                   <ConfigKey>[Channel2],LoadSelectedTrack</ConfigKey>
                 </Connection>
               </PushButton>
+              <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+              <!-- Auto DJ request: the selected track goes where it fits best
+                   among the next tracks of the queue (or moves up there);
+                   build/mixxx/patches/0010 -->
+              <PushButton>
+                <ObjectName>LibRequestBtn</ObjectName>
+                <Size>120f,44f</Size>
+                <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                <State><Number>0</Number><Text>REQUEST</Text></State>
+                <State><Number>1</Number><Text>REQUEST</Text></State>
+                <Connection>
+                  <ConfigKey>[Library],AutoDjAddRequest</ConfigKey>
+                </Connection>
+              </PushButton>
               <WidgetGroup><Size>4f,44f</Size></WidgetGroup>
               
             </Children>

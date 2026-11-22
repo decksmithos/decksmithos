@@ -544,7 +544,16 @@ removed from the td2 profile because it delivered a touch to Mixxx only
 on finger movement or release, which made held on-screen buttons
 (momentary effects, cue preview) impossible. Controllers do not send
 right clicks either, so the skins must not depend on right click
-(context menus and knob reset stay mouse-only). Remaining touch work: library row height and finger scrolling, small
+(context menus and knob reset stay mouse-only). Finger scrolling of the
+library lists: Mixxx patch 0012 (`DECKSMITHOS_TOUCH_SCROLL`, set by
+`decksmithos-mixxx`), unverified on the panel. The browse tree shows only
+CONSOLE (`/storage/library`), USB and USB2, the USB entries only while a
+drive is mounted (patch 0013, `DECKSMITHOS_BROWSE_SOURCES`). The search
+box shows an on-screen keyboard while focused (patch 0014,
+`DECKSMITHOS_TOUCH_KEYBOARD`; Mixxx has none on Linux). Auto DJ
+requests: patch 0010 (`[Library],AutoDjAddRequest`, REQUEST button in the
+library), one console button learned from the skin's MENU page (0011).
+Remaining touch work: small
 buttons outside the top bar (BEAT FX channel buttons, Q), verification on
 the real panel. None of these skins fits 480×320.
 
