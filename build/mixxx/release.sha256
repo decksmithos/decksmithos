@@ -1,4 +1,4 @@
-# Mixxx 2.5.6+dfsg-3~deb13decksmithos8, release mixxx/2.5.6+dfsg-3_deb13decksmithos8 of decksmithos/decksmithos
+# Mixxx 2.5.6+dfsg-3~deb13decksmithos9, release mixxx/2.5.6+dfsg-3_deb13decksmithos9 of decksmithos/decksmithos
 # Written by pin-release.sh on 2026-11-22; verified against the release SHA256SUMS.
-f3537d4520e8acf5cd120cca5043401d6584f2f8bb53b3f87ce094af185c3ce5  mixxx-data_2.5.6+dfsg-3.deb13decksmithos8_all.deb
-d78802eb1fc7e96844e2f5d998a9c09add74ff0623f5408678afeeaa6b899bd6  mixxx_2.5.6+dfsg-3.deb13decksmithos8_arm64.deb
+73bad9d68a68fb635c7437921f3ab1c9ab010d57bd716a3cce2b68c47a9b5c01  mixxx-data_2.5.6+dfsg-3.deb13decksmithos9_all.deb
+32d713b12447fb47143ea8991b6ae5d130b4422db9e93af78bef91549cf70d21  mixxx_2.5.6+dfsg-3.deb13decksmithos9_arm64.deb
