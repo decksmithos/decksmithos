@@ -3,7 +3,8 @@
      (true: momentary, for the skin bridge's [Skin],dsm_* controls), objname
      (TopNavBtn: lights up while `lit` is on), lit (the control that lights
      it; the skin bridge sets [Skin],dsm_lit_<name> for the active section;
-     for a plain toggle use the same control as key). -->
+     for a plain toggle use the same control as key). Values 2 and 3: the
+     same plus a green outline (AUTO DJ while Auto DJ runs). -->
 <Template>
   <WidgetGroup>
     <Layout>horizontal</Layout>
@@ -12,10 +13,12 @@
       <PushButton>
         <ObjectName><Variable name="objname"/></ObjectName>
         <Size>110f,38f</Size>
-        <NumberStates>2</NumberStates>
+        <NumberStates>4</NumberStates>
         <LeftClickIsPushButton><Variable name="push"/></LeftClickIsPushButton>
         <State><Number>0</Number><Text><Variable name="label"/></Text></State>
         <State><Number>1</Number><Text><Variable name="label"/></Text></State>
+        <State><Number>2</Number><Text><Variable name="label"/></Text></State>
+        <State><Number>3</Number><Text><Variable name="label"/></Text></State>
         <Connection>
           <ConfigKey><Variable name="key"/></ConfigKey>
           <ConnectValueToWidget>false</ConnectValueToWidget>

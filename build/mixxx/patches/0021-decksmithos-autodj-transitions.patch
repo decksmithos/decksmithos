@@ -1,0 +1,505 @@
+Description: Auto DJ: transition length per transition and phrase alignment
+ For a script that chooses the kind of each Auto DJ transition (DecksmithOS
+ Auto DJ script): [AutoDJ],next_transition_beats >= 0 sets the length of the
+ next transition in beats of the outgoing track (0 = a cut); it goes back to
+ -1 (transition mode and time decide, as in stock Mixxx) when that
+ transition starts. [AutoDJ],seconds_to_transition (read only) counts down
+ to the start of the next transition (-1 = none planned, 0 = under way), so
+ that a script can start effects before it. [AutoDJ],fade_now honours
+ next_transition_beats too (a script that has stopped the outgoing track
+ from reaching the planned start, with a loop roll or a brake, cuts with
+ it).
+ .
+ [AutoDJ],phrase_align ([Auto DJ] PhraseAlign, default on): the transition
+ starts on a phrase start of the outgoing track and the incoming track is
+ cued at one of its phrase starts, so that both phrases begin together.
+ Phrase starts come from the track structure (rekordbox or detected,
+ patches 0007 / 0020); phrases longer than 8 bars are divided every 8 bars;
+ tracks without phrases use every 8 bars from the first downbeat or beat.
+ Tracks without a beat grid are left as the transition mode set them.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 00054d9d..98efc9a5 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -24,6 +24,13 @@ constexpr int kRequestPositionsDefault = 5;
+ // A track needs to be longer than two callbacks to not stop AutoDJ
+ constexpr double kMinimumTrackDurationSec = 0.2;
+ 
++// DecksmithOS: phrase-aligned transitions
++const char* kPhraseAlignPreferenceName = "PhraseAlign";
++// Phrases longer than this are divided into parts of this many beats (8 bars)
++constexpr double kPhraseGridBeats = 32;
++// Beats around a position used to find the tempo there
++constexpr int kTempoBeats = 4;
++
+ constexpr bool sDebug = false;
+ } // anonymous namespace
+ 
+@@ -133,7 +140,10 @@ AutoDJProcessor::AutoDJProcessor(
+           m_skipNext(ConfigKey(kControlGroup, QStringLiteral("skip_next"))),
+           m_addRandomTrack(ConfigKey(kControlGroup, QStringLiteral("add_random_track"))),
+           m_fadeNow(ConfigKey(kControlGroup, QStringLiteral("fade_now"))),
+-          m_enabledAutoDJ(ConfigKey(kControlGroup, QStringLiteral("enabled"))) {
++          m_enabledAutoDJ(ConfigKey(kControlGroup, QStringLiteral("enabled"))),
++          m_nextTransitionBeats(ConfigKey(kControlGroup, QStringLiteral("next_transition_beats"))),
++          m_phraseAlign(ConfigKey(kControlGroup, QStringLiteral("phrase_align"))),
++          m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))) {
+     m_pAutoDJTableModel = make_parented<PlaylistTableModel>(
+             this, pTrackCollectionManager, "mixxx.db.model.autodj");
+     m_pAutoDJTableModel->selectPlaylist(iAutoDJPlaylistId);
+@@ -154,6 +164,28 @@ AutoDJProcessor::AutoDJProcessor(
+             &AutoDJProcessor::controlAddRandomTrack);
+     connect(&m_fadeNow, &ControlObject::valueChanged, this, &AutoDJProcessor::controlFadeNow);
+     m_enabledAutoDJ.setButtonMode(ControlPushButton::TOGGLE);
++
++    // DecksmithOS: per-transition length and phrase alignment, for scripts
++    // that choose the kind of each transition (see planTransition()).
++    m_nextTransitionBeats.set(-1);
++    connect(&m_nextTransitionBeats,
++            &ControlObject::valueChanged,
++            this,
++            &AutoDJProcessor::controlNextTransitionBeats);
++    m_phraseAlign.setButtonMode(ControlPushButton::TOGGLE);
++    m_phraseAlign.set(m_pConfig->getValue(
++            ConfigKey(kPreferenceGroup, kPhraseAlignPreferenceName), true));
++    connect(&m_phraseAlign,
++            &ControlObject::valueChanged,
++            this,
++            [this](double value) {
++                m_pConfig->setValue(
++                        ConfigKey(kPreferenceGroup, kPhraseAlignPreferenceName),
++                        value > 0);
++                controlNextTransitionBeats(m_nextTransitionBeats.get());
++            });
++    m_secondsToTransition.setReadOnly();
++    m_secondsToTransition.forceSet(-1);
+     m_enabledAutoDJ.connectValueChangeRequest(this,
+             &AutoDJProcessor::controlEnableChangeRequest);
+ 
+@@ -515,6 +547,16 @@ void AutoDJProcessor::fadeNow() {
+     fadeTime = math_min(fadeTime,
+             (toDeckEndSecond - toDeckCurrentSecond) / 2); // for fade in and out
+ 
++    // DecksmithOS: a script that starts a transition itself (after a loop
++    // roll or a brake) sets its length in beats, 0 for a cut
++    if (m_nextTransitionBeats.get() >= 0) {
++        const double beatSeconds = beatSecondsAt(pFromDeck, fromDeckCurrentSecond);
++        if (beatSeconds > 0) {
++            fadeTime = math_min(m_nextTransitionBeats.get() * beatSeconds,
++                    fromDeckEndSecond - fromDeckCurrentSecond);
++        }
++    }
++
+     pFromDeck->fadeEndPos = fromDeckCurrentSecond + fadeTime;
+ 
+     // These are expected to be a fraction of the track length.
+@@ -880,6 +922,7 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+         // nothing to do
+         return;
+     }
++    updateSecondsToTransition(pAttributes, thisPlayPosition);
+ 
+     DeckAttributes* thisDeck = pAttributes;
+     DeckAttributes* otherDeck = getOtherDeck(thisDeck);
+@@ -1013,6 +1056,9 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+                 m_eState = thisDeck->isLeft() ? ADJ_LEFT_FADING : ADJ_RIGHT_FADING;
+                 m_transitionProgress = 0.0;
+                 emitAutoDJStateChanged(m_eState);
++                // DecksmithOS: a script sets the length of the next
++                // transition again when the next track is loaded
++                m_nextTransitionBeats.set(-1);
+ 
+                 const double toDeckFadeDistance =
+                         (thisDeck->fadeEndPos - thisDeck->fadeBeginPos) *
+@@ -1706,6 +1752,8 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
+         }
+     }
+ 
++    planTransition(pFromDeck, pToDeck, fromDeckPosition, seekToStartPoint);
++
+     // These are expected to be a fraction of the track length.
+     pFromDeck->fadeBeginPos /= fromDeckDuration;
+     pFromDeck->fadeEndPos /= fromDeckDuration;
+@@ -1727,6 +1775,184 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
+     }
+ }
+ 
++// The length of a beat in seconds at the current tempo around "second" of
++// the loaded track, 0 if unknown (no beat grid)
++double AutoDJProcessor::beatSecondsAt(DeckAttributes* pDeck, double second) {
++    const TrackPointer pTrack = pDeck->getLoadedTrack();
++    if (!pTrack) {
++        return 0;
++    }
++    const mixxx::BeatsPointer pBeats = pTrack->getBeats();
++    const mixxx::audio::SampleRate sampleRate = pDeck->sampleRate();
++    const double rateRatio = pDeck->rateRatio();
++    if (!pBeats || !sampleRate.isValid() || rateRatio <= 0) {
++        return 0;
++    }
++    const mixxx::Bpm bpm = pBeats->getBpmAroundPosition(
++            mixxx::audio::FramePos(second * rateRatio * sampleRate.value()),
++            kTempoBeats);
++    if (!bpm.isValid() || bpm.value() <= 0) {
++        return 0;
++    }
++    return 60.0 / (bpm.value() * rateRatio);
++}
++
++void AutoDJProcessor::controlNextTransitionBeats(double value) {
++    Q_UNUSED(value);
++    // Same as a changed transition time: new fade thresholds, unless a fade
++    // is under way
++    if (m_eState != ADJ_IDLE) {
++        return;
++    }
++    DeckAttributes* pLeftDeck = getLeftDeck();
++    DeckAttributes* pRightDeck = getRightDeck();
++    if (!pLeftDeck || !pRightDeck) {
++        return;
++    }
++    if (pLeftDeck->isPlaying() && !pRightDeck->isPlaying()) {
++        calculateTransition(pLeftDeck, pRightDeck, false);
++    } else if (pRightDeck->isPlaying() && !pLeftDeck->isPlaying()) {
++        calculateTransition(pRightDeck, pLeftDeck, false);
++    }
++}
++
++void AutoDJProcessor::updateSecondsToTransition(DeckAttributes* pDeck, double playPosition) {
++    if (!pDeck->isFromDeck) {
++        return;
++    }
++    double seconds = -1;
++    if (m_eState == ADJ_IDLE && pDeck->isPlaying() && pDeck->fadeBeginPos < 1.0) {
++        seconds = math_max(0.0, (pDeck->fadeBeginPos - playPosition) * getEndSecond(pDeck));
++    } else if (m_eState == ADJ_LEFT_FADING || m_eState == ADJ_RIGHT_FADING) {
++        seconds = 0;
++    }
++    if (m_secondsToTransition.get() != seconds) {
++        m_secondsToTransition.forceSet(seconds);
++    }
++}
++
++// The places where a phrase-aligned transition may start: the phrase starts
++// of the track structure (rekordbox or detected; patches 0007 and 0020), long
++// phrases divided every 8 bars; without phrases, every 8 bars from the first
++// downbeat (or the first beat). In seconds at the current tempo, sorted.
++std::vector<double> AutoDJProcessor::phraseGridSeconds(DeckAttributes* pDeck) {
++    std::vector<double> grid;
++    const TrackPointer pTrack = pDeck->getLoadedTrack();
++    if (!pTrack) {
++        return grid;
++    }
++    const mixxx::BeatsPointer pBeats = pTrack->getBeats();
++    const mixxx::audio::FramePos trackEnd = pDeck->trackEndPosition();
++    if (!pBeats || !trackEnd.isValid()) {
++        return grid;
++    }
++    const auto addFrom = [&](mixxx::audio::FramePos position, mixxx::audio::FramePos end) {
++        while (position.isValid() && position < end && position < trackEnd) {
++            grid.push_back(framePositionToSeconds(position, pDeck));
++            const mixxx::audio::FramePos next =
++                    pBeats->findNBeatsFromPosition(position, kPhraseGridBeats);
++            if (!next.isValid() || next <= position) {
++                break;
++            }
++            position = next;
++        }
++    };
++    const mixxx::TrackStructurePointer pStructure = pTrack->getStructure();
++    if (pStructure && !pStructure->phrases().isEmpty()) {
++        for (const auto& phrase : pStructure->phrases()) {
++            addFrom(phrase.start, phrase.end.isValid() ? phrase.end : trackEnd);
++        }
++    } else {
++        mixxx::audio::FramePos downbeat = pStructure
++                ? pStructure->firstDownbeat()
++                : mixxx::audio::FramePos();
++        if (!downbeat.isValid()) {
++            downbeat = pBeats->firstBeat();
++        }
++        addFrom(downbeat, trackEnd);
++    }
++    std::sort(grid.begin(), grid.end());
++    grid.erase(std::unique(grid.begin(), grid.end()), grid.end());
++    return grid;
++}
++
++// DecksmithOS: [AutoDJ],next_transition_beats >= 0 sets the length of the
++// next transition in beats of the outgoing track (0: a cut); it is reset to
++// -1 (the transition mode and time decide) when that transition starts.
++// With [AutoDJ],phrase_align on, the transition starts on a phrase start of
++// the outgoing track (the latest that lets it end by the mode's end point,
++// otherwise the next one), and a newly cued incoming track starts at its
++// phrase start nearest to the mode's start point, so that both phrases
++// begin together. Tracks without a beat grid are left as the mode set them.
++void AutoDJProcessor::planTransition(DeckAttributes* pFromDeck,
++        DeckAttributes* pToDeck,
++        double fromDeckSecond,
++        bool seekToStartPoint) {
++    const double beats = m_nextTransitionBeats.get();
++    const bool align = m_phraseAlign.toBool();
++    if (beats < 0 && !align) {
++        return;
++    }
++    const double fromDeckEnd = getEndSecond(pFromDeck);
++    const double fadeEnd = pFromDeck->fadeEndPos;
++    const double beatSeconds = beatSecondsAt(pFromDeck, fadeEnd);
++    if (beatSeconds <= 0) {
++        return;
++    }
++    const double length = beats >= 0
++            ? beats * beatSeconds
++            : math_max(0.0, pFromDeck->fadeEndPos - pFromDeck->fadeBeginPos);
++    double begin = fadeEnd - length;
++    if (align) {
++        // At least a beat from now, so that the start is not missed
++        const double earliest = fromDeckSecond + beatSeconds;
++        const std::vector<double> grid = phraseGridSeconds(pFromDeck);
++        std::optional<double> chosen;
++        for (double start : grid) {
++            if (start >= earliest && start <= begin + beatSeconds / 2) {
++                chosen = start;
++            }
++        }
++        if (!chosen) {
++            for (double start : grid) {
++                if (start >= earliest && start + length <= fromDeckEnd) {
++                    chosen = start;
++                    break;
++                }
++            }
++        }
++        if (chosen) {
++            begin = *chosen;
++        }
++    }
++    begin = math_max(begin, fromDeckSecond);
++    pFromDeck->fadeBeginPos = begin;
++    pFromDeck->fadeEndPos = math_min(begin + length, fromDeckEnd);
++
++    if (align && seekToStartPoint && pToDeck->startPos >= 0) {
++        const double limit = pToDeck->fadeBeginPos - kMinimumTrackDurationSec;
++        std::optional<double> nearest;
++        for (double start : phraseGridSeconds(pToDeck)) {
++            if (start < 0 || start >= limit) {
++                continue;
++            }
++            if (!nearest ||
++                    fabs(start - pToDeck->startPos) <
++                            fabs(*nearest - pToDeck->startPos)) {
++                nearest = start;
++            }
++        }
++        if (nearest) {
++            pToDeck->startPos = *nearest;
++        }
++    }
++    if constexpr (sDebug) {
++        qDebug() << this << "planTransition" << beats << align
++                 << pFromDeck->fadeBeginPos << pFromDeck->fadeEndPos
++                 << pToDeck->startPos;
++    }
++}
++
+ void AutoDJProcessor::useFixedFadeTime(
+         DeckAttributes* pFromDeck,
+         DeckAttributes* pToDeck,
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index bd0d97a4..aa17ce29 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -7,6 +7,7 @@
+ #include <vector>
+ 
+ #include "audio/frame.h"
++#include "control/controlobject.h"
+ #include "control/controlproxy.h"
+ #include "control/controlpushbutton.h"
+ #include "control/pollingcontrolproxy.h"
+@@ -283,6 +284,19 @@ class AutoDJProcessor : public QObject {
+     void calculateTransition(DeckAttributes* pFromDeck,
+             DeckAttributes* pToDeck,
+             bool seekToStartPoint);
++    /// DecksmithOS: applies [AutoDJ],next_transition_beats and the phrase
++    /// alignment to the transition calculateTransition() has just set up
++    /// (positions in seconds).
++    void planTransition(DeckAttributes* pFromDeck,
++            DeckAttributes* pToDeck,
++            double fromDeckSecond,
++            bool seekToStartPoint);
++    /// Phrase starts of the loaded track in seconds (see the .cpp), empty
++    /// without a beat grid
++    std::vector<double> phraseGridSeconds(DeckAttributes* pDeck);
++    double beatSecondsAt(DeckAttributes* pDeck, double second);
++    void controlNextTransitionBeats(double value);
++    void updateSecondsToTransition(DeckAttributes* pDeck, double playPosition);
+     void useFixedFadeTime(
+             DeckAttributes* pFromDeck,
+             DeckAttributes* pToDeck,
+@@ -326,6 +340,10 @@ class AutoDJProcessor : public QObject {
+     ControlPushButton m_addRandomTrack;
+     ControlPushButton m_fadeNow;
+     ControlPushButton m_enabledAutoDJ;
++    // DecksmithOS
++    ControlObject m_nextTransitionBeats;
++    ControlPushButton m_phraseAlign;
++    ControlObject m_secondsToTransition;
+ 
+     DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
+ };
+diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
+index 9b85871e..2fa56008 100644
+--- a/src/test/autodjprocessor_test.cpp
++++ b/src/test/autodjprocessor_test.cpp
+@@ -8,6 +8,7 @@
+ #include <QString>
+ 
+ #include "control/controllinpotmeter.h"
++#include "control/controlproxy.h"
+ #include "control/controlpotmeter.h"
+ #include "control/controlpushbutton.h"
+ #include "engine/engine.h"
+@@ -1864,3 +1865,138 @@ TEST_F(AutoDJProcessorTest, Request) {
+     }
+     EXPECT_EQ(lastEarlierRequest + 1, ordered.indexOf(id(6)));
+ }
++
++// DecksmithOS: [AutoDJ],next_transition_beats and [AutoDJ],phrase_align
++// (phrase grid: no phrases, so every 32 beats = 8 s at 240 BPM from the first
++// beat at 0)
++TEST_F(AutoDJProcessorTest, PhraseAlignedTransitions) {
++    pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FixedFullTrack);
++    pProcessor->setTransitionTime(10);
++
++    TrackId testId = addTrackToCollection(kTrackLocationTest);
++    ASSERT_TRUE(testId.isValid());
++
++    mixer.crossfader.set(-1.0);
++    TrackPointer pTrack = newTestTrack();
++    ASSERT_TRUE(pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
++            pTrack->getSampleRate(), mixxx::audio::kStartFramePos, mixxx::Bpm(240))));
++    const double duration = pTrack->getDuration();
++    ASSERT_GT(duration, 26.0);
++    ASSERT_LT(duration, 32.0);
++    deck1.slotLoadTrack(pTrack, true);
++    deck1.fakeTrackLoadedEvent(pTrack);
++
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    pAutoDJTableModel->appendTrack(testId);
++
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_IDLE));
++    EXPECT_CALL(*pProcessor, emitLoadTrackToPlayer(_, QString("[Channel2]"), false));
++    EXPECT_EQ(AutoDJProcessor::ADJ_OK, pProcessor->toggleAutoDJ(true));
++    deck2.slotLoadTrack(pTrack, false);
++    deck2.fakeTrackLoadedEvent(pTrack);
++
++    ControlProxy nextBeats(QStringLiteral("[AutoDJ]"), QStringLiteral("next_transition_beats"));
++    ControlProxy secondsTo(QStringLiteral("[AutoDJ]"), QStringLiteral("seconds_to_transition"));
++    EXPECT_DOUBLE_EQ(-1.0, nextBeats.get());
++
++    // 10 s before the end would be about duration - 10 (16..22 s); the
++    // phrase start at 16 s is the latest before it
++    deck1.playposition.set(15.5 / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++    EXPECT_NEAR(0.5, secondsTo.get(), 0.01);
++
++    // A cut: on the last phrase start, 24 s
++    nextBeats.set(0);
++    deck1.playposition.set(23.9 / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++    EXPECT_NEAR(0.1, secondsTo.get(), 0.01);
++    EXPECT_DOUBLE_EQ(-1.0, mixer.crossfader.get());
++
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_LEFT_FADING));
++    deck1.playposition.set(24.05 / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_LEFT_FADING, pProcessor->getState());
++    EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
++    EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
++    // used up by this transition
++    EXPECT_DOUBLE_EQ(-1.0, nextBeats.get());
++    EXPECT_DOUBLE_EQ(0.0, secondsTo.get());
++}
++
++TEST_F(AutoDJProcessorTest, TransitionBeatsWithoutPhraseAlign) {
++    pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FixedFullTrack);
++    pProcessor->setTransitionTime(10);
++    ControlProxy phraseAlign(QStringLiteral("[AutoDJ]"), QStringLiteral("phrase_align"));
++    phraseAlign.set(0);
++    EXPECT_EQ(QString("0"), config()->getValueString(ConfigKey("[Auto DJ]", "PhraseAlign")));
++
++    TrackId testId = addTrackToCollection(kTrackLocationTest);
++    ASSERT_TRUE(testId.isValid());
++
++    mixer.crossfader.set(-1.0);
++    TrackPointer pTrack = newTestTrack();
++    ASSERT_TRUE(pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
++            pTrack->getSampleRate(), mixxx::audio::kStartFramePos, mixxx::Bpm(240))));
++    const double duration = pTrack->getDuration();
++    deck1.slotLoadTrack(pTrack, true);
++    deck1.fakeTrackLoadedEvent(pTrack);
++
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    pAutoDJTableModel->appendTrack(testId);
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_IDLE));
++    EXPECT_CALL(*pProcessor, emitLoadTrackToPlayer(_, QString("[Channel2]"), false));
++    EXPECT_EQ(AutoDJProcessor::ADJ_OK, pProcessor->toggleAutoDJ(true));
++    deck2.slotLoadTrack(pTrack, false);
++    deck2.fakeTrackLoadedEvent(pTrack);
++
++    // 8 beats at 240 BPM = 2 s before the end, not aligned
++    ControlProxy nextBeats(QStringLiteral("[AutoDJ]"), QStringLiteral("next_transition_beats"));
++    nextBeats.set(8);
++    deck1.playposition.set((duration - 2.1) / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_LEFT_FADING));
++    deck1.playposition.set((duration - 1.9) / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_LEFT_FADING, pProcessor->getState());
++    EXPECT_LT(-1.0, mixer.crossfader.get());
++    EXPECT_GT(1.0, mixer.crossfader.get());
++}
++
++// DecksmithOS: a script cuts to the next track itself (after a loop roll or a
++// brake) with next_transition_beats = 0 and fade_now
++TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
++    pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FixedFullTrack);
++    pProcessor->setTransitionTime(10);
++
++    TrackId testId = addTrackToCollection(kTrackLocationTest);
++    ASSERT_TRUE(testId.isValid());
++
++    mixer.crossfader.set(-1.0);
++    TrackPointer pTrack = newTestTrack();
++    ASSERT_TRUE(pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
++            pTrack->getSampleRate(), mixxx::audio::kStartFramePos, mixxx::Bpm(240))));
++    const double duration = pTrack->getDuration();
++    deck1.slotLoadTrack(pTrack, true);
++    deck1.fakeTrackLoadedEvent(pTrack);
++
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    pAutoDJTableModel->appendTrack(testId);
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_IDLE));
++    EXPECT_CALL(*pProcessor, emitLoadTrackToPlayer(_, QString("[Channel2]"), false));
++    EXPECT_EQ(AutoDJProcessor::ADJ_OK, pProcessor->toggleAutoDJ(true));
++    deck2.slotLoadTrack(pTrack, false);
++    deck2.fakeTrackLoadedEvent(pTrack);
++
++    deck1.playposition.set(5.0 / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++
++    ControlProxy nextBeats(QStringLiteral("[AutoDJ]"), QStringLiteral("next_transition_beats"));
++    ControlProxy fadeNow(QStringLiteral("[AutoDJ]"), QStringLiteral("fade_now"));
++    nextBeats.set(0);
++    fadeNow.set(1);
++    fadeNow.set(0);
++
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_LEFT_FADING));
++    deck1.playposition.set(5.01 / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_LEFT_FADING, pProcessor->getState());
++    EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
++    EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
++}

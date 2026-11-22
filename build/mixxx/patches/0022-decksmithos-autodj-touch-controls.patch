@@ -1,0 +1,305 @@
+Description: Auto DJ queue and sources from a touch screen
+ Controls for what Mixxx offers only in context menus or the preferences:
+ - [Library],AutoDjAddAllBottom: every track of the list shown (playlist,
+   crate, search result) to the end of the Auto DJ queue, in the order shown.
+ - [Library],crate_selected (read only, 1 while a crate's tracks are shown)
+   and [Library],crate_autodj_source (that crate is an Auto DJ track source;
+   settable).
+ - [AutoDJ],random_fill: the preference "Enable random track addition to
+   queue" ([Auto DJ] EnableRandomQueue).
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 98efc9a5..cf5eed27 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -143,7 +143,8 @@ AutoDJProcessor::AutoDJProcessor(
+           m_enabledAutoDJ(ConfigKey(kControlGroup, QStringLiteral("enabled"))),
+           m_nextTransitionBeats(ConfigKey(kControlGroup, QStringLiteral("next_transition_beats"))),
+           m_phraseAlign(ConfigKey(kControlGroup, QStringLiteral("phrase_align"))),
+-          m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))) {
++          m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))),
++          m_randomFill(ConfigKey(kControlGroup, QStringLiteral("random_fill"))) {
+     m_pAutoDJTableModel = make_parented<PlaylistTableModel>(
+             this, pTrackCollectionManager, "mixxx.db.model.autodj");
+     m_pAutoDJTableModel->selectPlaylist(iAutoDJPlaylistId);
+@@ -186,6 +187,25 @@ AutoDJProcessor::AutoDJProcessor(
+             });
+     m_secondsToTransition.setReadOnly();
+     m_secondsToTransition.forceSet(-1);
++
++    // DecksmithOS: [AutoDJ],random_fill switches the preference "Enable
++    // random track addition to queue" (random tracks from the Auto DJ
++    // crates, or the whole library, when the queue runs short)
++    m_randomFill.setButtonMode(ControlPushButton::TOGGLE);
++    m_randomFill.set(m_pConfig->getValueString(
++                              ConfigKey(kPreferenceGroup, QStringLiteral("EnableRandomQueue")))
++                    .toInt() == 1);
++    connect(&m_randomFill,
++            &ControlObject::valueChanged,
++            this,
++            [this](double value) {
++                m_pConfig->setValue(
++                        ConfigKey(kPreferenceGroup, QStringLiteral("EnableRandomQueue")),
++                        value > 0 ? 1 : 0);
++                if (value > 0 && m_eState != ADJ_DISABLED) {
++                    maybeFillRandomTracks();
++                }
++            });
+     m_enabledAutoDJ.connectValueChangeRequest(this,
+             &AutoDJProcessor::controlEnableChangeRequest);
+ 
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index aa17ce29..edad2e24 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -344,6 +344,7 @@ class AutoDJProcessor : public QObject {
+     ControlObject m_nextTransitionBeats;
+     ControlPushButton m_phraseAlign;
+     ControlObject m_secondsToTransition;
++    ControlPushButton m_randomFill;
+ 
+     DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
+ };
+diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
+index 3acb98eb..4c301ee9 100644
+--- a/src/library/librarycontrol.cpp
++++ b/src/library/librarycontrol.cpp
+@@ -296,6 +296,20 @@ LibraryControl::LibraryControl(Library* pLibrary)
+                 &LibraryControl::slotAutoDjAddRequest);
+     }
+ 
++    // DecksmithOS: the whole list shown (playlist, crate, search result) to
++    // the end of the Auto DJ queue, in the order shown
++    m_pAutoDjAddAllBottom = std::make_unique<ControlPushButton>(
++            ConfigKey("[Library]", "AutoDjAddAllBottom"));
++#ifdef MIXXX_USE_QML
++    if (!CmdlineArgs::Instance().isQml())
++#endif
++    {
++        connect(m_pAutoDjAddAllBottom.get(),
++                &ControlPushButton::valueChanged,
++                this,
++                &LibraryControl::slotAutoDjAddAllBottom);
++    }
++
+     // Sort controls
+     m_pSortColumn = std::make_unique<ControlEncoder>(ConfigKey("[Library]", "sort_column"));
+     m_pSortOrder = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "sort_order"));
+@@ -680,6 +694,17 @@ void LibraryControl::slotAutoDjAddRequest(double v) {
+     }
+ }
+ 
++void LibraryControl::slotAutoDjAddAllBottom(double v) {
++    if (!m_pLibraryWidget || v <= 0) {
++        return;
++    }
++
++    WTrackTableView* pTrackTableView = m_pLibraryWidget->getCurrentTrackTableView();
++    if (pTrackTableView) {
++        pTrackTableView->addAllToAutoDJBottom();
++    }
++}
++
+ void LibraryControl::slotSelectNextTrack(double v) {
+     if (v > 0) {
+         slotSelectTrack(1);
+diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
+index 4eb30202..4a359086 100644
+--- a/src/library/librarycontrol.h
++++ b/src/library/librarycontrol.h
+@@ -101,6 +101,7 @@ class LibraryControl : public QObject {
+     void slotAutoDjAddBottom(double v);
+     void slotAutoDjAddReplace(double v);
+     void slotAutoDjAddRequest(double v);
++    void slotAutoDjAddAllBottom(double v);
+ 
+     void maybeCreateGroupController(const QString& group);
+     void slotNumDecksChanged(double v);
+@@ -157,6 +158,7 @@ class LibraryControl : public QObject {
+     std::unique_ptr<ControlObject> m_pAutoDjAddBottom;
+     std::unique_ptr<ControlObject> m_pAutoDjAddReplace;
+     std::unique_ptr<ControlObject> m_pAutoDjAddRequest;
++    std::unique_ptr<ControlObject> m_pAutoDjAddAllBottom;
+ 
+     // Controls to sort the track view
+     std::unique_ptr<ControlEncoder> m_pSortColumn;
+diff --git a/src/library/trackset/crate/cratefeature.cpp b/src/library/trackset/crate/cratefeature.cpp
+index c1dfe971..3979e7b1 100644
+--- a/src/library/trackset/crate/cratefeature.cpp
++++ b/src/library/trackset/crate/cratefeature.cpp
+@@ -53,6 +53,15 @@ CrateFeature::CrateFeature(Library* pLibrary,
+           m_crateTableModel(this, pLibrary->trackCollectionManager()) {
+     initActions();
+ 
++    m_pCoCrateSelected = std::make_unique<ControlObject>(
++            ConfigKey(QStringLiteral("[Library]"), QStringLiteral("crate_selected")));
++    m_pCoCrateSelected->setReadOnly();
++    m_pCoAutoDjSource = std::make_unique<ControlPushButton>(
++            ConfigKey(QStringLiteral("[Library]"), QStringLiteral("crate_autodj_source")));
++    m_pCoAutoDjSource->setButtonMode(ControlPushButton::TOGGLE);
++    m_pCoAutoDjSource->connectValueChangeRequest(
++            this, &CrateFeature::slotAutoDjSourceRequest);
++
+     // construct child model
+     m_pSidebarModel->setRootItem(TreeItem::newRoot(this));
+     rebuildChildModel();
+@@ -296,6 +305,29 @@ TreeItemModel* CrateFeature::sidebarModel() const {
+ void CrateFeature::activate() {
+     m_lastClickedIndex = QModelIndex();
+     BaseTrackSetFeature::activate();
++    m_pCoCrateSelected->forceSet(0);
++    m_pCoAutoDjSource->setAndConfirm(0);
++}
++
++void CrateFeature::updateCrateControls() {
++    Crate crate;
++    const bool shown = m_pTrackCollection->crates().readCrateById(
++            m_crateTableModel.selectedCrate(), &crate);
++    m_pCoCrateSelected->forceSet(shown ? 1 : 0);
++    m_pCoAutoDjSource->setAndConfirm(shown && crate.isAutoDjSource() ? 1 : 0);
++}
++
++void CrateFeature::slotAutoDjSourceRequest(double value) {
++    Crate crate;
++    if (m_pCoCrateSelected->get() > 0 &&
++            m_pTrackCollection->crates().readCrateById(
++                    m_crateTableModel.selectedCrate(), &crate)) {
++        if (crate.isAutoDjSource() != (value > 0)) {
++            crate.setAutoDjSource(value > 0);
++            m_pTrackCollection->updateCrate(crate);
++        }
++    }
++    updateCrateControls();
+ }
+ 
+ void CrateFeature::activateChild(const QModelIndex& index) {
+@@ -311,6 +343,7 @@ void CrateFeature::activateChild(const QModelIndex& index) {
+     m_crateTableModel.selectCrate(crateId);
+     emit showTrackModel(&m_crateTableModel);
+     emit enableCoverArtDisplay(true);
++    updateCrateControls();
+ }
+ 
+ bool CrateFeature::activateCrate(CrateId crateId) {
+@@ -334,6 +367,7 @@ bool CrateFeature::activateCrate(CrateId crateId) {
+     m_crateTableModel.selectCrate(crateId);
+     emit showTrackModel(&m_crateTableModel);
+     emit enableCoverArtDisplay(true);
++    updateCrateControls();
+     // Update selection
+     emit featureSelect(this, m_lastClickedIndex);
+     return true;
+@@ -541,6 +575,7 @@ void CrateFeature::slotAutoDjTrackSourceChanged() {
+         if (crate.isAutoDjSource() != m_pAutoDjTrackSourceAction->isChecked()) {
+             crate.setAutoDjSource(m_pAutoDjTrackSourceAction->isChecked());
+             m_pTrackCollection->updateCrate(crate);
++            updateCrateControls();
+         }
+     }
+ }
+diff --git a/src/library/trackset/crate/cratefeature.h b/src/library/trackset/crate/cratefeature.h
+index 0289a6e2..3fbc633c 100644
+--- a/src/library/trackset/crate/cratefeature.h
++++ b/src/library/trackset/crate/cratefeature.h
+@@ -6,6 +6,10 @@
+ #include <QUrl>
+ #include <QVariant>
+ 
++#include <memory>
++
++#include "control/controlobject.h"
++#include "control/controlpushbutton.h"
+ #include "library/trackset/basetracksetfeature.h"
+ #include "library/trackset/crate/crate.h"
+ #include "library/trackset/crate/cratetablemodel.h"
+@@ -121,6 +125,15 @@ class CrateFeature : public BaseTrackSetFeature {
+     parented_ptr<QAction> m_pLockCrateAction;
+     parented_ptr<QAction> m_pDuplicateCrateAction;
+     parented_ptr<QAction> m_pAutoDjTrackSourceAction;
++
++    // DecksmithOS: [Library],crate_selected (read only, 1 while a crate's
++    // tracks are shown) and [Library],crate_autodj_source (the shown crate
++    // is an Auto DJ track source; settable), for touch screens without a
++    // context menu
++    void updateCrateControls();
++    void slotAutoDjSourceRequest(double value);
++    std::unique_ptr<ControlObject> m_pCoCrateSelected;
++    std::unique_ptr<ControlPushButton> m_pCoAutoDjSource;
+     parented_ptr<QAction> m_pImportPlaylistAction;
+     parented_ptr<QAction> m_pCreateImportPlaylistAction;
+     parented_ptr<QAction> m_pExportPlaylistAction;
+diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
+index 2fa56008..0105e401 100644
+--- a/src/test/autodjprocessor_test.cpp
++++ b/src/test/autodjprocessor_test.cpp
+@@ -2000,3 +2000,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
+     EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
+     EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
+ }
++
++// DecksmithOS: [AutoDJ],random_fill is the "Enable random track addition to
++// queue" preference
++TEST_F(AutoDJProcessorTest, RandomFillControl) {
++    ControlProxy randomFill(QStringLiteral("[AutoDJ]"), QStringLiteral("random_fill"));
++    EXPECT_DOUBLE_EQ(0.0, randomFill.get());
++    randomFill.set(1);
++    EXPECT_EQ(QString("1"), config()->getValueString(ConfigKey("[Auto DJ]", "EnableRandomQueue")));
++    randomFill.set(0);
++    EXPECT_EQ(QString("0"), config()->getValueString(ConfigKey("[Auto DJ]", "EnableRandomQueue")));
++}
+diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
+index ed536d61..9f73c506 100644
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -1570,6 +1570,35 @@ void WTrackTableView::addToAutoDJReplace() {
+     addToAutoDJ(PlaylistDAO::AutoDJSendLoc::REPLACE);
+ }
+ 
++void WTrackTableView::addAllToAutoDJBottom() {
++    auto* pTrackModel = getTrackModel();
++    QAbstractItemModel* pModel = model();
++    if (!pTrackModel || !pModel ||
++            !pTrackModel->hasCapabilities(TrackModel::Capability::AddToAutoDJ)) {
++        return;
++    }
++    // SQL models load their rows in chunks
++    while (pModel->canFetchMore(QModelIndex())) {
++        pModel->fetchMore(QModelIndex());
++    }
++    QList<TrackId> trackIds;
++    trackIds.reserve(pModel->rowCount());
++    for (int row = 0; row < pModel->rowCount(); ++row) {
++        const TrackId trackId = pTrackModel->getTrackId(pModel->index(row, 0));
++        if (trackId.isValid()) {
++            trackIds.append(trackId);
++        }
++    }
++    if (trackIds.isEmpty()) {
++        return;
++    }
++    PlaylistDAO& playlistDao = m_pLibrary->trackCollectionManager()
++                                       ->internalCollection()
++                                       ->getPlaylistDAO();
++    m_pLibrary->trackCollectionManager()->unhideTracks(trackIds);
++    playlistDao.addTracksToAutoDJQueue(trackIds, PlaylistDAO::AutoDJSendLoc::BOTTOM);
++}
++
+ void WTrackTableView::addToAutoDJRequest() {
+     // No AddToAutoDJ capability check: the Auto DJ queue itself lacks it, and
+     // a request from there moves a queued track up.
+diff --git a/src/widget/wtracktableview.h b/src/widget/wtracktableview.h
+index f17bee9a..592cb14f 100644
+--- a/src/widget/wtracktableview.h
++++ b/src/widget/wtracktableview.h
+@@ -58,6 +58,8 @@ class WTrackTableView : public WLibraryTableView {
+     /// next tracks of the queue, or move there if queued already. Works in the
+     /// Auto DJ view too.
+     void addToAutoDJRequest();
++    /// DecksmithOS: every track of the list shown, in the order shown
++    void addAllToAutoDJBottom();
+     void selectTrack(const TrackId&);
+ 
+     void removeSelectedTracks();

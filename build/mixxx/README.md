@@ -87,6 +87,9 @@ so the source is patched in this order:
 | `0017-decksmithos-removable-drives` | `DECKSMITHOS_DRIVES` / `DECKSMITHOS_EJECT_COMMAND`: `[Drives],mounted_<n>`, `eject_<n>`, `eject_error_<n>` for EJECT buttons | appliance only |
 | `0018-decksmithos-thread-placement` | `DECKSMITHOS_AUDIO_CPUS`: the audio thread moves to its own CPU; `DECKSMITHOS_BACKGROUND_NICE`: analysis and library scan below the GUI | appliance only |
 | `0019-decksmithos-no-scan-dialog` | `DECKSMITHOS_NO_SCAN_DIALOG`: no library scan window (scans started by a new drive run in the background) | appliance only |
+| `0020-decksmithos-phrase-detection` | Phrases (and the first downbeat) detected from loudness and bass changes for tracks without rekordbox phrase data, snapped to an 8-bar grid, labelled like rekordbox ("High" mood); stored in the 0007 track structure with a source marker, never over rekordbox data, which always replaces it; `[Library],DetectPhrases` (default on); already analyzed tracks get it when loaded. Ideas from upstream PRs #16582 and #17404 | candidate for upstream discussion (user submits) |
+| `0021-decksmithos-autodj-transitions` | Auto DJ: `[AutoDJ],next_transition_beats` (length of the next transition in beats, 0 = cut; also for `fade_now`), `seconds_to_transition` (read only), `phrase_align` (`[Auto DJ] PhraseAlign`, default on: transitions start on phrase starts, the incoming track is cued on one) | candidate for upstream discussion (user submits) |
+| `0022-decksmithos-autodj-touch-controls` | `[Library],AutoDjAddAllBottom` (the whole list shown to the Auto DJ queue), `[Library],crate_selected` / `crate_autodj_source` (crate as Auto DJ source), `[AutoDJ],random_fill` (preference "Enable random track addition to queue"): for a touch screen without context menus | appliance; parts could go upstream |
 
 Refresh 0000 with `build/mixxx/make-stable-patch.sh [branch [commit]]`
 (default: head of `2.5`). It also tries each DecksmithOS patch on top and

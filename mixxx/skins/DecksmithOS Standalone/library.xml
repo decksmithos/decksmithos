@@ -140,6 +140,178 @@
               
             </Children>
           </WidgetGroup>
+          <!-- Auto DJ row. In the Auto DJ section: Auto DJ on/off, fade to
+               the next track now, skip the next track, order the queue by key
+               (patch 0006), add a random track, keep the queue filled with
+               random tracks from the source crates (or the whole library;
+               patch 0022). Elsewhere: the selected track to the end of the
+               queue or next, the whole list shown to the end (patch 0022),
+               and for a crate: use it as an Auto DJ source (patch 0022). -->
+          <WidgetGroup>
+            <ObjectName>LibActionRow</ObjectName>
+            <Layout>horizontal</Layout>
+            <Size>0me,48f</Size>
+            <Children>
+              <WidgetGroup><Size>4f,44f</Size></WidgetGroup>
+              <WidgetGroup>
+                <Layout>horizontal</Layout>
+                <Size>0me,48f</Size>
+                <Children>
+                  <PushButton>
+                    <ObjectName>LibAdjToggleBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <State><Number>0</Number><Text>AUTO DJ</Text></State>
+                    <State><Number>1</Number><Text>AUTO DJ</Text></State>
+                    <Connection>
+                      <ConfigKey>[AutoDJ],enabled</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibActionBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>FADE NOW</Text></State>
+                    <State><Number>1</Number><Text>FADE NOW</Text></State>
+                    <Connection>
+                      <ConfigKey>[AutoDJ],fade_now</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibActionBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>SKIP</Text></State>
+                    <State><Number>1</Number><Text>SKIP</Text></State>
+                    <Connection>
+                      <ConfigKey>[AutoDJ],skip_next</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibActionBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>HARMONIC</Text></State>
+                    <State><Number>1</Number><Text>HARMONIC</Text></State>
+                    <Connection>
+                      <ConfigKey>[AutoDJ],sort_harmonic</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibActionBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>+ RANDOM</Text></State>
+                    <State><Number>1</Number><Text>+ RANDOM</Text></State>
+                    <Connection>
+                      <ConfigKey>[AutoDJ],add_random_track</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibAdjToggleBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <State><Number>0</Number><Text>AUTO FILL</Text></State>
+                    <State><Number>1</Number><Text>AUTO FILL</Text></State>
+                    <Connection>
+                      <ConfigKey>[AutoDJ],random_fill</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                </Children>
+                <Connection>
+                  <ConfigKey>[Library],active_autodj</ConfigKey>
+                  <BindProperty>visible</BindProperty>
+                </Connection>
+              </WidgetGroup>
+              <WidgetGroup>
+                <Layout>horizontal</Layout>
+                <Size>0me,48f</Size>
+                <Children>
+                  <PushButton>
+                    <ObjectName>LibActionBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>+ QUEUE</Text></State>
+                    <State><Number>1</Number><Text>+ QUEUE</Text></State>
+                    <Connection>
+                      <ConfigKey>[Library],AutoDjAddBottom</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibActionBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>+ NEXT</Text></State>
+                    <State><Number>1</Number><Text>+ NEXT</Text></State>
+                    <Connection>
+                      <ConfigKey>[Library],AutoDjAddTop</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibActionBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>+ ALL</Text></State>
+                    <State><Number>1</Number><Text>+ ALL</Text></State>
+                    <Connection>
+                      <ConfigKey>[Library],AutoDjAddAllBottom</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup>
+                    <Layout>horizontal</Layout>
+                    <Size>0me,48f</Size>
+                    <Children>
+                      <WidgetGroup>
+                        <Layout>horizontal</Layout>
+                        <Size>0me,48f</Size>
+                        <Children>
+                          <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                          <PushButton>
+                            <ObjectName>LibAdjToggleBtn</ObjectName>
+                            <Size>0me,44f</Size>
+                            <NumberStates>2</NumberStates>
+                            <State><Number>0</Number><Text>SOURCE</Text></State>
+                            <State><Number>1</Number><Text>SOURCE</Text></State>
+                            <Connection>
+                              <ConfigKey>[Library],crate_autodj_source</ConfigKey>
+                            </Connection>
+                          </PushButton>
+                        </Children>
+                        <Connection>
+                          <ConfigKey>[Library],crate_selected</ConfigKey>
+                          <BindProperty>visible</BindProperty>
+                        </Connection>
+                      </WidgetGroup>
+                    </Children>
+                    <Connection>
+                      <ConfigKey>[Library],active_crates</ConfigKey>
+                      <BindProperty>visible</BindProperty>
+                    </Connection>
+                  </WidgetGroup>
+                </Children>
+                <Connection>
+                  <ConfigKey>[Library],active_autodj</ConfigKey>
+                  <Transform><Not/></Transform>
+                  <BindProperty>visible</BindProperty>
+                </Connection>
+              </WidgetGroup>
+              <WidgetGroup><Size>4f,44f</Size></WidgetGroup>
+            </Children>
+          </WidgetGroup>
           <WidgetGroup>
             <SizePolicy>me,me</SizePolicy>
             <Layout>horizontal</Layout>

@@ -1,25 +1,48 @@
 // DecksmithOS Auto DJ transitions (AGENTS.md #31, stage 3).
 //
 // A controller script without controls: Mixxx runs it for a virtual MIDI
-// device (ALSA snd-virmidi), so it needs no Mixxx patch. Mixxx's own Auto DJ
-// keeps doing the queue, the track loading and the crossfader; this script
-// only acts around each Auto DJ transition between decks 1 and 2:
+// device (ALSA snd-virmidi). Mixxx's own Auto DJ keeps doing the queue, the
+// track loading and the crossfader; this script chooses the kind of each
+// transition and plays it, between decks 1 and 2.
 //
-//   transition start (Auto DJ starts the next track while the other plays)
-//     - if the tempos are close enough (half/double tempo counts as the
-//       same), the incoming track takes the playing track's tempo
-//       (beatsync_tempo) and phase (beatsync_phase), with keylock on so that
-//       its key does not move;
-//     - the incoming track's bass is taken out (low EQ);
-//   crossfader past the middle
-//     - bass swap: the outgoing bass out, the incoming bass back in, over
-//       a short ramp;
-//   transition end (the outgoing deck stops)
-//     - the outgoing deck gets its EQ, tempo and keylock back for its next
-//       track;
-//     - the incoming deck slowly returns to its own tempo (rate 0), so that a
-//       whole set does not drift to the first track's tempo; keylock goes
-//       off once it is there.
+// Transitions (the usual DJ ones; their names are the MENU page buttons):
+//   blend   32 beats together, the bass swapped when the crossfader passes
+//           the middle (EQ)
+//   filter  16 beats: the incoming track comes in through a high-pass
+//           filter that opens, the outgoing one goes out through a closing
+//           low-pass (the decks' quick effect, a filter by default)
+//   echo    echo on the outgoing track from a beat before; at the start its
+//           fader goes down and the echo tail plays over the incoming track
+//   reverb  the same with a reverb wash
+//   cut     straight to the incoming track on the phrase start
+//   loop    the outgoing track rolls a loop of 4, 2, 1 and 1/2 beats over
+//           the last 8 beats, then the cut
+//   riser   high-pass sweep up on the outgoing track over the last 16 beats,
+//           then the cut
+//   brake   vinyl brake or backspin of the outgoing track, then the cut
+//
+// Choosing ([Skin],dsm_adj_mode, MENU page): SMART weighs the transitions
+// that suit the two tracks: blend and filter only when the tempos can be
+// matched (within 8 %, half/double tempo counts) and the keys fit (Camelot
+// wheel: blend at most one step, filter at most three), loop and riser only
+// when the tempos can be matched, echo/reverb/cut/brake always (more likely
+// when the tempos are far apart); brake at most once in 8 transitions, and
+// never the same transition twice in a row. RANDOM picks any allowed
+// transition with the same tempo rules. Each transition can be switched off
+// ([Skin],dsm_adj_use_<name>); with none left Mixxx's own crossfade plays.
+//
+// Timing (Mixxx patch 0021): the chosen length goes to
+// [AutoDJ],next_transition_beats when the next track is loaded; with
+// [AutoDJ],phrase_align the transition starts on a phrase start of the
+// outgoing track and the incoming one starts on a phrase start.
+// [AutoDJ],seconds_to_transition tells when to start what comes before
+// (echo, loop, riser, brake). Loop and brake stop the outgoing track from
+// reaching that point, so they cut with [AutoDJ],fade_now.
+//
+// For every transition: if the tempos can be matched, the incoming track
+// takes the playing track's tempo and phase, with keylock, and afterwards
+// slowly returns to its own tempo. The outgoing deck gets its EQ, filter,
+// fader, tempo and keylock back when it stops.
 //
 // Nothing happens while Auto DJ is off, or on a deck with sync lock on (the
 // DJ's choice). Times and limits are in CONFIG; they are judged by listening.
@@ -36,6 +59,27 @@ DecksmithAutoDJ.CONFIG = {
     bassSwapMs: 400,
     // Keylock on the incoming deck while its tempo is not its own.
     useKeylock: true,
+    // At most one brake in this many transitions
+    brakeEvery: 8,
+    // Effect unit for echo and reverb (effect 1: Echo, effect 2: Reverb;
+    // loaded by decksmithos-mixxx-autoconf). Unit 1 is the BEAT FX of the
+    // skin and unit 2 that of 4-deck layouts.
+    fxUnit: "[EffectRack1_EffectUnit4]",
+};
+
+// beats: transition length (0: cut); pre: beats before the transition start
+// where its first part begins; match: needs matched tempos; keys: largest
+// Camelot distance (undefined: any); weight: SMART weight when the tempos
+// match / when they do not.
+DecksmithAutoDJ.TRANSITIONS = {
+    blend: {beats: 32, pre: 0, match: true, keys: 1, weight: [6, 0]},
+    filter: {beats: 16, pre: 0, match: true, keys: 3, weight: [3, 0]},
+    echo: {beats: 8, pre: 1, match: false, weight: [2, 4]},
+    reverb: {beats: 8, pre: 1, match: false, weight: [1, 2]},
+    cut: {beats: 0, pre: 0, match: false, weight: [2, 3]},
+    loop: {beats: 0, pre: 8, match: true, weight: [2, 0]},
+    riser: {beats: 0, pre: 16, match: true, weight: [2, 0]},
+    brake: {beats: 0, pre: 4, match: false, weight: [0.5, 1]},
 };
 
 DecksmithAutoDJ.DECKS = ["[Channel1]", "[Channel2]"];
@@ -44,18 +88,28 @@ DecksmithAutoDJ.STEP_MS = 50;
 DecksmithAutoDJ.init = function(id, debugging) {
     this.debugging = debugging;
     this.connections = [];
-    // per deck: saved low EQ value (or undefined), timers
+    // per deck: saved values (or undefined) and timers
     this.state = {};
     this.DECKS.forEach(function(group) {
         DecksmithAutoDJ.state[group] = {
             savedLow: undefined,
+            savedFilter: undefined,
+            savedVolume: undefined,
             lowTimer: 0,
+            filterTimer: 0,
+            volumeTimer: 0,
             rateTimer: 0,
             keylockSet: false,
         };
         DecksmithAutoDJ.connections.push(
             engine.makeConnection(group, "play", function(value) {
                 DecksmithAutoDJ.onPlay(group, value);
+            }));
+        DecksmithAutoDJ.connections.push(
+            engine.makeConnection(group, "track_loaded", function(value) {
+                if (value > 0) {
+                    DecksmithAutoDJ.onTrackLoaded(group);
+                }
             }));
     });
     this.connections.push(engine.makeConnection("[Master]", "crossfader",
@@ -68,8 +122,22 @@ DecksmithAutoDJ.init = function(id, debugging) {
                 DecksmithAutoDJ.reset();
             }
         }));
-    // {from, to, swapped} while a transition runs
+    var countdown = engine.makeConnection("[AutoDJ]", "seconds_to_transition",
+        function(value) {
+            DecksmithAutoDJ.onCountdown(value);
+        });
+    if (countdown) {
+        this.connections.push(countdown);
+    } else {
+        this.log("[AutoDJ],seconds_to_transition missing (Mixxx without patch 0021): " +
+                 "only Mixxx's own crossfade timing");
+    }
+    // the plan for the next transition: {from, to, name, matched}
+    this.plan = null;
+    // {from, to, name, swapped, ...} while a transition runs
     this.transition = null;
+    this.history = [];
+    this.timers = {};
     this.log("ready");
 };
 
@@ -88,13 +156,45 @@ DecksmithAutoDJ.other = function(group) {
     return group === this.DECKS[0] ? this.DECKS[1] : this.DECKS[0];
 };
 
+DecksmithAutoDJ.deckNumber = function(group) {
+    return group === this.DECKS[0] ? 1 : 2;
+};
+
 DecksmithAutoDJ.eqGroup = function(group) {
     return "[EqualizerRack1_" + group + "_Effect1]";
+};
+
+DecksmithAutoDJ.filterGroup = function(group) {
+    return "[QuickEffectRack1_" + group + "]";
 };
 
 DecksmithAutoDJ.synced = function(group) {
     return engine.getValue(group, "sync_enabled") > 0;
 };
+
+DecksmithAutoDJ.beatMs = function(group) {
+    var bpm = engine.getValue(group, "bpm");
+    return bpm > 0 ? 60000 / bpm : 500;
+};
+
+DecksmithAutoDJ.startTimer = function(name, ms, callback, oneShot) {
+    this.stopTimer(name);
+    this.timers[name] = engine.beginTimer(Math.max(20, Math.round(ms)), function() {
+        if (oneShot) {
+            delete DecksmithAutoDJ.timers[name];
+        }
+        callback();
+    }, oneShot);
+};
+
+DecksmithAutoDJ.stopTimer = function(name) {
+    if (this.timers[name]) {
+        engine.stopTimer(this.timers[name]);
+        delete this.timers[name];
+    }
+};
+
+// --- Choosing -----------------------------------------------------------------
 
 // Tempo change in percent from bpm "from" to bpm "to", with half/double tempo
 // counted as the same (as in Mixxx's sync); null if a tempo is unknown.
@@ -112,6 +212,214 @@ DecksmithAutoDJ.tempoChangePercent = function(from, to) {
     return (best - 1) * 100;
 };
 
+// Camelot wheel position of a Mixxx key ([ChannelN],key: 1-12 C..B major,
+// 13-24 C..B minor) as {number, minor}, or null
+DecksmithAutoDJ.MAJOR = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1];
+DecksmithAutoDJ.MINOR = [5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10];
+DecksmithAutoDJ.camelot = function(key) {
+    key = Math.round(key);
+    if (key >= 1 && key <= 12) {
+        return {number: this.MAJOR[key - 1], minor: false};
+    }
+    if (key >= 13 && key <= 24) {
+        return {number: this.MINOR[key - 13], minor: true};
+    }
+    return null;
+};
+
+// Steps between two keys on the Camelot wheel (relative major/minor: 1),
+// null if a key is unknown
+DecksmithAutoDJ.keyDistance = function(a, b) {
+    var ka = this.camelot(a);
+    var kb = this.camelot(b);
+    if (!ka || !kb) {
+        return null;
+    }
+    var d = Math.abs(ka.number - kb.number);
+    d = Math.min(d, 12 - d);
+    return d + (ka.minor === kb.minor ? 0 : 1);
+};
+
+DecksmithAutoDJ.allowed = function(name) {
+    // switched on unless the skin says otherwise (no skin: all on)
+    return engine.getValue("[Skin]", "dsm_adj_use_" + name) !== 0;
+};
+
+DecksmithAutoDJ.choose = function(from, to) {
+    var change = this.tempoChangePercent(
+        engine.getValue(from, "bpm"), engine.getValue(to, "file_bpm"));
+    var matched = change !== null && !this.synced(from) && !this.synced(to) &&
+        Math.abs(change) <= this.CONFIG.maxTempoChangePercent;
+    var keys = this.keyDistance(engine.getValue(from, "key"), engine.getValue(to, "key"));
+    var smart = engine.getValue("[Skin]", "dsm_adj_mode") === 0;
+    var last = this.history.length ? this.history[this.history.length - 1] : null;
+    var recentBrake = this.history.slice(-(this.CONFIG.brakeEvery - 1)).indexOf("brake") >= 0;
+    var candidates = [];
+    var total = 0;
+    Object.keys(this.TRANSITIONS).forEach(function(name) {
+        var t = DecksmithAutoDJ.TRANSITIONS[name];
+        if (!DecksmithAutoDJ.allowed(name) || (t.match && !matched)) {
+            return;
+        }
+        if (name === "brake" && recentBrake) {
+            return;
+        }
+        var weight = 1;
+        if (smart) {
+            if (t.keys !== undefined && keys !== null && keys > t.keys) {
+                return;
+            }
+            weight = t.weight[matched ? 0 : 1];
+        }
+        if (weight > 0) {
+            candidates.push({name: name, weight: weight});
+            total += weight;
+        }
+    });
+    if (candidates.length > 1 && last !== null) {
+        candidates = candidates.filter(function(c) {
+            if (c.name === last) {
+                total -= c.weight;
+                return false;
+            }
+            return true;
+        });
+    }
+    var name = null;
+    var r = Math.random() * total;
+    for (var i = 0; i < candidates.length; i++) {
+        r -= candidates[i].weight;
+        if (r < 0 || i === candidates.length - 1) {
+            name = candidates[i].name;
+            break;
+        }
+    }
+    return {name: name, matched: matched, change: change, keys: keys};
+};
+
+// The next track is loaded on "group" while the other deck plays: plan the
+// transition and tell Auto DJ its length
+DecksmithAutoDJ.onTrackLoaded = function(group) {
+    var from = this.other(group);
+    if (!engine.getValue("[AutoDJ]", "enabled") || !engine.getValue(from, "play") ||
+            this.transition) {
+        return;
+    }
+    var c = this.choose(from, group);
+    this.plan = {from: from, to: group, name: c.name, matched: c.matched, pre: false};
+    engine.setValue("[AutoDJ]", "next_transition_beats",
+        c.name ? this.TRANSITIONS[c.name].beats : -1);
+    this.log("next: " + (c.name || "Mixxx crossfade (no transition allowed)") +
+             " (tempo " + (c.change === null ? "?" : c.change.toFixed(1) + " %") +
+             ", key steps " + (c.keys === null ? "?" : c.keys) + ")");
+};
+
+// --- Before the transition ------------------------------------------------------
+
+DecksmithAutoDJ.onCountdown = function(seconds) {
+    var p = this.plan;
+    if (!p || p.pre || !p.name || seconds <= 0 || this.transition) {
+        return;
+    }
+    var pre = this.TRANSITIONS[p.name].pre;
+    if (pre <= 0 || seconds * 1000 > pre * this.beatMs(p.from)) {
+        return;
+    }
+    p.pre = true;
+    var beatMs = this.beatMs(p.from);
+    switch (p.name) {
+    case "echo":
+    case "reverb":
+        this.fxOn(p.from, p.name === "echo" ? 1 : 2);
+        break;
+    case "riser":
+        this.rampFilter(p.from, 0.9, seconds * 1000);
+        break;
+    case "loop":
+        this.loopRoll(p.from, beatMs);
+        break;
+    case "brake":
+        this.brake(p.from);
+        break;
+    }
+};
+
+// Echo or reverb (effect slot 1 or 2 of the Auto DJ unit) on a deck
+DecksmithAutoDJ.fxOn = function(group, slot) {
+    var unit = this.CONFIG.fxUnit;
+    var effect = unit.replace("]", "_Effect" + slot + "]");
+    if (!engine.getValue(effect, "loaded")) {
+        this.log(effect + " has no effect loaded: no " + (slot === 1 ? "echo" : "reverb"));
+        return;
+    }
+    engine.setValue(unit, "group_" + group + "_enable", 1);
+    engine.setValue(effect, "enabled", 1);
+    engine.setValue(unit, "mix", 1);
+    engine.setValue(unit, "enabled", 1);
+    this.fx = {group: group, effect: effect};
+};
+
+DecksmithAutoDJ.fxOff = function() {
+    if (!this.fx) {
+        return;
+    }
+    engine.setValue(this.fx.effect, "enabled", 0);
+    engine.setValue(this.CONFIG.fxUnit, "group_" + this.fx.group + "_enable", 0);
+    this.fx = null;
+};
+
+// Loop of 4 beats, then 2, 1 and 1/2 beats (8 beats in all), then the cut
+DecksmithAutoDJ.LOOP_STEPS = [[4, 1], [2, 1], [1, 1], [0.5, 2]];
+DecksmithAutoDJ.loopRoll = function(group, beatMs) {
+    var step = 0;
+    var next = function() {
+        if (step >= DecksmithAutoDJ.LOOP_STEPS.length) {
+            DecksmithAutoDJ.cutNow(group);
+            return;
+        }
+        var s = DecksmithAutoDJ.LOOP_STEPS[step++];
+        engine.setValue(group, "beatloop_size", s[0]);
+        if (!engine.getValue(group, "loop_enabled")) {
+            engine.setValue(group, "beatloop_activate", 1);
+        }
+        DecksmithAutoDJ.startTimer("loop", s[0] * s[1] * beatMs, next, true);
+    };
+    next();
+};
+
+DecksmithAutoDJ.brake = function(group) {
+    var spin = Math.random() < 0.5;
+    var deck = this.deckNumber(group);
+    if (spin) {
+        engine.spinback(deck, true, 1.5);
+    } else {
+        engine.brake(deck, true, 1.0);
+    }
+    this.log(spin ? "backspin" : "brake");
+    // cut when the deck has (nearly) stopped turning
+    var started = Date.now();
+    this.startTimer("brake", 20, function() {
+        var speed = Math.abs(engine.getValue(group, "scratch2"));
+        if (speed < 0.15 || Date.now() - started > 4000 || !engine.getValue(group, "play")) {
+            DecksmithAutoDJ.stopTimer("brake");
+            DecksmithAutoDJ.cutNow(group);
+        }
+    }, false);
+};
+
+// Start the transition now, as a cut (loop roll and brake: the outgoing track
+// does not reach the planned start)
+DecksmithAutoDJ.cutNow = function(group) {
+    if (engine.getValue(group, "loop_enabled")) {
+        engine.setValue(group, "reloop_toggle", 1);
+    }
+    engine.setValue("[AutoDJ]", "next_transition_beats", 0);
+    engine.setValue("[AutoDJ]", "fade_now", 1);
+    engine.setValue("[AutoDJ]", "fade_now", 0);
+};
+
+// --- The transition -----------------------------------------------------------
+
 DecksmithAutoDJ.onPlay = function(group, value) {
     if (!engine.getValue("[AutoDJ]", "enabled")) {
         return;
@@ -125,7 +433,14 @@ DecksmithAutoDJ.onPlay = function(group, value) {
 };
 
 DecksmithAutoDJ.startTransition = function(from, to) {
-    this.transition = {from: from, to: to, swapped: false};
+    var p = this.plan && this.plan.from === from && this.plan.to === to ? this.plan : null;
+    var name = p ? p.name : null;
+    this.plan = null;
+    this.transition = {from: from, to: to, name: name, swapped: false};
+    if (name) {
+        this.history.push(name);
+        this.history = this.history.slice(-16);
+    }
     // The outgoing deck stops returning to its own tempo: its tempo is the
     // one the incoming track follows now.
     this.stopRateTimer(from);
@@ -134,10 +449,12 @@ DecksmithAutoDJ.startTransition = function(from, to) {
         engine.getValue(from, "bpm"), engine.getValue(to, "file_bpm"));
     if (this.synced(from) || this.synced(to)) {
         this.log("sync lock is on: tempo left to it");
+    } else if (name === "brake") {
+        this.log("brake: the incoming track keeps its own tempo");
     } else if (change === null) {
-        this.log("tempo unknown: plain crossfade");
+        this.log("tempo unknown: not matched");
     } else if (Math.abs(change) > this.CONFIG.maxTempoChangePercent) {
-        this.log("tempo change " + change.toFixed(1) + " % too large: plain crossfade");
+        this.log("tempo change " + change.toFixed(1) + " % too large: not matched");
     } else {
         this.stopRateTimer(to);
         if (this.CONFIG.useKeylock && !engine.getValue(to, "keylock")) {
@@ -148,11 +465,39 @@ DecksmithAutoDJ.startTransition = function(from, to) {
         engine.setValue(to, "beatsync_phase", 1);
         this.log(from + " -> " + to + ": tempo matched (" + change.toFixed(1) + " %)");
     }
+    this.log("transition: " + (name || "Mixxx crossfade"));
 
-    // Incoming bass out until the swap.
-    this.rampLow(to, 0);
-    // A transition of zero length: swap now.
-    this.onCrossfader(engine.getValue("[Master]", "crossfader"));
+    var beatMs = this.beatMs(from);
+    switch (name) {
+    case null:
+    case "blend":
+        // Incoming bass out until the swap at the crossfader middle
+        this.rampLow(to, 0);
+        this.onCrossfader(engine.getValue("[Master]", "crossfader"));
+        break;
+    case "filter":
+        this.transition.swapped = true; // the filters take care of the bass
+        var ms = this.TRANSITIONS.filter.beats * beatMs;
+        this.setFilter(to, 1.0);
+        this.rampFilter(to, null, ms);
+        this.rampFilter(from, 0.05, ms);
+        break;
+    case "echo":
+    case "reverb":
+        this.transition.swapped = true;
+        if (!this.fx) {
+            // started without the beat before (e.g. FADE NOW)
+            this.fxOn(from, name === "echo" ? 1 : 2);
+        }
+        this.rampVolume(from, 0, beatMs);
+        break;
+    default:
+        // cuts: nothing to blend
+        this.transition.swapped = true;
+        this.stopTimer("loop");
+        this.stopTimer("brake");
+        break;
+    }
 };
 
 // Crossfader position normalized so that -1 is the left side.
@@ -187,44 +532,90 @@ DecksmithAutoDJ.onCrossfader = function(value) {
 DecksmithAutoDJ.endTransition = function() {
     var t = this.transition;
     this.transition = null;
+    this.stopTimer("loop");
+    this.stopTimer("brake");
+    this.fxOff();
     if (!t.swapped) {
         this.rampLow(t.to, null);
     }
-    // The outgoing deck is stopped: give it back its EQ, tempo and keylock
-    // for the next track Auto DJ loads into it.
+    this.rampFilter(t.to, null, 0);
+    // The outgoing deck is stopped: give it back its EQ, filter, fader, tempo
+    // and keylock for the next track Auto DJ loads into it.
     this.restoreDeck(t.from);
     this.returnToOwnTempo(t.to);
 };
 
-// Ramp the low EQ of a deck to "target" (normalized 0..1), or back to the
-// value it had before the script changed it (target null).
-DecksmithAutoDJ.rampLow = function(group, target) {
+// --- Ramps --------------------------------------------------------------------
+
+// Ramp a deck parameter to "target", or back to the value it had before the
+// script changed it (target null). key: the state fields' name.
+DecksmithAutoDJ.ramp = function(group, key, get, set, target, ms) {
     var st = this.state[group];
-    var eq = this.eqGroup(group);
-    if (st.lowTimer) {
-        engine.stopTimer(st.lowTimer);
-        st.lowTimer = 0;
+    var saved = "saved" + key;
+    var timer = key.charAt(0).toLowerCase() + key.slice(1) + "Timer";
+    if (st[timer]) {
+        engine.stopTimer(st[timer]);
+        st[timer] = 0;
     }
     if (target === null) {
-        if (st.savedLow === undefined) {
+        if (st[saved] === undefined) {
             return;
         }
-        target = st.savedLow;
-        st.savedLow = undefined;
-    } else if (st.savedLow === undefined) {
-        st.savedLow = engine.getParameter(eq, "parameter1");
+        target = st[saved];
+        st[saved] = undefined;
+    } else if (st[saved] === undefined) {
+        st[saved] = get();
     }
-    var start = engine.getParameter(eq, "parameter1");
-    var steps = Math.max(1, Math.round(this.CONFIG.bassSwapMs / this.STEP_MS));
+    var start = get();
+    var steps = Math.max(1, Math.round(ms / this.STEP_MS));
+    if (ms <= 0) {
+        set(target);
+        return;
+    }
     var step = 0;
-    st.lowTimer = engine.beginTimer(this.STEP_MS, function() {
+    st[timer] = engine.beginTimer(this.STEP_MS, function() {
         step++;
-        engine.setParameter(eq, "parameter1", start + (target - start) * step / steps);
+        set(start + (target - start) * step / steps);
         if (step >= steps) {
-            engine.stopTimer(st.lowTimer);
-            st.lowTimer = 0;
+            engine.stopTimer(st[timer]);
+            st[timer] = 0;
         }
     });
+};
+
+// Low EQ (normalized 0..1)
+DecksmithAutoDJ.rampLow = function(group, target) {
+    var eq = this.eqGroup(group);
+    this.ramp(group, "Low",
+        function() { return engine.getParameter(eq, "parameter1"); },
+        function(v) { engine.setParameter(eq, "parameter1", v); },
+        target, this.CONFIG.bassSwapMs);
+};
+
+// Quick effect super knob (filter: 0 low-pass, 0.5 off, 1 high-pass)
+DecksmithAutoDJ.rampFilter = function(group, target, ms) {
+    var fx = this.filterGroup(group);
+    this.ramp(group, "Filter",
+        function() { return engine.getParameter(fx, "super1"); },
+        function(v) { engine.setParameter(fx, "super1", v); },
+        target, ms);
+};
+
+DecksmithAutoDJ.setFilter = function(group, value) {
+    var st = this.state[group];
+    var fx = this.filterGroup(group);
+    if (st.savedFilter === undefined) {
+        st.savedFilter = engine.getParameter(fx, "super1");
+    }
+    engine.setParameter(fx, "super1", value);
+};
+
+// Channel fader
+DecksmithAutoDJ.rampVolume = function(group, target, ms) {
+    this.ramp(group, "Volume",
+        function() { return engine.getParameter(group, "volume"); },
+        function(v) { engine.setParameter(group, "volume", v); },
+        target, ms);
 };
 
 DecksmithAutoDJ.stopRateTimer = function(group) {
@@ -267,16 +658,34 @@ DecksmithAutoDJ.returnToOwnTempo = function(group) {
     });
 };
 
-DecksmithAutoDJ.restoreDeck = function(group) {
-    this.stopRateTimer(group);
+// EQ, filter and fader back as they were, ramps stopped
+DecksmithAutoDJ.restoreMixer = function(group) {
     var st = this.state[group];
-    if (st.lowTimer) {
-        engine.stopTimer(st.lowTimer);
-        st.lowTimer = 0;
-    }
+    ["lowTimer", "filterTimer", "volumeTimer"].forEach(function(timer) {
+        if (st[timer]) {
+            engine.stopTimer(st[timer]);
+            st[timer] = 0;
+        }
+    });
     if (st.savedLow !== undefined) {
         engine.setParameter(this.eqGroup(group), "parameter1", st.savedLow);
         st.savedLow = undefined;
+    }
+    if (st.savedFilter !== undefined) {
+        engine.setParameter(this.filterGroup(group), "super1", st.savedFilter);
+        st.savedFilter = undefined;
+    }
+    if (st.savedVolume !== undefined) {
+        engine.setParameter(group, "volume", st.savedVolume);
+        st.savedVolume = undefined;
+    }
+};
+
+DecksmithAutoDJ.restoreDeck = function(group) {
+    this.stopRateTimer(group);
+    this.restoreMixer(group);
+    if (engine.getValue(group, "loop_enabled")) {
+        engine.setValue(group, "reloop_toggle", 1);
     }
     if (!this.synced(group)) {
         engine.setValue(group, "rate", 0);
@@ -289,17 +698,14 @@ DecksmithAutoDJ.restoreDeck = function(group) {
 // no further.
 DecksmithAutoDJ.reset = function() {
     this.transition = null;
+    this.plan = null;
+    Object.keys(this.timers).forEach(function(name) {
+        DecksmithAutoDJ.stopTimer(name);
+    });
+    this.fxOff();
     this.DECKS.forEach(function(group) {
-        var st = DecksmithAutoDJ.state[group];
         DecksmithAutoDJ.stopRateTimer(group);
-        if (st.lowTimer) {
-            engine.stopTimer(st.lowTimer);
-            st.lowTimer = 0;
-        }
-        if (st.savedLow !== undefined) {
-            engine.setParameter(DecksmithAutoDJ.eqGroup(group), "parameter1", st.savedLow);
-            st.savedLow = undefined;
-        }
+        DecksmithAutoDJ.restoreMixer(group);
         if (!engine.getValue(group, "play")) {
             DecksmithAutoDJ.restoreDeck(group);
         }

@@ -3,7 +3,7 @@
   <info>
     <name>DecksmithOS Auto DJ</name>
     <author>DecksmithOS</author>
-    <description>Beat-matched Auto DJ transitions with a bass swap, and the on-screen buttons of the DecksmithOS Standalone skin that need a script (navigation, X-PAD, RELEASE FX). Runs on a virtual MIDI device; has no controls.</description>
+    <description>Auto DJ transitions (blend, filter, echo, reverb, cut, loop roll, riser, brake) chosen per pair of tracks and aligned to phrases, and the on-screen buttons of the DecksmithOS Standalone skin that need a script (navigation, X-PAD, RELEASE FX). Runs on a virtual MIDI device; has no controls.</description>
   </info>
   <controller id="DecksmithOS-AutoDJ">
     <scriptfiles>

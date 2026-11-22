@@ -14,6 +14,8 @@
 //   [Skin],dsm_nav_autodj     library page, Auto DJ (the queue)
 //   [Skin],dsm_nav_search     library page, Tracks (all music), focus on
 //                             the search box
+//   AUTO DJ has a green outline while Auto DJ runs ([Skin],dsm_lit_autodj
+//   + 2).
 //   The button of the section shown is lit ([Skin],dsm_lit_<name>); tapping
 //   it again closes the library page (there is no BACK button). Sections
 //   are opened with [Library],show_<key> and followed with
@@ -98,6 +100,7 @@ DecksmithSkin.connectAll = function() {
         DecksmithSkin.updateLit();
     };
     this.watch("show_maximized_library", update);
+    this.watch("enabled", update, "[AutoDJ]");
     Object.keys(this.SECTION).forEach(function(name) {
         DecksmithSkin.watch("active_" + DecksmithSkin.SECTION[name], update, "[Library]");
     });
@@ -155,7 +158,11 @@ DecksmithSkin.litButton = function() {
 DecksmithSkin.updateLit = function() {
     var lit = this.litButton();
     ["playlist", "browse", "autodj", "search"].forEach(function(name) {
-        engine.setValue("[Skin]", "dsm_lit_" + name, name === lit ? 1 : 0);
+        var value = name === lit ? 1 : 0;
+        if (name === "autodj" && engine.getValue("[AutoDJ]", "enabled") > 0) {
+            value += 2;
+        }
+        engine.setValue("[Skin]", "dsm_lit_" + name, value);
     });
 };
 

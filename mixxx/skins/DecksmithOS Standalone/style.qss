@@ -1037,6 +1037,8 @@ font-size:25px;
   border: 1px solid #45454d; border-radius: 3px;
 }
 #TopNavBtn[value="1"] { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
+#TopNavBtn[value="2"] { color: #6fe0a0; border: 2px solid #2fbf71; }
+#TopNavBtn[value="3"] { color: #fff; background-color: #1e6fd9; border: 2px solid #2fbf71; }
 #TopNavBtn:pressed { background-color: #2d2d35; }
 #TopbarClock, #TopbarRecDuration { font-size: 18px; color: #e8e8ec; }
 #TopbarRecDuration[highlight="1"] { color: #ff3b30; }
@@ -1123,6 +1125,9 @@ font-size:25px;
 #LibLoadBtn[value="1"] { background-color: #4b93ff; color: #fff; }
 #LibRequestBtn { font-size: 18px; color: #000; background-color: #f0a020; border: 1px solid #fff; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibRequestBtn[value="1"] { background-color: #ffd27a; }
+#LibActionBtn, #LibAdjToggleBtn { font-size: 18px; color: #e8e8ec; background-color: #1d1d22; border: 1px solid #45454d; border-radius: 3px; margin: 2px 0px; padding: 0px; }
+#LibActionBtn:pressed, #LibActionBtn[value="1"] { background-color: #4b93ff; color: #fff; }
+#LibAdjToggleBtn[value="1"] { color: #000; background-color: #2fbf71; border-color: #6fe0a0; }
 #LibEjectBtn { font-size: 18px; color: #fff; background-color: #2a2a30; border: 1px solid #8a8a92; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibEjectBtn:pressed { background-color: #4b93ff; }
 #LibEjectBtn[value="1"] { background-color: #d73535; border-color: #d73535; }
@@ -1146,6 +1151,11 @@ font-size:25px;
 #ShortcutSectionTitle { font-size: 15px; color: #9a9aa0; }
 #ShortcutPanel WPushButton#DecksModeBtn, #ShortcutPanel WPushButton#RecordingToggleBtn, #ShortcutPanel WPushButton#MixxxSettingsBtn { font-size: 20px; }
 #RequestButtons WPushButton { font-size: 20px; font-weight: 600; border-radius: 3px; padding: 2px; }
+#AdjModeBtn, #AdjTypeBtn { font-size: 17px; color: #e8e8ec; background-color: #1d1d22; border: 1px solid #45454d; border-radius: 3px; }
+#AdjModeBtn { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
+#AdjTypeBtn[value="0"] { color: #6a6a72; }
+#AdjTypeBtn[value="1"] { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
+#AdjModeBtn:pressed, #AdjTypeBtn:pressed { background-color: #2d2d35; }
 #RequestLearnBtn[value="1"] { color: #000; background-color: #f0a020; border-color: #f0a020; }
 #RequestLearnedBtn { color: #9a9aa0; background-color: transparent; border: 1px solid #3a3a42; }
 #RequestLearnedBtn[value="1"] { color: #f0a020; border-color: #f0a020; }

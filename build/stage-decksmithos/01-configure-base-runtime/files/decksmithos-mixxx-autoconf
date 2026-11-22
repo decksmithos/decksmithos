@@ -28,6 +28,12 @@ Settings written to mixxx.cfg:
                          decksmithos-pending-skin; applied here because Mixxx
                          rewrites mixxx.cfg when it quits)
 
+effects.xml, effect unit 4 (only while it is empty or still ours):
+  "DecksmithOS AUTO DJ FX": Echo (1/2 beat) and Reverb, DRY+WET, for the
+                         echo and reverb transitions of the Auto DJ script
+                         (mixxx/controllers/DecksmithOS-AutoDJ.js); units 1
+                         and 2 are the skin's BEAT FX
+
 Always (the device cannot answer the dialog, and Mixxx resets the setting
 when an output device is configured in the preferences):
   [Soundcard] HideNoOutputWarning 1
@@ -49,6 +55,7 @@ import os
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 ROW_MM = 6.0                 # finger-sized library rows
 ROW_MIN, ROW_MAX = 20, 64    # Mixxx default row height is 20 px
@@ -151,6 +158,69 @@ def put(sections, section, key, value):
     sections.append([section, [(key, value)]])
 
 
+AUTODJ_FX_NAME = "DecksmithOS AUTO DJ FX"
+AUTODJ_FX_UNIT = 4
+# (effect id, [(parameter id, value)]) as Mixxx writes them; no parameter is
+# linked to the unit's meta knob, so that the script's settings are exact
+AUTODJ_FX = [
+    ("org.mixxx.effects.echo", [("delay_time", "0.5"), ("feedback_amount", "0.707946"),
+                                ("pingpong_amount", "0"), ("send_amount", "0.8"),
+                                ("quantize", "1"), ("triplet", "0")]),
+    ("org.mixxx.effects.reverb", [("decay", "0.8"), ("bandwidth", "1"),
+                                  ("damping", "0.2"), ("send_amount", "1")]),
+]
+
+
+def autodj_effects(settings):
+    """Put Echo and Reverb into effect unit 4 of effects.xml, if that unit is
+    empty (or is ours with no effect). Returns a description or None."""
+    path = os.path.join(settings, "effects.xml")
+    try:
+        tree = ET.parse(path)
+    except (OSError, ET.ParseError):
+        return None  # no effects.xml yet: Mixxx's defaults; next start
+    chains = tree.getroot().find("Rack/Chains")
+    if chains is None:
+        return None
+    units = chains.findall("EffectChain")
+    while len(units) < AUTODJ_FX_UNIT:
+        chain = ET.SubElement(chains, "EffectChain")
+        ET.SubElement(chain, "Name")
+        ET.SubElement(chain, "MixMode").text = "DRY/WET"
+        ET.SubElement(chain, "SuperParameterValue").text = "0.5"
+        ET.SubElement(chain, "Effects")
+        units.append(chain)
+    chain = units[AUTODJ_FX_UNIT - 1]
+    if any((e.findtext("Id") or "").strip() for e in chain.iter("Effect")):
+        return None  # effects chosen by the user or already ours
+    name = (chain.findtext("Name") or "").strip()
+    if name not in ("", AUTODJ_FX_NAME):
+        return None
+    for child in list(chain):
+        chain.remove(child)
+    ET.SubElement(chain, "Name").text = AUTODJ_FX_NAME
+    ET.SubElement(chain, "MixMode").text = "DRY+WET"
+    ET.SubElement(chain, "SuperParameterValue").text = "0.5"
+    effects = ET.SubElement(chain, "Effects")
+    for effect_id, parameters in AUTODJ_FX:
+        effect = ET.SubElement(effects, "Effect")
+        ET.SubElement(effect, "MetaParameterValue").text = "0"
+        ET.SubElement(effect, "Id").text = effect_id
+        ET.SubElement(effect, "BackendType").text = "Built-In"
+        params = ET.SubElement(effect, "Parameters")
+        for parameter_id, value in parameters:
+            parameter = ET.SubElement(params, "Parameter")
+            ET.SubElement(parameter, "Id").text = parameter_id
+            ET.SubElement(parameter, "Value").text = value
+            ET.SubElement(parameter, "LinkType").text = "NONE"
+            ET.SubElement(parameter, "LinkInversion").text = "0"
+            ET.SubElement(parameter, "Hidden").text = "0"
+    tmp = path + ".tmp"
+    tree.write(tmp, encoding="utf-8", xml_declaration=True)
+    os.replace(tmp, path)
+    return f"effects.xml unit {AUTODJ_FX_UNIT}: {AUTODJ_FX_NAME}"
+
+
 def main():
     info = screen()
     if len(sys.argv) > 1 and sys.argv[1] == "--info":
@@ -208,6 +278,9 @@ def main():
             changed.append(f"[Config] ResizableSkin {skin}")
     except OSError:
         pass
+    fx = autodj_effects(settings)
+    if fx:
+        changed.append(fx)
     if changed:
         write_cfg(cfg_path, sections)
     tmp = auto_path + ".tmp"

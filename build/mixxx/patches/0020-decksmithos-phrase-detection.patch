@@ -1,0 +1,1317 @@
+Description: Detect phrases and the first downbeat of tracks without rekordbox data
+ AnalyzerPhrases (after AnalyzerBeats in the analyzer pipeline) fills the
+ track structure of patch 0007 for tracks that have no rekordbox phrases, so
+ the phrase band, the bar counter and phrase-aligned Auto DJ work for every
+ track. Inspired by upstream PRs #16582 (energy novelty quantized to bars)
+ and #17404 (loudness + bass change around each beat, bar phase from the
+ beats where the changes peak); no code is taken from them unchanged.
+ .
+ While decoding: mean square of the signal and of a 150 Hz biquad low-pass
+ per 512 frames. After the beats are known: loudness and bass level (dB)
+ per beat; change score = |loudness change| + |bass change| between the 16
+ beats before and from each beat (8 at least, within the range with sound).
+ Bar phase (if there is no rekordbox downbeat): the beat offset mod 4 on
+ which the change peaks fall. First phrase from the first downbeat with
+ sound. Bars where the score peaks above 3 dB become boundaries; a broad
+ peak moves one bar onto the 8/4-bar grid (the grid offset is the bar mod 8
+ of the changes) if the score there is at least 90 % of the peak;
+ boundaries closer than 4 bars are merged (the stronger one stays);
+ sections longer than 32 bars are cut into 16-bar pieces. Labels use the
+ rekordbox "High" mood names: first Intro, last Outro, others Chorus if
+ their level (mean of loudness and bass dB) is within 3 dB of the loudest
+ middle section, Down if more than 6 dB below it, Up in between.
+ .
+ TrackStructure gets a source (rekordbox or detected), serialization
+ version 2; version 1 data is read as rekordbox data. A detected structure
+ never replaces rekordbox phrases (checked under the track lock); the
+ rekordbox import paths replace a detected structure. A rekordbox first
+ downbeat without phrases is kept. The analyzer runs on load / batch
+ analysis for tracks without a structure even if beats and waveform exist
+ (only this analyzer decodes the file then), and again when the beats are
+ detected again. [Library],DetectPhrases=0 switches it off. Results were
+ only tested with synthetic levels and synthetic audio.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0681d9eb..fe4dbf27 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -730,6 +730,8 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/analyzer/analyzerkey.cpp
+   src/analyzer/analyzerscheduledtrack.cpp
+   src/analyzer/analyzersilence.cpp
++  src/analyzer/analyzerphrases.cpp
++  src/analyzer/phrasedetector.cpp
+   src/analyzer/analyzerthread.cpp
+   src/analyzer/analyzertrack.cpp
+   src/analyzer/analyzerwaveform.cpp
+@@ -2132,6 +2134,7 @@ if(BUILD_TESTING)
+   set(
+     src-mixxx-test
+     src/test/analyserwaveformtest.cpp
++    src/test/analyzerphrases_test.cpp
+     src/test/analyzersilence_test.cpp
+     src/test/audiotaperpot_test.cpp
+     src/test/autodjprocessor_test.cpp
+diff --git a/src/analyzer/analyzerbeats.h b/src/analyzer/analyzerbeats.h
+index f8f8fe3f..8f5e2f1e 100644
+--- a/src/analyzer/analyzerbeats.h
++++ b/src/analyzer/analyzerbeats.h
+@@ -26,6 +26,12 @@ class AnalyzerBeats : public Analyzer {
+     void storeResults(TrackPointer tio) override;
+     void cleanup() override;
+ 
++    /// DecksmithOS: true between initialize() and cleanup() if the beats
++    /// of the current track are being detected
++    bool isAnalyzing() const {
++        return m_pPlugin != nullptr;
++    }
++
+   private:
+     bool shouldAnalyze(TrackPointer pTrack) const;
+     static QHash<QString, QString> getExtraVersionInfo(
+diff --git a/src/analyzer/analyzerphrases.cpp b/src/analyzer/analyzerphrases.cpp
+new file mode 100644
+index 00000000..455ddfa6
+--- /dev/null
++++ b/src/analyzer/analyzerphrases.cpp
+@@ -0,0 +1,212 @@
++#include "analyzer/analyzerphrases.h"
++
++#include <algorithm>
++#include <cmath>
++#include <numbers>
++
++#include "analyzer/analyzerbeats.h"
++#include "analyzer/analyzertrack.h"
++#include "analyzer/constants.h"
++#include "analyzer/phrasedetector.h"
++#include "track/track.h"
++#include "util/logger.h"
++
++namespace {
++
++const mixxx::Logger kLogger("AnalyzerPhrases");
++
++const ConfigKey kDetectPhrasesKey(
++        QStringLiteral("[Library]"), QStringLiteral("DetectPhrases"));
++
++constexpr int kBlock = 512; // frames per mean square value
++constexpr double kBassHz = 150;
++
++double toDb(double meanSquare) {
++    return 10 * std::log10(meanSquare + 1e-10);
++}
++
++} // namespace
++
++AnalyzerPhrases::AnalyzerPhrases(UserSettingsPointer pConfig,
++        const AnalyzerBeats* pAnalyzerBeats,
++        const QSqlDatabase& database)
++        : m_pConfig(pConfig),
++          m_pAnalyzerBeats(pAnalyzerBeats),
++          m_hasDatabase(database.isValid()),
++          m_analysisDao(pConfig),
++          m_b0(0),
++          m_b1(0),
++          m_b2(0),
++          m_a1(0),
++          m_a2(0),
++          m_x1(0),
++          m_x2(0),
++          m_y1(0),
++          m_y2(0),
++          m_sum(0),
++          m_bassSum(0),
++          m_blockFrames(0) {
++    if (m_hasDatabase) {
++        m_analysisDao.initialize(database);
++    }
++}
++
++// static
++bool AnalyzerPhrases::isEnabled(const UserSettingsPointer& pConfig) {
++    return pConfig->getValue(kDetectPhrasesKey, true);
++}
++
++bool AnalyzerPhrases::initialize(const AnalyzerTrack& track,
++        mixxx::audio::SampleRate sampleRate,
++        SINT frameLength) {
++    if (frameLength <= 0 || !sampleRate.isValid() || !isEnabled(m_pConfig)) {
++        return false;
++    }
++    const TrackPointer& pTrack = track.getTrack();
++    const bool beatsAnalyzing = m_pAnalyzerBeats && m_pAnalyzerBeats->isAnalyzing();
++    if (!pTrack->getBeats() && !beatsAnalyzing) {
++        return false; // no beat grid to work with
++    }
++    const mixxx::TrackStructurePointer pStructure = pTrack->getStructure();
++    if (!Track::isStructureReplaceableByDetection(pStructure)) {
++        return false; // rekordbox phrases
++    }
++    if (pStructure && pStructure->isDetected() && !beatsAnalyzing) {
++        return false; // already detected for this beat grid
++    }
++
++    // RBJ biquad low-pass, Q = 1/sqrt(2)
++    const double w0 = 2 * std::numbers::pi * kBassHz / sampleRate.value();
++    const double alpha = std::sin(w0) / std::numbers::sqrt2; // sin(w0) / (2 Q)
++    const double cosw0 = std::cos(w0);
++    const double a0 = 1 + alpha;
++    m_b0 = (1 - cosw0) / 2 / a0;
++    m_b1 = (1 - cosw0) / a0;
++    m_b2 = m_b0;
++    m_a1 = -2 * cosw0 / a0;
++    m_a2 = (1 - alpha) / a0;
++    m_x1 = m_x2 = m_y1 = m_y2 = 0;
++    m_sum = m_bassSum = 0;
++    m_blockFrames = 0;
++    m_power.clear();
++    m_bassPower.clear();
++    m_power.reserve(frameLength / kBlock + 1);
++    m_bassPower.reserve(frameLength / kBlock + 1);
++    return true;
++}
++
++bool AnalyzerPhrases::processSamples(const CSAMPLE* pIn, SINT count) {
++    // Mixxx 2.5: the analyzers always get stereo samples
++    const SINT frames = count / mixxx::kAnalysisChannels;
++    for (SINT f = 0; f < frames; ++f) {
++        const double x = 0.5 *
++                (static_cast<double>(pIn[2 * f]) + static_cast<double>(pIn[2 * f + 1]));
++        const double y = m_b0 * x + m_b1 * m_x1 + m_b2 * m_x2 - m_a1 * m_y1 - m_a2 * m_y2;
++        m_x2 = m_x1;
++        m_x1 = x;
++        m_y2 = m_y1;
++        m_y1 = y;
++        m_sum += x * x;
++        m_bassSum += y * y;
++        if (++m_blockFrames == kBlock) {
++            m_power.push_back(static_cast<float>(m_sum / kBlock));
++            m_bassPower.push_back(static_cast<float>(m_bassSum / kBlock));
++            m_sum = m_bassSum = 0;
++            m_blockFrames = 0;
++        }
++    }
++    // Denormals after long silence
++    if (std::abs(m_y1) < 1e-20 && std::abs(m_y2) < 1e-20) {
++        m_y1 = m_y2 = 0;
++    }
++    return true;
++}
++
++void AnalyzerPhrases::storeResults(TrackPointer pTrack) {
++    const mixxx::BeatsPointer pBeats = pTrack->getBeats();
++    const mixxx::TrackStructurePointer pOldStructure = pTrack->getStructure();
++    if (!pBeats || m_power.empty() ||
++            !Track::isStructureReplaceableByDetection(pOldStructure)) {
++        return;
++    }
++
++    // Level of each beat
++    const auto blocks = static_cast<int>(m_power.size());
++    std::vector<double> loudDb;
++    std::vector<double> bassDb;
++    std::vector<mixxx::audio::FramePos> positions;
++    const auto firstBeat = pBeats->iteratorFrom(mixxx::audio::kStartFramePos);
++    if (firstBeat == pBeats->cend()) {
++        return;
++    }
++    positions.push_back(*firstBeat);
++    for (auto it = firstBeat; static_cast<int>(loudDb.size()) < blocks; ++it) {
++        const auto next = std::next(it);
++        if (next == pBeats->cend() || !next->isValid()) {
++            break;
++        }
++        const int from = std::max(0, static_cast<int>(it->value() / kBlock));
++        const int to = std::max(from + 1, static_cast<int>(next->value() / kBlock));
++        if (to > blocks) {
++            break;
++        }
++        double power = 0;
++        double bass = 0;
++        for (int b = from; b < to; ++b) {
++            power += m_power[b];
++            bass += m_bassPower[b];
++        }
++        loudDb.push_back(toDb(power / (to - from)));
++        bassDb.push_back(toDb(bass / (to - from)));
++        positions.push_back(*next);
++    }
++
++    // Keep a rekordbox downbeat
++    mixxx::audio::FramePos keptDownbeat;
++    int knownPhase = -1;
++    if (pOldStructure && !pOldStructure->isDetected() &&
++            pOldStructure->firstDownbeat().isValid()) {
++        keptDownbeat = pOldStructure->firstDownbeat();
++        const auto closest = pBeats->findClosestBeat(keptDownbeat);
++        if (closest.isValid()) {
++            const int index = pBeats->iteratorFrom(closest) - firstBeat;
++            knownPhase = (index % mixxx::phrasedetect::kBeatsPerBar +
++                                 mixxx::phrasedetect::kBeatsPerBar) %
++                    mixxx::phrasedetect::kBeatsPerBar;
++        }
++    }
++
++    const auto result = mixxx::phrasedetect::detect(loudDb, bassDb, knownPhase);
++    QVector<mixxx::TrackStructure::Phrase> phrases;
++    for (const auto& phrase : result.phrases) {
++        phrases.append(mixxx::TrackStructure::Phrase{
++                positions[phrase.startBeat], positions[phrase.endBeat], phrase.kind, 0});
++    }
++    mixxx::audio::FramePos firstDownbeat = keptDownbeat;
++    if (!firstDownbeat.isValid() && result.firstDownbeat >= 0) {
++        firstDownbeat = positions[result.firstDownbeat];
++    }
++    if (phrases.isEmpty() && (keptDownbeat.isValid() || !firstDownbeat.isValid())) {
++        kLogger.debug() << "Nothing detected for" << pTrack->getLocation();
++        return;
++    }
++    const auto pStructure = std::make_shared<const mixxx::TrackStructure>(
++            mixxx::TrackStructure::Mood::High,
++            std::move(phrases),
++            firstDownbeat,
++            mixxx::phrasedetect::kBeatsPerBar,
++            mixxx::TrackStructure::Source::Detected);
++    if (!pTrack->trySetDetectedStructure(pStructure)) {
++        return; // rekordbox data arrived meanwhile
++    }
++    kLogger.info() << "Detected" << pStructure->phrases().size()
++                   << "phrases in" << pTrack->getLocation();
++    if (m_hasDatabase && pTrack->getId().isValid()) {
++        m_analysisDao.saveTrackStructure(pTrack->getId(), pStructure);
++    }
++}
++
++void AnalyzerPhrases::cleanup() {
++    m_power = {};
++    m_bassPower = {};
++}
+diff --git a/src/analyzer/analyzerphrases.h b/src/analyzer/analyzerphrases.h
+new file mode 100644
+index 00000000..11946a28
+--- /dev/null
++++ b/src/analyzer/analyzerphrases.h
+@@ -0,0 +1,58 @@
++#pragma once
++
++#include <QSqlDatabase>
++#include <vector>
++
++#include "analyzer/analyzer.h"
++#include "library/dao/analysisdao.h"
++#include "preferences/usersettings.h"
++
++class AnalyzerBeats;
++
++/// DecksmithOS: detects phrases and the first downbeat of tracks without
++/// rekordbox phrase data (see analyzer/phrasedetector.h) and stores them as
++/// the track structure (source Detected).
++///
++/// While decoding it keeps two mean squares per block of 512 frames: the
++/// signal and a 150 Hz low-pass (one biquad). The beat grid is only needed
++/// in storeResults(), so this works in the same pass that detects the beats
++/// (AnalyzerBeats stores its results first).
++///
++/// Runs when the track has no structure, rekordbox data without phrases
++/// (first downbeat only; it is kept), or a detected structure while the
++/// beats are being detected again. Never replaces rekordbox phrases.
++/// [Library],DetectPhrases (default 1) switches it off.
++class AnalyzerPhrases : public Analyzer {
++  public:
++    /// pAnalyzerBeats: the beat analyzer of the same pass, or nullptr.
++    /// database: where the structure is saved; if invalid the structure is
++    /// only set on the track.
++    AnalyzerPhrases(UserSettingsPointer pConfig,
++            const AnalyzerBeats* pAnalyzerBeats,
++            const QSqlDatabase& database = QSqlDatabase());
++    ~AnalyzerPhrases() override = default;
++
++    static bool isEnabled(const UserSettingsPointer& pConfig);
++
++    bool initialize(const AnalyzerTrack& track,
++            mixxx::audio::SampleRate sampleRate,
++            SINT frameLength) override;
++    bool processSamples(const CSAMPLE* pIn, SINT count) override;
++    void storeResults(TrackPointer pTrack) override;
++    void cleanup() override;
++
++  private:
++    const UserSettingsPointer m_pConfig;
++    const AnalyzerBeats* const m_pAnalyzerBeats;
++    const bool m_hasDatabase;
++    AnalysisDao m_analysisDao;
++
++    // biquad low-pass, direct form I
++    double m_b0, m_b1, m_b2, m_a1, m_a2;
++    double m_x1, m_x2, m_y1, m_y2;
++    double m_sum;
++    double m_bassSum;
++    int m_blockFrames;
++    std::vector<float> m_power;
++    std::vector<float> m_bassPower;
++};
+diff --git a/src/analyzer/analyzerthread.cpp b/src/analyzer/analyzerthread.cpp
+index 3ed5d7c3..2203cc5f 100644
+--- a/src/analyzer/analyzerthread.cpp
++++ b/src/analyzer/analyzerthread.cpp
+@@ -7,6 +7,7 @@
+ #include "analyzer/analyzerebur128.h"
+ #include "analyzer/analyzergain.h"
+ #include "analyzer/analyzerkey.h"
++#include "analyzer/analyzerphrases.h"
+ #include "analyzer/analyzersilence.h"
+ #include "analyzer/analyzerwaveform.h"
+ #include "analyzer/constants.h"
+@@ -96,14 +97,23 @@ void AnalyzerThread::doRun() {
+     // before returning from this function.
+     mixxx::DbConnectionPooler dbConnectionPooler;
+ 
+-    if (m_modeFlags & AnalyzerModeFlags::WithWaveform) {
++    // DecksmithOS: phrase detection saves the track structure
++    const bool detectPhrases = AnalyzerPhrases::isEnabled(m_pConfig);
++    if ((m_modeFlags & AnalyzerModeFlags::WithWaveform) || detectPhrases) {
+         dbConnectionPooler = mixxx::DbConnectionPooler(m_dbConnectionPool); // move assignment
+         if (!dbConnectionPooler.isPooling()) {
+             kLogger.warning()
+                     << "Failed to obtain database connection for analyzer thread";
+-            return;
++            if (m_modeFlags & AnalyzerModeFlags::WithWaveform) {
++                return;
++            }
+         }
+-        QSqlDatabase dbConnection = mixxx::DbConnectionPooled(m_dbConnectionPool);
++    }
++    QSqlDatabase dbConnection;
++    if (dbConnectionPooler.isPooling()) {
++        dbConnection = mixxx::DbConnectionPooled(m_dbConnectionPool);
++    }
++    if (m_modeFlags & AnalyzerModeFlags::WithWaveform) {
+         m_analyzers.push_back(AnalyzerWithState(std::make_unique<AnalyzerWaveform>(m_pConfig, dbConnection)));
+     }
+     if (AnalyzerGain::isEnabled(ReplayGainSettings(m_pConfig))) {
+@@ -115,7 +125,14 @@ void AnalyzerThread::doRun() {
+     // BPM detection might be disabled in the config, but can be overridden
+     // and enabled by explicitly setting the mode flag.
+     const bool enforceBpmDetection = (m_modeFlags & AnalyzerModeFlags::WithBeats) != 0;
+-    m_analyzers.push_back(AnalyzerWithState(std::make_unique<AnalyzerBeats>(m_pConfig, enforceBpmDetection)));
++    auto pAnalyzerBeats = std::make_unique<AnalyzerBeats>(m_pConfig, enforceBpmDetection);
++    const AnalyzerBeats* pPlainAnalyzerBeats = pAnalyzerBeats.get();
++    m_analyzers.push_back(AnalyzerWithState(std::move(pAnalyzerBeats)));
++    if (detectPhrases) {
++        // After AnalyzerBeats: it needs the beats stored by AnalyzerBeats
++        m_analyzers.push_back(AnalyzerWithState(std::make_unique<AnalyzerPhrases>(
++                m_pConfig, pPlainAnalyzerBeats, dbConnection)));
++    }
+     m_analyzers.push_back(AnalyzerWithState(std::make_unique<AnalyzerKey>(m_pConfig)));
+     m_analyzers.push_back(AnalyzerWithState(std::make_unique<AnalyzerSilence>(m_pConfig)));
+     DEBUG_ASSERT(!m_analyzers.empty());
+diff --git a/src/analyzer/phrasedetector.cpp b/src/analyzer/phrasedetector.cpp
+new file mode 100644
+index 00000000..d6c9b68b
+--- /dev/null
++++ b/src/analyzer/phrasedetector.cpp
+@@ -0,0 +1,241 @@
++#include "analyzer/phrasedetector.h"
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++
++namespace mixxx::phrasedetect {
++
++namespace {
++
++using Kind = TrackStructure::PhraseKind;
++
++/// 2 on the 8-bar grid, 1 on the 4-bar grid, 0 otherwise
++int gridRank(int bar, int gridOffset) {
++    const int pos = ((bar - gridOffset) % 8 + 8) % 8;
++    return pos == 0 ? 2 : (pos % 4 == 0 ? 1 : 0);
++}
++
++struct Section {
++    int startBar;
++    int endBar;
++    Kind kind;
++};
++
++} // namespace
++
++std::vector<double> changeScore(const std::vector<double>& loudDb,
++        const std::vector<double>& bassDb,
++        int firstSound,
++        int lastSound) {
++    const int n = static_cast<int>(loudDb.size());
++    std::vector<double> score(n, 0.0);
++    if (n == 0 || static_cast<int>(bassDb.size()) != n || firstSound < 0 ||
++            lastSound >= n || firstSound > lastSound) {
++        return score;
++    }
++    // prefix sums
++    std::vector<double> loudSum(n + 1, 0.0);
++    std::vector<double> bassSum(n + 1, 0.0);
++    for (int i = 0; i < n; ++i) {
++        loudSum[i + 1] = loudSum[i] + loudDb[i];
++        bassSum[i + 1] = bassSum[i] + bassDb[i];
++    }
++    const auto mean = [](const std::vector<double>& sum, int from, int to) {
++        return (sum[to] - sum[from]) / (to - from);
++    };
++    for (int i = firstSound + kMinWindowBeats; i + kMinWindowBeats <= lastSound + 1; ++i) {
++        const int w = std::min({kWindowBeats, i - firstSound, lastSound + 1 - i});
++        const double dLoud = mean(loudSum, i, i + w) - mean(loudSum, i - w, i);
++        const double dBass = mean(bassSum, i, i + w) - mean(bassSum, i - w, i);
++        score[i] = std::abs(dLoud) + std::abs(dBass);
++    }
++    return score;
++}
++
++int barPhase(const std::vector<double>& score, int firstSound) {
++    const int n = static_cast<int>(score.size());
++    std::array<double, kBeatsPerBar> votes{};
++    bool anyPeak = false;
++    for (int i = 0; i < n; ++i) {
++        if (score[i] < kMinChangeDb) {
++            continue;
++        }
++        bool isPeak = true;
++        for (int j = std::max(0, i - 2); j <= std::min(n - 1, i + 2); ++j) {
++            if (score[j] > score[i]) {
++                isPeak = false;
++                break;
++            }
++        }
++        if (isPeak) {
++            votes[i % kBeatsPerBar] += score[i];
++            anyPeak = true;
++        }
++    }
++    if (!anyPeak) {
++        return std::max(0, firstSound) % kBeatsPerBar;
++    }
++    return static_cast<int>(std::max_element(votes.begin(), votes.end()) - votes.begin());
++}
++
++Result detect(const std::vector<double>& loudDb,
++        const std::vector<double>& bassDb,
++        int knownDownbeat) {
++    Result result;
++    const int n = static_cast<int>(loudDb.size());
++    if (n == 0 || static_cast<int>(bassDb.size()) != n) {
++        return result;
++    }
++
++    // Range with sound
++    std::vector<double> sorted = loudDb;
++    const auto p90 = sorted.begin() + static_cast<int>(0.9 * (n - 1));
++    std::nth_element(sorted.begin(), p90, sorted.end());
++    const double soundDb = std::max(kSilenceDb, *p90 - kSoundRangeDb);
++    int firstSound = -1;
++    int lastSound = -1;
++    for (int i = 0; i < n; ++i) {
++        if (loudDb[i] >= soundDb) {
++            if (firstSound < 0) {
++                firstSound = i;
++            }
++            lastSound = i;
++        }
++    }
++    if (firstSound < 0) {
++        return result;
++    }
++
++    const std::vector<double> score = changeScore(loudDb, bassDb, firstSound, lastSound);
++    const int phase = knownDownbeat >= 0
++            ? knownDownbeat % kBeatsPerBar
++            : barPhase(score, firstSound);
++    const int start = firstSound +
++            ((phase - firstSound % kBeatsPerBar) + kBeatsPerBar) % kBeatsPerBar;
++    if (start >= n) {
++        return result;
++    }
++    result.firstDownbeat = start;
++    if (lastSound < start) {
++        return result;
++    }
++    const int numBars = (lastSound + 1 - start + kBeatsPerBar - 1) / kBeatsPerBar;
++    if (numBars < kMinBars) {
++        return result;
++    }
++
++    // Change at each bar start, allowing the peak to be one beat off
++    std::vector<double> barScore(numBars, 0.0);
++    for (int b = 1; b < numBars; ++b) {
++        const int d = start + b * kBeatsPerBar;
++        for (int j = std::max(0, d - 1); j <= std::min(n - 1, d + 1); ++j) {
++            barScore[b] = std::max(barScore[b], score[j]);
++        }
++    }
++    std::vector<int> peaks;
++    for (int b = 1; b < numBars; ++b) {
++        if (barScore[b] >= kMinChangeDb && barScore[b] >= barScore[b - 1] &&
++                (b + 1 == numBars || barScore[b] >= barScore[b + 1])) {
++            peaks.push_back(b);
++        }
++    }
++
++    // Phrase grid: the bar offset mod 8 on which the changes fall
++    std::array<double, 8> gridVotes{};
++    for (const int b : peaks) {
++        gridVotes[b % 8] += barScore[b];
++    }
++    const int gridOffset = static_cast<int>(
++            std::max_element(gridVotes.begin(), gridVotes.end()) - gridVotes.begin());
++
++    // Move broad peaks onto the grid
++    struct Candidate {
++        int bar;
++        double strength;
++    };
++    std::vector<Candidate> candidates;
++    for (const int b : peaks) {
++        int bar = b;
++        int bestRank = gridRank(b, gridOffset);
++        for (const int g : {b - 1, b + 1}) {
++            if (g < 1 || g >= numBars) {
++                continue;
++            }
++            const int rank = gridRank(g, gridOffset);
++            if (rank > bestRank && barScore[g] >= kSnapRatio * barScore[b]) {
++                bar = g;
++                bestRank = rank;
++            }
++        }
++        candidates.push_back({bar, barScore[b]});
++    }
++
++    // Strongest first; boundaries closer than kMinPhraseBars are merged
++    std::stable_sort(candidates.begin(),
++            candidates.end(),
++            [](const Candidate& a, const Candidate& b) {
++                return a.strength > b.strength;
++            });
++    std::vector<int> boundaries{0, numBars};
++    for (const auto& candidate : candidates) {
++        const bool farEnough = std::all_of(boundaries.begin(),
++                boundaries.end(),
++                [&](int bar) {
++                    return std::abs(bar - candidate.bar) >= kMinPhraseBars;
++                });
++        if (farEnough) {
++            boundaries.push_back(candidate.bar);
++        }
++    }
++    std::sort(boundaries.begin(), boundaries.end());
++
++    const auto beatOfBar = [&](int bar) {
++        return std::min(n, start + bar * kBeatsPerBar);
++    };
++
++    // Labels
++    std::vector<Section> sections;
++    std::vector<double> levels;
++    for (size_t k = 0; k + 1 < boundaries.size(); ++k) {
++        sections.push_back({boundaries[k], boundaries[k + 1], Kind::Other});
++        const int from = beatOfBar(boundaries[k]);
++        const int to = beatOfBar(boundaries[k + 1]);
++        double sum = 0;
++        for (int i = from; i < to; ++i) {
++            sum += 0.5 * (loudDb[i] + bassDb[i]);
++        }
++        levels.push_back(to > from ? sum / (to - from) : kSilenceDb);
++    }
++    const size_t count = sections.size();
++    const size_t firstMiddle = count >= 3 ? 1 : 0;
++    const size_t endMiddle = count >= 3 ? count - 1 : count;
++    const double maxLevel = *std::max_element(
++            levels.begin() + firstMiddle, levels.begin() + endMiddle);
++    for (size_t k = 0; k < count; ++k) {
++        if (count >= 2 && k == 0) {
++            sections[k].kind = Kind::Intro;
++        } else if (count >= 2 && k == count - 1) {
++            sections[k].kind = Kind::Outro;
++        } else if (levels[k] >= maxLevel - kChorusRangeDb) {
++            sections[k].kind = Kind::Chorus;
++        } else if (levels[k] < maxLevel - kDownRangeDb) {
++            sections[k].kind = Kind::Down;
++        } else {
++            sections[k].kind = Kind::Up;
++        }
++    }
++
++    // Long sections: kSplitBars pieces until the rest fits kMaxPhraseBars
++    for (const auto& section : sections) {
++        int bar = section.startBar;
++        while (section.endBar - bar > kMaxPhraseBars) {
++            result.phrases.push_back({beatOfBar(bar), beatOfBar(bar + kSplitBars), section.kind});
++            bar += kSplitBars;
++        }
++        result.phrases.push_back({beatOfBar(bar), beatOfBar(section.endBar), section.kind});
++    }
++    return result;
++}
++
++} // namespace mixxx::phrasedetect
+diff --git a/src/analyzer/phrasedetector.h b/src/analyzer/phrasedetector.h
+new file mode 100644
+index 00000000..0b73c50c
+--- /dev/null
++++ b/src/analyzer/phrasedetector.h
+@@ -0,0 +1,79 @@
++#pragma once
++
++#include <vector>
++
++#include "track/trackstructure.h"
++
++namespace mixxx::phrasedetect {
++
++/// DecksmithOS: phrase detection from per-beat levels, for tracks without
++/// rekordbox phrase data. Kept free of audio and track code so that it can
++/// be tested with synthetic levels.
++///
++/// Ideas from upstream Mixxx PRs #16582 (energy novelty quantized to bars)
++/// and #17404 (loudness + bass change around each beat, bar phase from the
++/// beats where the changes peak).
++
++constexpr int kBeatsPerBar = 4;
++/// Beats compared before and after a beat
++constexpr int kWindowBeats = 16;
++/// Shortest window near the start and end of the sound
++constexpr int kMinWindowBeats = 8;
++/// |loudness change| + |bass change| that makes a phrase boundary (dB)
++constexpr double kMinChangeDb = 3.0;
++/// Shortest phrase; closer boundaries are merged (the stronger one stays)
++constexpr int kMinPhraseBars = 4;
++/// Tracks with less sound than this get a first downbeat, but no phrases
++constexpr int kMinBars = 8;
++/// Sections longer than this are cut into kSplitBars pieces
++constexpr int kMaxPhraseBars = 32;
++constexpr int kSplitBars = 16;
++/// A boundary moves by one bar onto the 4/8-bar grid if the change there is
++/// at least this fraction of the peak (only broad changes move: a sharp
++/// step scores 13/16 of its peak one bar away)
++constexpr double kSnapRatio = 0.9;
++/// Sound starts where the loudness is within this of the loud part (the
++/// 90th percentile of the beat loudness), but above kSilenceDb
++constexpr double kSoundRangeDb = 30.0;
++constexpr double kSilenceDb = -60.0;
++/// Phrase labels (level = mean of loudness and bass level, in dB):
++/// within kChorusRangeDb of the loudest section: Chorus,
++/// more than kDownRangeDb below it: Down, in between: Up.
++constexpr double kChorusRangeDb = 3.0;
++constexpr double kDownRangeDb = 6.0;
++
++struct Phrase {
++    /// Beat indices; endBeat is the first beat after the phrase
++    int startBeat;
++    int endBeat;
++    TrackStructure::PhraseKind kind;
++};
++
++struct Result {
++    /// Beat index of the first downbeat (the first downbeat with sound),
++    /// or -1 if the track has no sound
++    int firstDownbeat = -1;
++    std::vector<Phrase> phrases;
++};
++
++/// Change score per beat: |loudness change| + |bass change| between the
++/// beats before and the beats from the beat on (up to kWindowBeats each,
++/// limited to the range with sound [firstSound, lastSound]).
++std::vector<double> changeScore(const std::vector<double>& loudDb,
++        const std::vector<double>& bassDb,
++        int firstSound,
++        int lastSound);
++
++/// Bar phase (beat index mod kBeatsPerBar of the downbeats): the phase on
++/// which the change peaks fall, weighted by their score. Returns
++/// firstSound % kBeatsPerBar if there is no change peak.
++int barPhase(const std::vector<double>& score, int firstSound);
++
++/// loudDb and bassDb: level of each beat (mean square in dB), same size.
++/// knownDownbeat: beat index of a known downbeat (e.g. from rekordbox), or
++/// -1 to detect the bar phase.
++Result detect(const std::vector<double>& loudDb,
++        const std::vector<double>& bassDb,
++        int knownDownbeat);
++
++} // namespace mixxx::phrasedetect
+diff --git a/src/test/analyzerphrases_test.cpp b/src/test/analyzerphrases_test.cpp
+new file mode 100644
+index 00000000..41312212
+--- /dev/null
++++ b/src/test/analyzerphrases_test.cpp
+@@ -0,0 +1,328 @@
++#include "analyzer/analyzerphrases.h"
++
++#include <gtest/gtest.h>
++
++#include <cmath>
++#include <numbers>
++#include <vector>
++
++#include "analyzer/analyzertrack.h"
++#include "analyzer/constants.h"
++#include "analyzer/phrasedetector.h"
++#include "test/mixxxtest.h"
++#include "track/beats.h"
++#include "track/track.h"
++
++// DecksmithOS phrase detection. These tests use synthetic levels and
++// synthetic audio only; they say nothing about the results on real music.
++
++namespace {
++
++using mixxx::TrackStructure;
++using mixxx::audio::FramePos;
++using Kind = TrackStructure::PhraseKind;
++namespace pd = mixxx::phrasedetect;
++
++struct Section {
++    int beats;
++    double loudDb;
++    double bassDb;
++};
++
++/// Per-beat levels with a little deterministic noise
++void makeLevels(const std::vector<Section>& sections,
++        std::vector<double>* pLoud,
++        std::vector<double>* pBass) {
++    unsigned seed = 1;
++    for (const auto& section : sections) {
++        for (int i = 0; i < section.beats; ++i) {
++            seed = seed * 1103515245 + 12345;
++            const double noise = (static_cast<int>((seed >> 16) % 1000) / 1000.0 - 0.5) * 0.6;
++            pLoud->push_back(section.loudDb + noise);
++            pBass->push_back(section.bassDb - noise);
++        }
++    }
++}
++
++std::vector<int> startBars(const pd::Result& result) {
++    std::vector<int> bars;
++    for (const auto& phrase : result.phrases) {
++        EXPECT_EQ(0, (phrase.startBeat - result.firstDownbeat) % 4);
++        bars.push_back((phrase.startBeat - result.firstDownbeat) / 4);
++    }
++    return bars;
++}
++
++// A pickup of 2 beats before the first downbeat (beat 3): the bar phase
++// comes from the section changes, not from where the sound starts.
++const std::vector<Section> kTrack{
++        {1, -100, -100}, // silence
++        {2, -25, -35},   // pickup
++        {64, -20, -30},  // intro, 16 bars
++        {64, -12, -14},  // chorus, 16 bars
++        {32, -18, -40},  // breakdown, 8 bars
++        {64, -12, -14},  // chorus, 16 bars
++        {64, -20, -30},  // outro, 16 bars
++        {10, -100, -100},
++};
++
++TEST(PhraseDetectorTest, BoundariesAndBarPhase) {
++    std::vector<double> loud;
++    std::vector<double> bass;
++    makeLevels(kTrack, &loud, &bass);
++    const auto result = pd::detect(loud, bass, -1);
++    EXPECT_EQ(3, result.firstDownbeat);
++    EXPECT_EQ((std::vector<int>{0, 16, 32, 40, 56}), startBars(result));
++    ASSERT_EQ(5u, result.phrases.size());
++    EXPECT_EQ(Kind::Intro, result.phrases[0].kind);
++    EXPECT_EQ(Kind::Chorus, result.phrases[1].kind);
++    EXPECT_EQ(Kind::Down, result.phrases[2].kind);
++    EXPECT_EQ(Kind::Chorus, result.phrases[3].kind);
++    EXPECT_EQ(Kind::Outro, result.phrases[4].kind);
++    // ends where the sound ends
++    EXPECT_EQ(3 + 72 * 4, result.phrases.back().endBeat);
++    for (size_t i = 1; i < result.phrases.size(); ++i) {
++        EXPECT_EQ(result.phrases[i - 1].endBeat, result.phrases[i].startBeat);
++    }
++}
++
++TEST(PhraseDetectorTest, KnownDownbeatPhaseIsUsed) {
++    std::vector<double> loud;
++    std::vector<double> bass;
++    makeLevels(kTrack, &loud, &bass);
++    // phase 1: the first beat with sound
++    const auto result = pd::detect(loud, bass, 5);
++    EXPECT_EQ(1, result.firstDownbeat);
++    EXPECT_FALSE(result.phrases.empty());
++}
++
++TEST(PhraseDetectorTest, CloseBoundariesAreMerged) {
++    std::vector<double> loud;
++    std::vector<double> bass;
++    // a 2-bar fill between intro and chorus
++    makeLevels({{64, -20, -30}, {8, -17, -30}, {64, -12, -14}, {64, -20, -30}},
++            &loud,
++            &bass);
++    const auto result = pd::detect(loud, bass, -1);
++    const auto bars = startBars(result);
++    ASSERT_EQ(3u, bars.size());
++    EXPECT_GE(bars[1], 16);
++    EXPECT_LE(bars[1], 18);
++    for (size_t i = 1; i < bars.size(); ++i) {
++        EXPECT_GE(bars[i] - bars[i - 1], pd::kMinPhraseBars);
++    }
++}
++
++TEST(PhraseDetectorTest, LongSectionsAreSplit) {
++    std::vector<double> loud;
++    std::vector<double> bass;
++    makeLevels({{32, -20, -30}, {256, -12, -14}, {32, -20, -30}}, &loud, &bass);
++    const auto result = pd::detect(loud, bass, -1);
++    EXPECT_EQ((std::vector<int>{0, 8, 24, 40, 72}), startBars(result));
++    for (const auto& phrase : result.phrases) {
++        EXPECT_LE(phrase.endBeat - phrase.startBeat, pd::kMaxPhraseBars * 4);
++    }
++}
++
++TEST(PhraseDetectorTest, SharpChangeStaysBroadChangeSnapsToGrid) {
++    for (const int rampBeats : {4, 16}) {
++        std::vector<double> loud;
++        std::vector<double> bass;
++        makeLevels({{64, -20, -30}, {64, -12, -14}, {64, -20, -30}}, &loud, &bass);
++        // bass comes in around bar 57 (beat 228), over rampBeats beats
++        while (static_cast<int>(loud.size()) < 228 - rampBeats / 2) {
++            loud.push_back(-12);
++            bass.push_back(-30);
++        }
++        for (int i = 0; i < rampBeats; ++i) {
++            loud.push_back(-12);
++            bass.push_back(-30 + 16 * (i + 0.5) / rampBeats);
++        }
++        for (int i = 0; i < 64; ++i) {
++            loud.push_back(-12);
++            bass.push_back(-14);
++        }
++        const auto bars = startBars(pd::detect(loud, bass, -1));
++        ASSERT_GE(bars.size(), 5u) << rampBeats;
++        EXPECT_EQ(rampBeats == 4 ? 57 : 56, bars[4]) << rampBeats;
++    }
++}
++
++TEST(PhraseDetectorTest, SilenceAndShortTracks) {
++    std::vector<double> loud(100, -100);
++    std::vector<double> bass(100, -100);
++    auto result = pd::detect(loud, bass, -1);
++    EXPECT_EQ(-1, result.firstDownbeat);
++    EXPECT_TRUE(result.phrases.empty());
++
++    loud.assign(20, -12);
++    bass.assign(20, -14);
++    result = pd::detect(loud, bass, -1);
++    EXPECT_EQ(0, result.firstDownbeat);
++    EXPECT_TRUE(result.phrases.empty());
++
++    EXPECT_TRUE(pd::detect({}, {}, -1).phrases.empty());
++}
++
++// Synthetic audio through the analyzer: 120 BPM, 8 bars noise, 16 bars
++// noise + 60 Hz sine, 8 bars noise.
++constexpr int kSampleRate = 44100;
++constexpr int kFramesPerBeat = kSampleRate / 2;
++
++class AnalyzerPhrasesTest : public MixxxTest {
++  protected:
++    void SetUp() override {
++        m_pTrack = Track::newTemporary();
++        m_frames = 32 * 4 * kFramesPerBeat;
++        m_pTrack->setAudioProperties(mixxx::audio::ChannelCount(2),
++                mixxx::audio::SampleRate(kSampleRate),
++                mixxx::audio::Bitrate(),
++                mixxx::Duration::fromSeconds(static_cast<double>(m_frames) / kSampleRate));
++        m_pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
++                mixxx::audio::SampleRate(kSampleRate),
++                mixxx::audio::kStartFramePos,
++                mixxx::Bpm(120)));
++        m_samples.resize(m_frames * 2);
++        unsigned seed = 7;
++        for (SINT f = 0; f < m_frames; ++f) {
++            seed = seed * 1103515245 + 12345;
++            const double noise = static_cast<int>((seed >> 16) % 2001) / 1000.0 - 1.0;
++            const int bar = static_cast<int>(f / (4 * kFramesPerBeat));
++            double x = 0.05 * noise;
++            if (bar >= 8 && bar < 24) {
++                x = 0.1 * noise +
++                        0.4 * std::sin(2 * std::numbers::pi * 60.0 * f / kSampleRate);
++            }
++            m_samples[2 * f] = static_cast<CSAMPLE>(x);
++            m_samples[2 * f + 1] = static_cast<CSAMPLE>(x);
++        }
++    }
++
++    bool initialize(AnalyzerPhrases* pAnalyzer) {
++        return pAnalyzer->initialize(AnalyzerTrack(m_pTrack),
++                mixxx::audio::SampleRate(kSampleRate),
++                m_frames);
++    }
++
++    void process(AnalyzerPhrases* pAnalyzer) {
++        constexpr SINT kChunk = mixxx::kAnalysisSamplesPerChunk;
++        for (SINT i = 0; i < static_cast<SINT>(m_samples.size()); i += kChunk) {
++            pAnalyzer->processSamples(&m_samples[i],
++                    std::min(kChunk, static_cast<SINT>(m_samples.size()) - i));
++        }
++    }
++
++    void analyze() {
++        AnalyzerPhrases analyzer(config(), nullptr);
++        ASSERT_TRUE(initialize(&analyzer));
++        process(&analyzer);
++        analyzer.storeResults(m_pTrack);
++        analyzer.cleanup();
++    }
++
++    static TrackStructure::Phrase phrase(int startBar, int endBar, Kind kind) {
++        return {FramePos(startBar * 4.0 * kFramesPerBeat),
++                FramePos(endBar * 4.0 * kFramesPerBeat),
++                kind,
++                0};
++    }
++
++    TrackPointer m_pTrack;
++    SINT m_frames;
++    std::vector<CSAMPLE> m_samples;
++};
++
++TEST_F(AnalyzerPhrasesTest, DetectsSections) {
++    analyze();
++    const auto pStructure = m_pTrack->getStructure();
++    ASSERT_NE(nullptr, pStructure);
++    EXPECT_TRUE(pStructure->isDetected());
++    EXPECT_EQ(TrackStructure::Mood::High, pStructure->mood());
++    EXPECT_EQ(FramePos(0), pStructure->firstDownbeat());
++    ASSERT_EQ(3, pStructure->phrases().size());
++    const double bar = 4.0 * kFramesPerBeat;
++    EXPECT_EQ(FramePos(0), pStructure->phrases()[0].start);
++    EXPECT_EQ(FramePos(8 * bar), pStructure->phrases()[1].start);
++    EXPECT_EQ(FramePos(24 * bar), pStructure->phrases()[2].start);
++    EXPECT_EQ(Kind::Intro, pStructure->phrases()[0].kind);
++    EXPECT_EQ(Kind::Chorus, pStructure->phrases()[1].kind);
++    EXPECT_EQ(Kind::Outro, pStructure->phrases()[2].kind);
++
++    // Detected once: not again for the same beat grid
++    AnalyzerPhrases again(config(), nullptr);
++    EXPECT_FALSE(initialize(&again));
++}
++
++TEST_F(AnalyzerPhrasesTest, DisabledByConfig) {
++    config()->setValue(ConfigKey("[Library]", "DetectPhrases"), false);
++    AnalyzerPhrases analyzer(config(), nullptr);
++    EXPECT_FALSE(initialize(&analyzer));
++    config()->setValue(ConfigKey("[Library]", "DetectPhrases"), true);
++}
++
++TEST_F(AnalyzerPhrasesTest, RekordboxPhrasesAreNotReplaced) {
++    const auto pRekordbox = std::make_shared<const TrackStructure>(
++            TrackStructure::Mood::Mid,
++            QVector<TrackStructure::Phrase>{phrase(0, 32, Kind::Verse)},
++            FramePos(4 * kFramesPerBeat),
++            4);
++    m_pTrack->setStructure(pRekordbox);
++    AnalyzerPhrases analyzer(config(), nullptr);
++    EXPECT_FALSE(initialize(&analyzer));
++    EXPECT_EQ(pRekordbox, m_pTrack->getStructure());
++
++    const auto pDetected = std::make_shared<const TrackStructure>(
++            TrackStructure::Mood::High,
++            QVector<TrackStructure::Phrase>{phrase(0, 32, Kind::Chorus)},
++            FramePos(0),
++            4,
++            TrackStructure::Source::Detected);
++    EXPECT_FALSE(m_pTrack->trySetDetectedStructure(pDetected));
++    EXPECT_EQ(pRekordbox, m_pTrack->getStructure());
++}
++
++TEST_F(AnalyzerPhrasesTest, RekordboxArrivingDuringAnalysisWins) {
++    AnalyzerPhrases analyzer(config(), nullptr);
++    ASSERT_TRUE(initialize(&analyzer));
++    process(&analyzer);
++    const auto pRekordbox = std::make_shared<const TrackStructure>(
++            TrackStructure::Mood::Low,
++            QVector<TrackStructure::Phrase>{phrase(0, 32, Kind::Verse)},
++            FramePos(0),
++            4);
++    m_pTrack->setStructure(pRekordbox);
++    analyzer.storeResults(m_pTrack);
++    analyzer.cleanup();
++    EXPECT_EQ(pRekordbox, m_pTrack->getStructure());
++}
++
++TEST_F(AnalyzerPhrasesTest, RekordboxDownbeatIsKept) {
++    // rekordbox beat grid without phrase analysis: downbeat on beat 4
++    const FramePos downbeat(4 * kFramesPerBeat);
++    m_pTrack->setStructure(std::make_shared<const TrackStructure>(
++            TrackStructure::Mood::Unknown,
++            QVector<TrackStructure::Phrase>{},
++            downbeat,
++            4));
++    analyze();
++    const auto pStructure = m_pTrack->getStructure();
++    ASSERT_NE(nullptr, pStructure);
++    EXPECT_TRUE(pStructure->isDetected());
++    EXPECT_EQ(downbeat, pStructure->firstDownbeat());
++    EXPECT_FALSE(pStructure->phrases().isEmpty());
++}
++
++TEST_F(AnalyzerPhrasesTest, RekordboxImportReplacesDetected) {
++    analyze();
++    ASSERT_TRUE(m_pTrack->getStructure()->isDetected());
++    // what the rekordbox import paths do (setStructure)
++    const auto pRekordbox = std::make_shared<const TrackStructure>(
++            TrackStructure::Mood::Mid,
++            QVector<TrackStructure::Phrase>{phrase(0, 32, Kind::Verse)},
++            FramePos(0),
++            4);
++    m_pTrack->setStructure(pRekordbox);
++    EXPECT_EQ(pRekordbox, m_pTrack->getStructure());
++}
++
++} // namespace
+diff --git a/src/test/trackstructuretest.cpp b/src/test/trackstructuretest.cpp
+index 13e0f01b..1c45bb58 100644
+--- a/src/test/trackstructuretest.cpp
++++ b/src/test/trackstructuretest.cpp
+@@ -1,5 +1,8 @@
+ #include <gtest/gtest.h>
+ 
++#include <QDataStream>
++#include <QIODevice>
++
+ #include "track/trackstructure.h"
+ 
+ namespace {
+@@ -45,4 +48,49 @@ TEST(TrackStructureTest, RejectsBadData) {
+     EXPECT_EQ(nullptr, TrackStructure::fromByteArray(data));
+ }
+ 
++TEST(TrackStructureTest, SourceRoundTrip) {
++    const TrackStructure detected(TrackStructure::Mood::High,
++            {{FramePos(0), FramePos(10), TrackStructure::PhraseKind::Chorus, 0}},
++            FramePos(0),
++            4,
++            TrackStructure::Source::Detected);
++    const auto pDetected = TrackStructure::fromByteArray(detected.toByteArray());
++    ASSERT_NE(nullptr, pDetected);
++    EXPECT_TRUE(pDetected->isDetected());
++    EXPECT_EQ(TrackStructure::Source::Detected, pDetected->source());
++
++    const TrackStructure imported(TrackStructure::Mood::Low, {}, FramePos(5), 4);
++    const auto pImported = TrackStructure::fromByteArray(imported.toByteArray());
++    ASSERT_NE(nullptr, pImported);
++    EXPECT_EQ(TrackStructure::Source::Rekordbox, pImported->source());
++}
++
++// Data written by patch 0007 (version 1, no source field) is rekordbox data
++TEST(TrackStructureTest, ReadsVersion1) {
++    QByteArray data;
++    QDataStream out(&data, QIODevice::WriteOnly);
++    out.setVersion(QDataStream::Qt_5_12);
++    out << quint32(0x44535453) << quint16(1) << quint8(2) // Mid
++        << double(1000) << qint32(4) << qint32(1)
++        << double(1000) << double(50000) << quint8(3) << quint8(0); // Bridge
++    const auto pLoaded = TrackStructure::fromByteArray(data);
++    ASSERT_NE(nullptr, pLoaded);
++    EXPECT_EQ(TrackStructure::Source::Rekordbox, pLoaded->source());
++    EXPECT_FALSE(pLoaded->isDetected());
++    EXPECT_EQ(TrackStructure::Mood::Mid, pLoaded->mood());
++    EXPECT_EQ(FramePos(1000), pLoaded->firstDownbeat());
++    ASSERT_EQ(1, pLoaded->phrases().size());
++    EXPECT_EQ(FramePos(50000), pLoaded->phrases()[0].end);
++    EXPECT_EQ(TrackStructure::PhraseKind::Bridge, pLoaded->phrases()[0].kind);
++}
++
++TEST(TrackStructureTest, RejectsUnknownVersion) {
++    QByteArray data;
++    QDataStream out(&data, QIODevice::WriteOnly);
++    out.setVersion(QDataStream::Qt_5_12);
++    out << quint32(0x44535453) << quint16(99) << quint8(0) << quint8(0)
++        << double(0) << qint32(4) << qint32(0);
++    EXPECT_EQ(nullptr, TrackStructure::fromByteArray(data));
++}
++
+ } // namespace
+diff --git a/src/track/track.cpp b/src/track/track.cpp
+index 2fd1c3f5..2cde3fae 100644
+--- a/src/track/track.cpp
++++ b/src/track/track.cpp
+@@ -525,6 +525,26 @@ void Track::setStructure(mixxx::TrackStructurePointer pStructure) {
+     emit structureUpdated();
+ }
+ 
++// static
++bool Track::isStructureReplaceableByDetection(
++        const mixxx::TrackStructurePointer& pStructure) {
++    return !pStructure || pStructure->isDetected() || pStructure->phrases().isEmpty();
++}
++
++bool Track::trySetDetectedStructure(mixxx::TrackStructurePointer pStructure) {
++    VERIFY_OR_DEBUG_ASSERT(pStructure && pStructure->isDetected()) {
++        return false;
++    }
++    auto locked = lockMutex(&m_qMutex);
++    if (!isStructureReplaceableByDetection(m_pStructure)) {
++        return false;
++    }
++    m_pStructure = std::move(pStructure);
++    locked.unlock();
++    emit structureUpdated();
++    return true;
++}
++
+ void Track::undoBeatsChange() {
+     if (!canUndoBeatsChange()) {
+         return;
+diff --git a/src/track/track.h b/src/track/track.h
+index 2453270f..c5b22d23 100644
+--- a/src/track/track.h
++++ b/src/track/track.h
+@@ -352,6 +352,13 @@ class Track : public QObject {
+     /// as an analysis and does not mark the track dirty.
+     mixxx::TrackStructurePointer getStructure() const;
+     void setStructure(mixxx::TrackStructurePointer pStructure);
++    /// Sets a detected structure unless the track has rekordbox phrases
++    /// (checked under the track lock). Returns false if it was not set.
++    bool trySetDetectedStructure(mixxx::TrackStructurePointer pStructure);
++    /// True if a structure may be replaced by a detected one: none, a
++    /// detected one, or rekordbox data without phrases (downbeat only).
++    static bool isStructureReplaceableByDetection(
++            const mixxx::TrackStructurePointer& pStructure);
+ 
+     // Set the track's Beats if not locked
+     bool trySetBeats(mixxx::BeatsPointer pBeats);
+diff --git a/src/track/trackstructure.cpp b/src/track/trackstructure.cpp
+index d2776645..8657de1d 100644
+--- a/src/track/trackstructure.cpp
++++ b/src/track/trackstructure.cpp
+@@ -10,7 +10,9 @@ namespace mixxx {
+ namespace {
+ 
+ constexpr quint32 kMagic = 0x44535453; // "DSTS"
+-constexpr quint16 kVersion = 1;
++// Version 1: no source field (always rekordbox data).
++// Version 2: source byte after the version.
++constexpr quint16 kVersion = 2;
+ constexpr int kMaxPhrases = 1024;
+ 
+ // Not std::isfinite(): Mixxx is built with -ffast-math
+@@ -27,18 +29,21 @@ audio::FramePos framePosFromDouble(double value) {
+ TrackStructure::TrackStructure(Mood mood,
+         QVector<Phrase> phrases,
+         audio::FramePos firstDownbeat,
+-        int beatsPerBar)
++        int beatsPerBar,
++        Source source)
+         : m_mood(mood),
+           m_phrases(std::move(phrases)),
+           m_firstDownbeat(firstDownbeat),
+-          m_beatsPerBar(beatsPerBar > 0 ? beatsPerBar : 4) {
++          m_beatsPerBar(beatsPerBar > 0 ? beatsPerBar : 4),
++          m_source(source) {
+ }
+ 
+ QByteArray TrackStructure::toByteArray() const {
+     QByteArray data;
+     QDataStream out(&data, QIODevice::WriteOnly);
+     out.setVersion(QDataStream::Qt_5_12);
+-    out << kMagic << kVersion << static_cast<quint8>(m_mood)
++    out << kMagic << kVersion << static_cast<quint8>(m_source)
++        << static_cast<quint8>(m_mood)
+         << framePosToDouble(m_firstDownbeat)
+         << static_cast<qint32>(m_beatsPerBar)
+         << static_cast<qint32>(m_phrases.size());
+@@ -56,9 +61,16 @@ TrackStructurePointer TrackStructure::fromByteArray(const QByteArray& data) {
+     quint32 magic = 0;
+     quint16 version = 0;
+     in >> magic >> version;
+-    if (magic != kMagic || version != kVersion) {
++    if (magic != kMagic || version < 1 || version > kVersion) {
+         return nullptr;
+     }
++    quint8 source = static_cast<quint8>(Source::Rekordbox);
++    if (version >= 2) {
++        in >> source;
++        if (source > static_cast<quint8>(Source::Detected)) {
++            return nullptr;
++        }
++    }
+     quint8 mood = 0;
+     double firstDownbeat = 0;
+     qint32 beatsPerBar = 0;
+@@ -92,7 +104,8 @@ TrackStructurePointer TrackStructure::fromByteArray(const QByteArray& data) {
+     return std::make_shared<const TrackStructure>(static_cast<Mood>(mood),
+             std::move(phrases),
+             framePosFromDouble(firstDownbeat),
+-            beatsPerBar);
++            beatsPerBar,
++            static_cast<Source>(source));
+ }
+ 
+ // static
+diff --git a/src/track/trackstructure.h b/src/track/trackstructure.h
+index 91fdf994..2cedde7c 100644
+--- a/src/track/trackstructure.h
++++ b/src/track/trackstructure.h
+@@ -14,7 +14,8 @@ class TrackStructure;
+ typedef std::shared_ptr<const TrackStructure> TrackStructurePointer;
+ 
+ /// Song structure of a track: its phrases and the position of its first
+-/// downbeat. Imported from rekordbox analysis files (PSSI and PQTZ tags).
++/// downbeat. Imported from rekordbox analysis files (PSSI and PQTZ tags) or
++/// detected by AnalyzerPhrases.
+ ///
+ /// DecksmithOS addition. It is stored as an analysis of its own type, so the
+ /// library database schema and the beats format stay unchanged.
+@@ -41,6 +42,14 @@ class TrackStructure final {
+         Outro = 7,
+     };
+ 
++    /// Where the structure comes from. rekordbox data always wins: a
++    /// detected structure never replaces it, a rekordbox import replaces a
++    /// detected one.
++    enum class Source : quint8 {
++        Rekordbox = 0,
++        Detected = 1,
++    };
++
+     struct Phrase {
+         audio::FramePos start;
+         audio::FramePos end;
+@@ -52,7 +61,8 @@ class TrackStructure final {
+     TrackStructure(Mood mood,
+             QVector<Phrase> phrases,
+             audio::FramePos firstDownbeat,
+-            int beatsPerBar);
++            int beatsPerBar,
++            Source source = Source::Rekordbox);
+ 
+     Mood mood() const {
+         return m_mood;
+@@ -67,6 +77,12 @@ class TrackStructure final {
+     int beatsPerBar() const {
+         return m_beatsPerBar;
+     }
++    Source source() const {
++        return m_source;
++    }
++    bool isDetected() const {
++        return m_source == Source::Detected;
++    }
+     bool isEmpty() const {
+         return m_phrases.isEmpty() && !m_firstDownbeat.isValid();
+     }
+@@ -83,6 +99,7 @@ class TrackStructure final {
+     QVector<Phrase> m_phrases;
+     audio::FramePos m_firstDownbeat;
+     int m_beatsPerBar;
++    Source m_source;
+ };
+ 
+ } // namespace mixxx
