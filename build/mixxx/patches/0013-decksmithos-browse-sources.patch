@@ -1,0 +1,196 @@
+Description: Browse: fixed sources instead of the file system tree
+ DECKSMITHOS_BROWSE_SOURCES="LABEL=/path:LABEL2=/path2" turns the Computer
+ feature into "Sources": only these folders at the top (no Quick Links,
+ Removable Devices or /), each shown only while it is on a file system other
+ than the root one, i.e. while a drive is mounted there. Checked every 2 s;
+ a drive that goes away also clears its file list. No context menu then.
+ Without the variable nothing changes.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/src/library/browse/browsefeature.cpp b/src/library/browse/browsefeature.cpp
+index 235c16b6..47be1818 100644
+--- a/src/library/browse/browsefeature.cpp
++++ b/src/library/browse/browsefeature.cpp
+@@ -5,6 +5,7 @@
+ #include <QMenu>
+ #include <QPushButton>
+ #include <QStandardPaths>
++#include <QStorageInfo>
+ #include <QStringList>
+ #include <memory>
+ 
+@@ -37,6 +38,35 @@ const QStringList removableDriveRootPaths() {
+ }
+ #endif
+ 
++/// DecksmithOS: "LABEL=/path:LABEL2=/path2" from DECKSMITHOS_BROWSE_SOURCES
++QList<std::pair<QString, QString>> browseSourcesFromEnvironment() {
++    QList<std::pair<QString, QString>> sources;
++    const QString value = qEnvironmentVariable("DECKSMITHOS_BROWSE_SOURCES");
++    const QStringList entries = value.split(QChar(':'), Qt::SkipEmptyParts);
++    for (const QString& entry : entries) {
++        const int equals = entry.indexOf(QChar('='));
++        if (equals <= 0 || equals == entry.size() - 1) {
++            continue;
++        }
++        QString path = entry.mid(equals + 1);
++        if (!path.endsWith(QChar('/'))) {
++            path.append(QChar('/'));
++        }
++        sources.append({entry.left(equals), path});
++    }
++    return sources;
++}
++
++/// A source is shown while it is a directory on a file system other than the
++/// root one: an empty mount point (no drive) is on "/".
++bool isSourceAvailable(const QString& path) {
++    if (!QFileInfo(path).isDir()) {
++        return false;
++    }
++    const QStorageInfo storage(path);
++    return storage.isValid() && storage.isReady() && storage.rootPath() != QDir::rootPath();
++}
++
+ } // anonymous namespace
+ 
+ BrowseFeature::BrowseFeature(
+@@ -104,6 +134,21 @@ BrowseFeature::BrowseFeature(
+     // The invisible root item of the child model
+     std::unique_ptr<TreeItem> pRootItem = TreeItem::newRoot(this);
+ 
++    for (const auto& [label, path] : browseSourcesFromEnvironment()) {
++        m_sources.append(Source{label, path});
++    }
++    if (!m_sources.isEmpty()) {
++        // DecksmithOS: only the configured sources, added and removed as
++        // drives come and go (slotUpdateSources)
++        m_pQuickLinkItem = nullptr;
++        m_pSidebarModel->setRootItem(std::move(pRootItem));
++        slotUpdateSources();
++        m_sourcesTimer.setInterval(2000);
++        connect(&m_sourcesTimer, &QTimer::timeout, this, &BrowseFeature::slotUpdateSources);
++        m_sourcesTimer.start();
++        return;
++    }
++
+     m_pQuickLinkItem = pRootItem->appendChild(tr("Quick Links"), QUICK_LINK_NODE);
+ 
+     // Create the 'devices' shortcut
+@@ -170,9 +215,51 @@ BrowseFeature::~BrowseFeature() {
+ }
+ 
+ QVariant BrowseFeature::title() {
++    if (!m_sources.isEmpty()) {
++        return QVariant(tr("Sources"));
++    }
+     return QVariant(tr("Computer"));
+ }
+ 
++void BrowseFeature::slotUpdateSources() {
++    QStringList visiblePaths;
++    std::vector<std::unique_ptr<TreeItem>> items;
++    for (const Source& source : std::as_const(m_sources)) {
++        if (isSourceAvailable(source.path)) {
++            visiblePaths.append(source.path);
++            items.push_back(std::make_unique<TreeItem>(source.label, QVariant(source.path)));
++        }
++    }
++    if (visiblePaths == m_visibleSourcePaths) {
++        return;
++    }
++    qInfo() << "Browse sources:" << visiblePaths;
++    // Drives may have changed behind the same paths: forget their cached
++    // subfolders.
++    QStringList changedPaths = m_visibleSourcePaths;
++    changedPaths.append(visiblePaths);
++    m_pSidebarModel->removeChildDirsFromCache(changedPaths);
++
++    // A drive that is gone: stop showing its files
++    for (const QString& path : std::as_const(m_visibleSourcePaths)) {
++        if (!visiblePaths.contains(path) &&
++                QString(m_browseModel.currentDirectory() + QChar('/')).startsWith(path)) {
++            emit saveModelState();
++            m_browseModel.setPath({});
++        }
++    }
++
++    m_visibleSourcePaths = visiblePaths;
++    m_lastRightClickedIndex = QModelIndex();
++    TreeItem* pRootItem = m_pSidebarModel->getRootItem();
++    if (pRootItem && pRootItem->childRows() > 0) {
++        m_pSidebarModel->removeRows(0, pRootItem->childRows());
++    }
++    if (!items.empty()) {
++        m_pSidebarModel->insertTreeItemRows(std::move(items), 0);
++    }
++}
++
+ void BrowseFeature::slotAddQuickLink() {
+     const QString path = getLastRightClickedPath();
+     if (path.isEmpty()) {
+@@ -342,6 +429,10 @@ void BrowseFeature::onRightClickChild(const QPoint& globalPos, const QModelIndex
+     if (path == QUICK_LINK_NODE || path == DEVICE_NODE) {
+         return;
+     }
++    if (!m_pQuickLinkItem) {
++        // DecksmithOS sources: no Quick Links, no "Add to Library" menu
++        return;
++    }
+ 
+     // Make sure that this is reset whenever the tree changes
+     // and it may have become a dangling pointer
+diff --git a/src/library/browse/browsefeature.h b/src/library/browse/browsefeature.h
+index d809406a..51881f92 100644
+--- a/src/library/browse/browsefeature.h
++++ b/src/library/browse/browsefeature.h
+@@ -5,6 +5,7 @@
+ #include <QSortFilterProxyModel>
+ #include <QString>
+ #include <QStringListModel>
++#include <QTimer>
+ #include <QVariant>
+ 
+ #include "library/browse/browsetablemodel.h"
+@@ -51,6 +52,7 @@ class BrowseFeature : public LibraryFeature {
+     void slotLibraryScanStarted();
+     void slotLibraryScanFinished();
+     void invalidateRightClickIndex();
++    void slotUpdateSources();
+ 
+   signals:
+     void setRootIndex(const QModelIndex&);
+@@ -82,4 +84,16 @@ class BrowseFeature : public LibraryFeature {
+     TreeItem* m_pQuickLinkItem;
+     QStringList m_quickLinkList;
+     QPointer<WLibrarySidebar> m_pSidebarWidget;
++
++    /// DecksmithOS: DECKSMITHOS_BROWSE_SOURCES="LABEL=/path:LABEL2=/path2"
++    /// replaces the tree (Quick Links, Removable Devices, /) with these
++    /// folders, each shown only while it is on a file system other than "/"
++    /// (a drive mounted there, or a data partition).
++    struct Source {
++        QString label;
++        QString path; // ends with '/'
++    };
++    QList<Source> m_sources;
++    QStringList m_visibleSourcePaths;
++    QTimer m_sourcesTimer;
+ };
+diff --git a/src/library/browse/browsetablemodel.h b/src/library/browse/browsetablemodel.h
+index 0f8cd6c6..f595c24b 100644
+--- a/src/library/browse/browsetablemodel.h
++++ b/src/library/browse/browsetablemodel.h
+@@ -50,6 +50,10 @@ class BrowseTableModel final : public QStandardItemModel, public virtual TrackMo
+     Q_OBJECT
+ 
+   public:
++    /// The directory shown, without a trailing '/'; empty if none
++    const QString& currentDirectory() const {
++        return m_currentDirectory;
++    }
+     BrowseTableModel(QObject* parent, TrackCollectionManager* pTrackCollectionManager, RecordingManager* pRec);
+     virtual ~BrowseTableModel();
+ 

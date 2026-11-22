@@ -1,0 +1,266 @@
+Description: Search: on-screen keyboard (DECKSMITHOS_TOUCH_KEYBOARD)
+ With DECKSMITHOS_TOUCH_KEYBOARD set, the library search box shows an
+ on-screen keyboard while it has the focus: a panel across the bottom of the
+ window (45 % of its height) with digits, letters, - and ', Backspace (repeats
+ while held), CLEAR, SPACE, HIDE and SEARCH (Return: search, then the focus
+ goes to the tracks and the keyboard hides). Its keys never take the focus;
+ they send key events to the search box. Styled with WTouchKeyboard and
+ #TouchKeyboardKey. Mixxx has no on-screen keyboard on Linux (only iOS's
+ system keyboard). Without the variable nothing changes.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 38d62644..eadc438b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1341,6 +1341,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/widget/wrecordingduration.cpp
+   src/widget/wscrollable.cpp
+   src/widget/wsearchlineedit.cpp
++  src/widget/wtouchkeyboard.cpp
+   src/widget/wsearchrelatedtracksmenu.cpp
+   src/widget/wsettingscheckboxlabel.cpp
+   src/widget/wsingletoncontainer.cpp
+diff --git a/src/widget/wsearchlineedit.cpp b/src/widget/wsearchlineedit.cpp
+index 44d9ff95..ed08bda2 100644
+--- a/src/widget/wsearchlineedit.cpp
++++ b/src/widget/wsearchlineedit.cpp
+@@ -17,6 +17,7 @@
+ #include "util/assert.h"
+ #include "util/logger.h"
+ #include "util/parented_ptr.h"
++#include "widget/wtouchkeyboard.h"
+ #include "wskincolor.h"
+ 
+ #define ENABLE_TRACE_LOG false
+@@ -463,6 +464,17 @@ void WSearchLineEdit::focusInEvent(QFocusEvent* event) {
+     // unchanged text. Ie. force-search to refresh view, for example to clean
+     // the view from tracks that don't match the query anymore
+     m_queryEmitted = false;
++
++    if (WTouchKeyboard::isEnabled()) {
++        if (!m_pTouchKeyboard) {
++            m_pTouchKeyboard = new WTouchKeyboard(this);
++            connect(m_pTouchKeyboard,
++                    &WTouchKeyboard::clearRequested,
++                    this,
++                    &WSearchLineEdit::slotClearSearch);
++        }
++        m_pTouchKeyboard->showForTarget();
++    }
+ }
+ 
+ void WSearchLineEdit::focusOutEvent(QFocusEvent* event) {
+@@ -472,6 +484,11 @@ void WSearchLineEdit::focusOutEvent(QFocusEvent* event) {
+     }
+     slotSaveSearch();
+     QComboBox::focusOutEvent(event);
++    // Keep the keyboard for the completer's popup; hide it when the focus
++    // went elsewhere (a track tapped, Return moved it to the tracks)
++    if (m_pTouchKeyboard && event->reason() != Qt::PopupFocusReason) {
++        m_pTouchKeyboard->hide();
++    }
+     if (m_debouncingTimer.isActive()) {
+         // Trigger a pending search before leaving the edit box.
+         // Otherwise the entered text might be ignored and get lost
+diff --git a/src/widget/wsearchlineedit.h b/src/widget/wsearchlineedit.h
+index 110230d0..7c6f3124 100644
+--- a/src/widget/wsearchlineedit.h
++++ b/src/widget/wsearchlineedit.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <QComboBox>
++#include <QPointer>
+ #include <QTimer>
+ 
+ #include "library/library_decl.h"
+@@ -14,6 +15,8 @@ class QCompleter;
+ class QEvent;
+ class QToolButton;
+ 
++class WTouchKeyboard;
++
+ class WSearchLineEdit : public QComboBox, public WBaseWidget {
+     Q_OBJECT
+   public:
+@@ -110,6 +113,8 @@ class WSearchLineEdit : public QComboBox, public WBaseWidget {
+     parented_ptr<QToolButton> const m_clearButton;
+ 
+     QTimer m_debouncingTimer;
++    /// DecksmithOS: on-screen keyboard while focused (DECKSMITHOS_TOUCH_KEYBOARD)
++    QPointer<WTouchKeyboard> m_pTouchKeyboard;
+     QTimer m_saveTimer;
+     bool m_queryEmitted;
+ };
+diff --git a/src/widget/wtouchkeyboard.cpp b/src/widget/wtouchkeyboard.cpp
+new file mode 100644
+index 00000000..32319225
+--- /dev/null
++++ b/src/widget/wtouchkeyboard.cpp
+@@ -0,0 +1,121 @@
++#include "widget/wtouchkeyboard.h"
++
++#include <QApplication>
++#include <QGridLayout>
++#include <QKeyEvent>
++#include <QPushButton>
++
++#include "moc_wtouchkeyboard.cpp"
++
++namespace {
++
++// Keys per row; each row is 10 columns wide. Special keys: "<" Backspace,
++// "CLEAR", "SPACE" (4 columns), "HIDE", "SEARCH" (Return).
++const QList<QStringList> kRows = {
++        {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"},
++        {"Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"},
++        {"A", "S", "D", "F", "G", "H", "J", "K", "L", "<"},
++        {"Z", "X", "C", "V", "B", "N", "M", "-", "'", "CLEAR"},
++        {"HIDE", "SPACE", "SEARCH"},
++};
++
++/// Height of the keyboard as a part of the window height
++constexpr double kHeightRatio = 0.45;
++
++// Used unless the skin styles the keyboard
++const QString kDefaultStyle = QStringLiteral(
++        "WTouchKeyboard { background-color: #101014; border-top: 2px solid #3a3a42; }"
++        "#TouchKeyboardKey { color: #f0f0f2; background-color: #2a2a30;"
++        " border: 1px solid #44444c; border-radius: 4px; font-size: 24px; }"
++        "#TouchKeyboardKey:pressed { background-color: #4b93ff; }");
++
++} // namespace
++
++WTouchKeyboard::WTouchKeyboard(QWidget* pTarget)
++        : QFrame(pTarget->window()),
++          m_pTarget(pTarget) {
++    setStyleSheet(kDefaultStyle);
++    setFocusPolicy(Qt::NoFocus);
++    auto* pLayout = new QGridLayout(this);
++    pLayout->setContentsMargins(8, 8, 8, 8);
++    pLayout->setSpacing(6);
++    for (int row = 0; row < kRows.size(); ++row) {
++        int column = 0;
++        for (const QString& label : kRows[row]) {
++            QString text = label;
++            int span = 1;
++            if (label == QStringLiteral("<")) {
++                text = QStringLiteral("⌫"); // erase to the left
++            } else if (label == QStringLiteral("SPACE")) {
++                text = QString();
++                span = 5;
++            } else if (label == QStringLiteral("HIDE") || label == QStringLiteral("SEARCH")) {
++                span = 2;
++            }
++            auto* pKey = new QPushButton(text, this);
++            pKey->setObjectName(QStringLiteral("TouchKeyboardKey"));
++            pKey->setFocusPolicy(Qt::NoFocus);
++            pKey->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
++            // Backspace repeats while held
++            pKey->setAutoRepeat(label == QStringLiteral("<"));
++            connect(pKey, &QPushButton::clicked, this, [this, label]() {
++                if (label == QStringLiteral("<")) {
++                    sendKey(Qt::Key_Backspace, QString());
++                } else if (label == QStringLiteral("SPACE")) {
++                    sendKey(Qt::Key_Space, QStringLiteral(" "));
++                } else if (label == QStringLiteral("CLEAR")) {
++                    emit clearRequested();
++                } else if (label == QStringLiteral("HIDE")) {
++                    hide();
++                } else if (label == QStringLiteral("SEARCH")) {
++                    sendKey(Qt::Key_Return, QStringLiteral("\r"));
++                } else {
++                    // Search ignores case: send lower case
++                    const QString character = label.toLower();
++                    sendKey(QKeySequence(label)[0].key(), character);
++                }
++            });
++            pLayout->addWidget(pKey, row, column, 1, span);
++            column += span;
++        }
++    }
++    for (int column = 0; column < 10; ++column) {
++        pLayout->setColumnStretch(column, 1);
++    }
++    window()->installEventFilter(this);
++    hide();
++}
++
++// static
++bool WTouchKeyboard::isEnabled() {
++    return !qEnvironmentVariableIsEmpty("DECKSMITHOS_TOUCH_KEYBOARD");
++}
++
++void WTouchKeyboard::showForTarget() {
++    place();
++    show();
++    raise();
++}
++
++void WTouchKeyboard::place() {
++    const QWidget* pWindow = parentWidget();
++    const int height = static_cast<int>(pWindow->height() * kHeightRatio);
++    setGeometry(0, pWindow->height() - height, pWindow->width(), height);
++}
++
++bool WTouchKeyboard::eventFilter(QObject* pObject, QEvent* pEvent) {
++    if (pObject == parentWidget() && pEvent->type() == QEvent::Resize && isVisible()) {
++        place();
++    }
++    return QFrame::eventFilter(pObject, pEvent);
++}
++
++void WTouchKeyboard::sendKey(int key, const QString& text) {
++    if (!m_pTarget) {
++        return;
++    }
++    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, text);
++    QApplication::sendEvent(m_pTarget, &press);
++    QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier, text);
++    QApplication::sendEvent(m_pTarget, &release);
++}
+diff --git a/src/widget/wtouchkeyboard.h b/src/widget/wtouchkeyboard.h
+new file mode 100644
+index 00000000..d03dfcce
+--- /dev/null
++++ b/src/widget/wtouchkeyboard.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <QFrame>
++#include <QPointer>
++
++class QWidget;
++
++/// DecksmithOS: an on-screen keyboard for a touch screen without a physical
++/// keyboard. A panel across the bottom of the window of its target; the keys
++/// never take the focus and send key events to the target (letters, digits,
++/// space, Backspace, Return), plus a key that clears the target's text.
++/// WSearchLineEdit shows it while it has the focus if DECKSMITHOS_TOUCH_KEYBOARD
++/// is set. Style it with WTouchKeyboard / #TouchKeyboardKey in the skin.
++class WTouchKeyboard : public QFrame {
++    Q_OBJECT
++  public:
++    /// The keyboard is a child of `pTarget`'s window.
++    explicit WTouchKeyboard(QWidget* pTarget);
++
++    static bool isEnabled();
++
++    /// Shows the keyboard at the bottom of the window, above everything else.
++    void showForTarget();
++
++  signals:
++    void clearRequested();
++
++  protected:
++    bool eventFilter(QObject* pObject, QEvent* pEvent) override;
++
++  private:
++    void sendKey(int key, const QString& text);
++    void place();
++
++    QPointer<QWidget> m_pTarget;
++};

@@ -77,6 +77,11 @@ so the source is patched in this order:
 | `0007-decksmithos-rekordbox-phrases` | rekordbox phrases (PSSI) as a band in the track overview; downbeats and a bar.beat counter in the allshader waveforms (skin options `PhraseBandHeight`, `DownbeatColor`, `ShowDownbeats`, `ShowBarCounter`, `DownbeatFromIntroStart`); stored as an extra analysis row, no schema change | ours (upstream PRs #16581/#16582 target main's new renderer and were not ported) |
 | `0008-numark-mixtrack3-wheel-edge-loop-roll-beats-knob` | Mixtrack (Pro) 3 mapping: wheel edge seeks on a stopped deck and no pitch bend while scratching; options for SHIFT+Auto Loop rolls and a BEATS knob that halves/doubles the effect time; sampler gain fix | candidate for upstream (user submits) |
 | `0009-quit-gracefully-on-sigterm` | SIGTERM quits like File > Exit (library, settings, effects.xml saved), second SIGTERM kills; Unix | candidate for upstream, #15767 (user submits) |
+| `0010-decksmithos-autodj-requests` | Auto DJ requests, `[Library],AutoDjAddRequest`: the selected track goes where it fits best (key, tempo) among the next N queued tracks (Preferences > Auto DJ > Requests, default 5; optional request order), after the cued track; a queued track moves up instead; requests highlighted in the queue | ours |
+| `0011-decksmithos-midi-request-button` | `[AutoDJ],request_learn` / `request_learn_clear` / `request_learned`: learn one MIDI controller button for requests from the skin, stored in `mixxx.cfg`, mapping untouched | appliance only |
+| `0012-decksmithos-touch-scroll` | `DECKSMITHOS_TOUCH_SCROLL`: library sidebar and track tables scroll by dragging (kinetic); no dragging tracks out of them then | appliance only |
+| `0013-decksmithos-browse-sources` | `DECKSMITHOS_BROWSE_SOURCES="LABEL=/path:..."`: "Computer" becomes "Sources" with only these folders, each shown while a drive is mounted there (checked every 2 s) | appliance only |
+| `0014-decksmithos-touch-keyboard` | `DECKSMITHOS_TOUCH_KEYBOARD`: on-screen keyboard at the bottom of the window while the search box has the focus | appliance only |
 
 Refresh 0000 with `build/mixxx/make-stable-patch.sh [branch [commit]]`
 (default: head of `2.5`). It also tries each DecksmithOS patch on top and

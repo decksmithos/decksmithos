@@ -1,0 +1,294 @@
+Description: MIDI: learn the Auto DJ request button from the skin
+ [AutoDJ],request_learn (toggle): the next button pressed on any MIDI
+ controller becomes the Auto DJ request button ([Library],AutoDjAddRequest);
+ [AutoDJ],request_learn_clear forgets it; [AutoDJ],request_learned shows
+ whether one is set. Stored in "[Auto DJ],RequestButton" as
+ "<status> <data1> <controller name>", not in the controller's mapping, so the
+ mapping file stays untouched and its updates still apply. The learned
+ button's messages only push the request control (the mapping does not see
+ them). Lets a skin without menu bar offer a LEARN button; DecksmithOS only.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 38d62644..f6ab3508 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -789,6 +789,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/controllers/midi/legacymidicontrollermapping.cpp
+   src/controllers/midi/legacymidicontrollermappingfilehandler.cpp
+   src/controllers/midi/midicontroller.cpp
++  src/controllers/midi/midirequestbutton.cpp
+   src/controllers/midi/midienumerator.cpp
+   src/controllers/midi/midimessage.cpp
+   src/controllers/midi/midioutputhandler.cpp
+diff --git a/src/controllers/controllermanager.cpp b/src/controllers/controllermanager.cpp
+index 8cbfe7d8..5afed3d6 100644
+--- a/src/controllers/controllermanager.cpp
++++ b/src/controllers/controllermanager.cpp
+@@ -9,6 +9,7 @@
+ #include "controllers/controllerlearningeventfilter.h"
+ #include "controllers/controllermappinginfoenumerator.h"
+ #include "controllers/defs_controllers.h"
++#include "controllers/midi/midirequestbutton.h"
+ #include "moc_controllermanager.cpp"
+ #include "util/cmdlineargs.h"
+ #include "util/compatibility/qmutex.h"
+@@ -189,7 +190,9 @@ ControllerManager::ControllerManager(UserSettingsPointer pConfig)
+           // its own event loop.
+           m_pControllerLearningEventFilter(new ControllerLearningEventFilter()),
+           m_pollTimer(this),
+-          m_skipPoll(false) {
++          m_skipPoll(false),
++          // Not a QObject child: its controls stay in the main thread.
++          m_pMidiRequestButton(std::make_unique<MidiRequestButton>(pConfig)) {
+     qRegisterMetaType<std::shared_ptr<LegacyControllerMapping>>(
+             "std::shared_ptr<LegacyControllerMapping>");
+ 
+diff --git a/src/controllers/controllermanager.h b/src/controllers/controllermanager.h
+index ded4d299..e4037e3c 100644
+--- a/src/controllers/controllermanager.h
++++ b/src/controllers/controllermanager.h
+@@ -13,6 +13,7 @@
+ class Controller;
+ class ControllerLearningEventFilter;
+ class MappingInfoEnumerator;
++class MidiRequestButton;
+ class LegacyControllerMapping;
+ class ControllerEnumerator;
+ 
+@@ -86,4 +87,5 @@ class ControllerManager : public QObject {
+     QSharedPointer<MappingInfoEnumerator> m_pMainThreadUserMappingEnumerator;
+     QSharedPointer<MappingInfoEnumerator> m_pMainThreadSystemMappingEnumerator;
+     bool m_skipPoll;
++    std::unique_ptr<MidiRequestButton> m_pMidiRequestButton;
+ };
+diff --git a/src/controllers/midi/midicontroller.cpp b/src/controllers/midi/midicontroller.cpp
+index 3e60e75e..331bb6a9 100644
+--- a/src/controllers/midi/midicontroller.cpp
++++ b/src/controllers/midi/midicontroller.cpp
+@@ -6,6 +6,7 @@
+ #include "control/controlobject.h"
+ #include "controllers/defs_controllers.h"
+ #include "controllers/midi/midioutputhandler.h"
++#include "controllers/midi/midirequestbutton.h"
+ #include "controllers/midi/midiutils.h"
+ #include "controllers/scripting/legacy/controllerscriptenginelegacy.h"
+ #include "defs_urls.h"
+@@ -284,6 +285,10 @@ void MidiController::receivedShortMessage(unsigned char status,
+ 
+     MidiKey mappingKey(status, control);
+     triggerActivity();
++    // DecksmithOS: the Auto DJ request button learned from the skin
++    if (!isLearning() && MidiRequestButton::process(getName(), status, control, value)) {
++        return;
++    }
+     if (isLearning()) {
+         emit messageReceived(status, control, value);
+ 
+diff --git a/src/controllers/midi/midirequestbutton.cpp b/src/controllers/midi/midirequestbutton.cpp
+new file mode 100644
+index 00000000..76810f35
+--- /dev/null
++++ b/src/controllers/midi/midirequestbutton.cpp
+@@ -0,0 +1,136 @@
++#include "controllers/midi/midirequestbutton.h"
++
++#include <QStringList>
++#include <QtDebug>
++
++#include "control/controlobject.h"
++#include "control/controlpushbutton.h"
++#include "controllers/midi/midimessage.h"
++#include "controllers/midi/midiutils.h"
++
++namespace {
++
++const QString kControlGroup = QStringLiteral("[AutoDJ]");
++const ConfigKey kButtonConfigKey =
++        ConfigKey(QStringLiteral("[Auto DJ]"), QStringLiteral("RequestButton"));
++const ConfigKey kRequestKey =
++        ConfigKey(QStringLiteral("[Library]"), QStringLiteral("AutoDjAddRequest"));
++
++/// Note On and Note Off of a key are one button, like a Control Change.
++int buttonOpCode(unsigned char status) {
++    const auto opCode = MidiUtils::opCodeFromStatus(status);
++    if (opCode == MidiOpCode::NoteOff) {
++        return static_cast<int>(MidiOpCode::NoteOn);
++    }
++    return static_cast<int>(opCode);
++}
++
++} // namespace
++
++std::atomic<MidiRequestButton*> MidiRequestButton::s_pInstance = nullptr;
++
++MidiRequestButton::MidiRequestButton(UserSettingsPointer pConfig)
++        : m_pConfig(pConfig),
++          m_pLearn(std::make_unique<ControlPushButton>(
++                  ConfigKey(kControlGroup, QStringLiteral("request_learn")))),
++          m_pClear(std::make_unique<ControlPushButton>(
++                  ConfigKey(kControlGroup, QStringLiteral("request_learn_clear")))),
++          m_pLearned(std::make_unique<ControlObject>(
++                  ConfigKey(kControlGroup, QStringLiteral("request_learned")))) {
++    m_pLearn->setButtonMode(ControlPushButton::TOGGLE);
++    m_pLearned->setReadOnly();
++
++    const QStringList parts = m_pConfig->getValueString(kButtonConfigKey)
++                                      .split(QChar(' '), Qt::SkipEmptyParts);
++    if (parts.size() >= 3) {
++        bool okStatus = false;
++        bool okControl = false;
++        const int status = parts[0].toInt(&okStatus, 0);
++        const int control = parts[1].toInt(&okControl, 0);
++        if (okStatus && okControl) {
++            setButton(parts.mid(2).join(QChar(' ')), status, control);
++        }
++    }
++
++    // Direct: the control may be set from any thread, and setButton() locks.
++    QObject::connect(m_pClear.get(),
++            &ControlObject::valueChanged,
++            m_pClear.get(),
++            [this](double value) {
++                if (value > 0) {
++                    m_pLearn->set(0);
++                    setButton(QString(), -1, -1);
++                    m_pConfig->set(kButtonConfigKey, ConfigValue(QString()));
++                }
++            },
++            Qt::DirectConnection);
++
++    s_pInstance = this;
++}
++
++MidiRequestButton::~MidiRequestButton() {
++    s_pInstance = nullptr;
++}
++
++// static
++bool MidiRequestButton::process(const QString& controllerName,
++        unsigned char status,
++        unsigned char control,
++        unsigned char value) {
++    MidiRequestButton* pInstance = s_pInstance;
++    return pInstance && pInstance->processMessage(controllerName, status, control, value);
++}
++
++bool MidiRequestButton::processMessage(const QString& controllerName,
++        unsigned char status,
++        unsigned char control,
++        unsigned char value) {
++    const int opCode = buttonOpCode(status);
++    if (opCode != static_cast<int>(MidiOpCode::NoteOn) &&
++            opCode != static_cast<int>(MidiOpCode::ControlChange)) {
++        return false;
++    }
++    const int channel = MidiUtils::channelFromStatus(status);
++    const bool pressed =
++            MidiUtils::opCodeFromStatus(status) != MidiOpCode::NoteOff && value > 0;
++
++    if (m_pLearn->get() > 0) {
++        if (!pressed) {
++            return false;
++        }
++        const int buttonStatus = opCode | channel;
++        setButton(controllerName, buttonStatus, control);
++        m_pConfig->set(kButtonConfigKey,
++                ConfigValue(QStringLiteral("0x%1 0x%2 %3")
++                                .arg(buttonStatus, 2, 16, QChar('0'))
++                                .arg(control, 2, 16, QChar('0'))
++                                .arg(controllerName)));
++        m_pLearn->set(0);
++        qInfo() << "Auto DJ request button:" << controllerName
++                << QStringLiteral("0x%1 0x%2")
++                           .arg(buttonStatus, 2, 16, QChar('0'))
++                           .arg(control, 2, 16, QChar('0'));
++        // The release of this press is taken below, like every later message
++        return true;
++    }
++
++    {
++        QMutexLocker locker(&m_mutex);
++        if (m_controllerName.isEmpty() || m_controllerName != controllerName ||
++                m_control != control || m_status != (opCode | channel)) {
++            return false;
++        }
++    }
++    ControlObject::set(kRequestKey, pressed ? 1.0 : 0.0);
++    return true;
++}
++
++void MidiRequestButton::setButton(const QString& controllerName, int status, int control) {
++    {
++        QMutexLocker locker(&m_mutex);
++        m_controllerName = controllerName;
++        m_status = status;
++        m_control = control;
++    }
++    m_pLearned->forceSet(controllerName.isEmpty() ? 0.0 : 1.0);
++}
+diff --git a/src/controllers/midi/midirequestbutton.h b/src/controllers/midi/midirequestbutton.h
+new file mode 100644
+index 00000000..4e31c784
+--- /dev/null
++++ b/src/controllers/midi/midirequestbutton.h
+@@ -0,0 +1,57 @@
++#pragma once
++
++#include <QMutex>
++#include <QString>
++#include <atomic>
++#include <memory>
++
++#include "preferences/usersettings.h"
++
++class ControlObject;
++class ControlPushButton;
++
++/// DecksmithOS: one button of any MIDI controller learned for the Auto DJ
++/// request ([Library],AutoDjAddRequest), from the skin and without editing
++/// the controller's mapping (so mapping updates still apply):
++///
++///   [AutoDJ],request_learn        1: the next button pressed on a MIDI
++///                                 controller becomes the request button
++///                                 (back to 0 then); 0 again cancels
++///   [AutoDJ],request_learn_clear  forgets the request button
++///   [AutoDJ],request_learned      1 while a request button is set (read-only)
++///
++/// The button is stored in "[Auto DJ],RequestButton" as
++/// "<status> <data1> <controller name>" (status of the Note On / Control
++/// Change, any value). While set, its messages only push the request control:
++/// the controller's mapping no longer sees them.
++class MidiRequestButton {
++  public:
++    explicit MidiRequestButton(UserSettingsPointer pConfig);
++    ~MidiRequestButton();
++
++    /// Called by MidiController for each short message, in the controller
++    /// thread. Returns true if the message was taken (learned or matched).
++    static bool process(const QString& controllerName,
++            unsigned char status,
++            unsigned char control,
++            unsigned char value);
++
++  private:
++    bool processMessage(const QString& controllerName,
++            unsigned char status,
++            unsigned char control,
++            unsigned char value);
++    void setButton(const QString& controllerName, int status, int control);
++
++    static std::atomic<MidiRequestButton*> s_pInstance;
++
++    UserSettingsPointer m_pConfig;
++    std::unique_ptr<ControlPushButton> m_pLearn;
++    std::unique_ptr<ControlPushButton> m_pClear;
++    std::unique_ptr<ControlObject> m_pLearned;
++
++    QMutex m_mutex;
++    QString m_controllerName; // empty: no button
++    int m_status = -1;        // Note On or Control Change, with channel
++    int m_control = -1;
++};

@@ -1,0 +1,89 @@
+Description: Library: scroll lists by dragging (DECKSMITHOS_TOUCH_SCROLL)
+ With DECKSMITHOS_TOUCH_SCROLL set, the library sidebar and the track tables
+ scroll by dragging their contents with a finger (QScroller, kinetic flicks,
+ per-pixel scrolling); a tap still selects. Dragging items out of these views
+ (tracks onto a deck) is then not possible: a touch appliance loads with
+ buttons. Without the variable nothing changes.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-22
+---
+diff --git a/src/widget/touchscroll.h b/src/widget/touchscroll.h
+new file mode 100644
+index 00000000..926e8f9e
+--- /dev/null
++++ b/src/widget/touchscroll.h
+@@ -0,0 +1,33 @@
++#pragma once
++
++#include <QAbstractItemView>
++#include <QScroller>
++#include <QScrollerProperties>
++
++namespace mixxx {
++namespace widget {
++
++/// DecksmithOS: if DECKSMITHOS_TOUCH_SCROLL is set, `pView` scrolls by
++/// dragging its contents (a finger on a touch screen, or the mouse), with
++/// kinetic flicks; a tap still selects. Dragging items out of the view (e.g.
++/// tracks onto a deck) is not possible then: an appliance with a touch screen
++/// loads with buttons instead.
++inline void maybeEnableTouchScrolling(QAbstractItemView* pView) {
++    if (qEnvironmentVariableIsEmpty("DECKSMITHOS_TOUCH_SCROLL")) {
++        return;
++    }
++    pView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
++    QScroller::grabGesture(pView->viewport(), QScroller::LeftMouseButtonGesture);
++    QScroller* pScroller = QScroller::scroller(pView->viewport());
++    QScrollerProperties properties = pScroller->scrollerProperties();
++    properties.setScrollMetric(QScrollerProperties::HorizontalOvershootPolicy,
++            QScrollerProperties::OvershootAlwaysOff);
++    properties.setScrollMetric(QScrollerProperties::VerticalOvershootPolicy,
++            QScrollerProperties::OvershootAlwaysOff);
++    // A tap that moves less than ~3 mm is a click
++    properties.setScrollMetric(QScrollerProperties::DragStartDistance, 0.003);
++    pScroller->setScrollerProperties(properties);
++}
++
++} // namespace widget
++} // namespace mixxx
+diff --git a/src/widget/wlibrarysidebar.cpp b/src/widget/wlibrarysidebar.cpp
+index aa677854..5fe2d3f9 100644
+--- a/src/widget/wlibrarysidebar.cpp
++++ b/src/widget/wlibrarysidebar.cpp
+@@ -8,6 +8,7 @@
+ #include "moc_wlibrarysidebar.cpp"
+ #include "util/defs.h"
+ #include "util/dnd.h"
++#include "widget/touchscroll.h"
+ 
+ constexpr int expand_time = 250;
+ 
+@@ -28,6 +29,7 @@ WLibrarySidebar::WLibrarySidebar(QWidget* parent)
+     header()->setStretchLastSection(false);
+     header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+     header()->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
++    mixxx::widget::maybeEnableTouchScrolling(this);
+ }
+ 
+ void WLibrarySidebar::contextMenuEvent(QContextMenuEvent *event) {
+diff --git a/src/widget/wlibrarytableview.cpp b/src/widget/wlibrarytableview.cpp
+index facbcaca..1e4f901c 100644
+--- a/src/widget/wlibrarytableview.cpp
++++ b/src/widget/wlibrarytableview.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include "moc_wlibrarytableview.cpp"
+ #include "util/math.h"
++#include "widget/touchscroll.h"
+ 
+ class QFocusEvent;
+ 
+@@ -55,6 +56,7 @@ WLibraryTableView::WLibraryTableView(QWidget* parent,
+             &WLibraryTableView::scrollValueChanged);
+ 
+     setTabKeyNavigation(false);
++    mixxx::widget::maybeEnableTouchScrolling(this);
+ }
+ 
+ WLibraryTableView::~WLibraryTableView() {

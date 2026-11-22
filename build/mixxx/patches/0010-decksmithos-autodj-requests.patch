@@ -1,0 +1,824 @@
+Description: Auto DJ requests: [Library],AutoDjAddRequest
+ A request (a dedication, a guest's wish) goes where it fits best by key and
+ tempo among the next N tracks of the Auto DJ queue (Preferences > Auto DJ >
+ Requests, default 5), after the track a running Auto DJ has cued already and
+ never at a track loaded in a deck. A track in the queue already moves up
+ instead (never down), so the same control prioritizes a queued track, also
+ from the Auto DJ view. "Play requests in the order they came" (default off)
+ keeps a request after the earlier ones. Requests are highlighted in the
+ queue (amber, bold) until they leave it; the highlight is not stored.
+ The slot choice is harmonicRequestSlot() in library/autodj/harmonicorder.h
+ (from 0006), unit tested; the control is in the controller learning wizard's
+ Library menu. New PlaylistDAO::AutoDJSendLoc::REQUEST.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/src/controllers/controlpickermenu.cpp b/src/controllers/controlpickermenu.cpp
+index f5029793..34900a04 100644
+--- a/src/controllers/controlpickermenu.cpp
++++ b/src/controllers/controlpickermenu.cpp
+@@ -921,6 +921,11 @@ ControlPickerMenu::ControlPickerMenu(QWidget* pParent)
+             tr("Add to Auto DJ Queue (replace)"),
+             tr("Replace Auto DJ Queue with selected tracks"),
+             pLibraryMenu);
++    addLibraryControl("AutoDjAddRequest",
++            tr("Add to Auto DJ Queue (request)"),
++            tr("Put the selected track where it fits best among the next "
++               "tracks of the Auto DJ Queue, or move it there if queued"),
++            pLibraryMenu);
+     pLibraryMenu->addSeparator();
+     // Search box
+     addLibraryControl("search_history_next",
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 241cc11f..00054d9d 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include "engine/channels/enginedeck.h"
+ #include "library/autodj/harmonicorder.h"
++#include "library/trackcollectionmanager.h"
+ #include "mixer/basetrackplayer.h"
+ #include "mixer/playermanager.h"
+ #include "moc_autodjprocessor.cpp"
+@@ -18,6 +19,7 @@ const char* kTransitionPreferenceName = "Transition";
+ const char* kTransitionModePreferenceName = "TransitionMode";
+ constexpr double kTransitionPreferenceDefault = 10.0;
+ constexpr double kKeepPosition = -1.0;
++constexpr int kRequestPositionsDefault = 5;
+ 
+ // A track needs to be longer than two callbacks to not stop AutoDJ
+ constexpr double kMinimumTrackDurationSec = 0.2;
+@@ -123,6 +125,7 @@ AutoDJProcessor::AutoDJProcessor(
+           m_transitionProgress(0.0),
+           m_transitionTime(kTransitionPreferenceDefault),
+           m_pPlayerManager(pPlayerManager),
++          m_pTrackCollectionManager(pTrackCollectionManager),
+           m_coCrossfader(QStringLiteral("[Master]"), QStringLiteral("crossfader")),
+           m_coCrossfaderReverse(QStringLiteral("[Mixer Profile]"), QStringLiteral("xFaderReverse")),
+           m_shufflePlaylist(ConfigKey(kControlGroup, QStringLiteral("shuffle_playlist"))),
+@@ -270,6 +273,142 @@ AutoDJProcessor::AutoDJError AutoDJProcessor::sortPlaylistHarmonic(
+     return ADJ_OK;
+ }
+ 
++AutoDJProcessor::AutoDJError AutoDJProcessor::requestTracks(const QList<TrackId>& trackIds) {
++    const int positions = std::max(1,
++            m_pConfig->getValue(ConfigKey(kPreferenceGroup, QStringLiteral("RequestPositions")),
++                    kRequestPositionsDefault));
++    const bool keepOrder = m_pConfig->getValue(
++            ConfigKey(kPreferenceGroup, QStringLiteral("RequestKeepOrder")), false);
++    for (const TrackId& trackId : trackIds) {
++        requestTrack(trackId, positions, keepOrder);
++    }
++    return ADJ_OK;
++}
++
++void AutoDJProcessor::requestTrack(TrackId trackId, int positions, bool keepOrder) {
++    if (!trackId.isValid()) {
++        return;
++    }
++    for (const auto& pDeck : m_decks) {
++        const TrackPointer pLoaded = pDeck->getLoadedTrack();
++        if (pLoaded && pLoaded->getId() == trackId) {
++            qInfo() << "Auto DJ request: the track is loaded in" << pDeck->group
++                    << "already, not queued again";
++            return;
++        }
++    }
++    const auto harmonicTrack = [](const TrackPointer& pTrack) {
++        mixxx::autodj::HarmonicTrack track;
++        if (pTrack) {
++            track.bpm = pTrack->getBpm();
++            track.key = pTrack->getKey();
++        }
++        return track;
++    };
++
++    m_pAutoDJTableModel->select();
++    const int rowCount = m_pAutoDJTableModel->rowCount();
++    // A running Auto DJ has the first queued track cued (or loading) already:
++    // it stays first, and the request comes after it.
++    const int head = (m_eState != ADJ_DISABLED && rowCount > 0) ? 1 : 0;
++    if (head > 0 &&
++            m_pAutoDJTableModel->getTrackId(m_pAutoDJTableModel->index(0, 0)) ==
++                    trackId) {
++        return;
++    }
++
++    // The queue after the head, without the requested track
++    QList<int> rows;
++    QList<TrackId> ids;
++    QSet<TrackId> queued;
++    int existingRow = -1;
++    int existingSlot = -1;
++    for (int row = 0; row < rowCount; ++row) {
++        const TrackId id = m_pAutoDJTableModel->getTrackId(m_pAutoDJTableModel->index(row, 0));
++        queued.insert(id);
++        if (row < head) {
++            continue;
++        }
++        if (id == trackId && existingRow < 0) {
++            existingRow = row;
++            existingSlot = static_cast<int>(rows.size());
++            continue;
++        }
++        rows.append(row);
++        ids.append(id);
++    }
++    // Forget requests that left the queue (played, removed)
++    QSet<TrackId> requested = m_requestedTracks;
++    requested.intersect(queued);
++
++    int first = 0;
++    if (keepOrder) {
++        for (int i = static_cast<int>(ids.size()) - 1; i >= 0; --i) {
++            if (requested.contains(ids[i])) {
++                first = i + 1;
++                break;
++            }
++        }
++    }
++    if (existingSlot >= 0 && existingSlot < first) {
++        // Queued ahead of the earlier requests already: it stays.
++        requested.insert(trackId);
++        setRequestedTracks(requested);
++        return;
++    }
++    int last = std::min(static_cast<int>(ids.size()), positions - 1);
++    if (existingSlot >= 0) {
++        // A queued track only moves up
++        last = std::min(last, existingSlot);
++    }
++    last = std::max(last, first);
++
++    std::optional<mixxx::autodj::HarmonicTrack> previous;
++    if (head > 0) {
++        previous = harmonicTrack(m_pAutoDJTableModel->getTrack(m_pAutoDJTableModel->index(0, 0)));
++    } else {
++        for (const auto& pDeck : m_decks) {
++            if (pDeck->isPlaying()) {
++                previous = harmonicTrack(pDeck->getLoadedTrack());
++                break;
++            }
++        }
++    }
++    QList<mixxx::autodj::HarmonicTrack> queue;
++    const int queueSize = std::min(static_cast<int>(rows.size()), last + 1);
++    queue.reserve(queueSize);
++    for (int i = 0; i < queueSize; ++i) {
++        queue.append(harmonicTrack(m_pAutoDJTableModel->getTrack(
++                m_pAutoDJTableModel->index(rows[i], 0))));
++    }
++    const TrackPointer pRequest = m_pTrackCollectionManager->getTrackById(trackId);
++    const int slot = mixxx::autodj::harmonicRequestSlot(
++            queue, harmonicTrack(pRequest), previous, first, last);
++
++    if (existingRow >= 0) {
++        if (slot < existingSlot) {
++            m_pAutoDJTableModel->moveTrack(m_pAutoDJTableModel->index(existingRow, 0),
++                    m_pAutoDJTableModel->index(rows[slot], 0));
++        }
++    } else {
++        // An invalid index appends
++        const QModelIndex before = slot < rows.size()
++                ? m_pAutoDJTableModel->index(rows[slot], 0)
++                : QModelIndex();
++        if (m_pAutoDJTableModel->addTracksWithTrackIds(before, {trackId}, nullptr) < 1) {
++            return;
++        }
++    }
++    m_pAutoDJTableModel->select();
++    requested.insert(trackId);
++    setRequestedTracks(requested);
++}
++
++void AutoDJProcessor::setRequestedTracks(const QSet<TrackId>& trackIds) {
++    m_requestedTracks = trackIds;
++    m_pAutoDJTableModel->setHighlightedTracks(m_requestedTracks);
++}
++
+ void AutoDJProcessor::fadeNow() {
+     if (m_eState != ADJ_IDLE) {
+         // we cannot fade if AutoDj is disabled or already fading
+@@ -1039,6 +1178,11 @@ bool AutoDJProcessor::removeTrackFromTopOfQueue(TrackPointer pTrack) {
+ 
+     // Remove the top track.
+     m_pAutoDJTableModel->removeTrack(m_pAutoDJTableModel->index(0, 0));
++    if (m_requestedTracks.contains(nextId)) {
++        QSet<TrackId> requested = m_requestedTracks;
++        requested.remove(nextId);
++        setRequestedTracks(requested);
++    }
+ 
+     // Re-queue if configured.
+     if (m_pConfig->getValueString(ConfigKey(kPreferenceGroup, QStringLiteral("Requeue"))).toInt()) {
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index 48d7c82b..bd0d97a4 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <QObject>
++#include <QSet>
+ #include <QString>
+ #include <memory>
+ #include <vector>
+@@ -205,6 +206,17 @@ class AutoDJProcessor : public QObject {
+     /// library/autodj/harmonicorder.h. The track already cued by a running
+     /// Auto DJ stays first, and the order continues from it.
+     AutoDJError sortPlaylistHarmonic(const QModelIndexList& selectedIndices);
++    /// Requests (a dedication, a guest's wish): puts each track where it fits
++    /// best (harmonicRequestSlot) among the next "[Auto DJ],RequestPositions"
++    /// tracks of the queue (default 5), after the track a running Auto DJ has
++    /// cued already, never at a track loaded in a deck. A track in the queue
++    /// already moves up instead (never down). With "[Auto DJ],RequestKeepOrder"
++    /// a request goes after the earlier ones. Requests are highlighted in the
++    /// queue until they leave it.
++    AutoDJError requestTracks(const QList<TrackId>& trackIds);
++    const QSet<TrackId>& requestedTracks() const {
++        return m_requestedTracks;
++    }
+     AutoDJError skipNext();
+     void fadeNow();
+     AutoDJError toggleAutoDJ(bool enable);
+@@ -289,6 +301,8 @@ class AutoDJProcessor : public QObject {
+     // Removes the provided track from the top of the AutoDJ queue if it is
+     // present.
+     bool removeTrackFromTopOfQueue(TrackPointer pTrack);
++    void requestTrack(TrackId trackId, int positions, bool keepOrder);
++    void setRequestedTracks(const QSet<TrackId>& trackIds);
+     void maybeFillRandomTracks();
+     UserSettingsPointer m_pConfig;
+     parented_ptr<PlaylistTableModel> m_pAutoDJTableModel;
+@@ -299,7 +313,9 @@ class AutoDJProcessor : public QObject {
+     TransitionMode m_transitionMode;
+ 
+     PlayerManagerInterface* m_pPlayerManager;
++    TrackCollectionManager* m_pTrackCollectionManager;
+     std::vector<std::unique_ptr<DeckAttributes>> m_decks;
++    QSet<TrackId> m_requestedTracks;
+ 
+     ControlProxy m_coCrossfader;
+     PollingControlProxy m_coCrossfaderReverse;
+diff --git a/src/library/autodj/harmonicorder.h b/src/library/autodj/harmonicorder.h
+index eaf9e948..40cbb3fb 100644
+--- a/src/library/autodj/harmonicorder.h
++++ b/src/library/autodj/harmonicorder.h
+@@ -119,5 +119,43 @@ inline QList<int> harmonicOrder(const QList<HarmonicTrack>& tracks,
+     return order;
+ }
+ 
++/// Where to put a requested track `request` in `queue` (the tracks that play
++/// after `previous`, in order): the slot in [first, last] (slot i = before
++/// queue[i], queue.size() = after the last one) that adds the least to the
++/// summed transition costs (harmonicTransitionCost), plus `slotCost` per slot
++/// so that, for a similar fit, the request plays sooner. Ties take the
++/// earlier slot. `last` is clamped to queue.size(), `first` to [0, last].
++inline int harmonicRequestSlot(const QList<HarmonicTrack>& queue,
++        const HarmonicTrack& request,
++        const std::optional<HarmonicTrack>& previous,
++        int first,
++        int last,
++        double slotCost = 1.0) {
++    last = std::clamp(last, 0, static_cast<int>(queue.size()));
++    first = std::clamp(first, 0, last);
++    int bestSlot = first;
++    double bestCost = 0.0;
++    for (int slot = first; slot <= last; ++slot) {
++        const HarmonicTrack* pBefore = slot > 0 ? &queue[slot - 1]
++                                                : (previous ? &*previous : nullptr);
++        const HarmonicTrack* pAfter = slot < queue.size() ? &queue[slot] : nullptr;
++        double cost = slotCost * (slot - first);
++        if (pBefore) {
++            cost += harmonicTransitionCost(*pBefore, request);
++        }
++        if (pAfter) {
++            cost += harmonicTransitionCost(request, *pAfter);
++        }
++        if (pBefore && pAfter) {
++            cost -= harmonicTransitionCost(*pBefore, *pAfter);
++        }
++        if (slot == first || cost < bestCost) {
++            bestCost = cost;
++            bestSlot = slot;
++        }
++    }
++    return bestSlot;
++}
++
+ } // namespace autodj
+ } // namespace mixxx
+diff --git a/src/library/basetracktablemodel.cpp b/src/library/basetracktablemodel.cpp
+index 6a9200ed..36ba3521 100644
+--- a/src/library/basetracktablemodel.cpp
++++ b/src/library/basetracktablemodel.cpp
+@@ -366,6 +366,13 @@ QVariant BaseTrackTableModel::data(
+         return QVariant();
+     }
+ 
++    if (role == Qt::BackgroundRole || role == Qt::FontRole) {
++        QVariant highlight = highlightValue(index, role);
++        if (highlight.isValid()) {
++            return highlight;
++        }
++    }
++
+     if (role == Qt::BackgroundRole) {
+         const auto rgbColorValue = rawSiblingValue(
+                 index,
+diff --git a/src/library/basetracktablemodel.h b/src/library/basetracktablemodel.h
+index 02cd41af..c4b67a8a 100644
+--- a/src/library/basetracktablemodel.h
++++ b/src/library/basetracktablemodel.h
+@@ -220,6 +220,16 @@ class BaseTrackTableModel : public QAbstractTableModel, public TrackModel {
+     virtual QVariant rawValue(
+             const QModelIndex& index) const = 0;
+ 
++    /// A Qt::BackgroundRole or Qt::FontRole value that overrides the track's
++    /// own (e.g. to highlight rows), or an invalid QVariant.
++    virtual QVariant highlightValue(
++            const QModelIndex& index,
++            int role) const {
++        Q_UNUSED(index);
++        Q_UNUSED(role);
++        return QVariant();
++    }
++
+     QVariant roleValue(
+             const QModelIndex& index,
+             QVariant&& rawValue,
+diff --git a/src/library/dao/playlistdao.cpp b/src/library/dao/playlistdao.cpp
+index 377c05be..2e83cf33 100644
+--- a/src/library/dao/playlistdao.cpp
++++ b/src/library/dao/playlistdao.cpp
+@@ -1418,5 +1418,12 @@ void PlaylistDAO::addTracksToAutoDJQueue(const QList<TrackId>& trackIds, AutoDJS
+             appendTracksToPlaylist(trackIds, iAutoDJPlaylistId);
+         }
+         break;
++    case AutoDJSendLoc::REQUEST:
++        if (m_pAutoDJProcessor) {
++            m_pAutoDJProcessor->requestTracks(trackIds);
++        } else {
++            appendTracksToPlaylist(trackIds, iAutoDJPlaylistId);
++        }
++        break;
+     }
+ }
+diff --git a/src/library/dao/playlistdao.h b/src/library/dao/playlistdao.h
+index 8de07a88..50d713e1 100644
+--- a/src/library/dao/playlistdao.h
++++ b/src/library/dao/playlistdao.h
+@@ -27,6 +27,9 @@ class PlaylistDAO : public QObject, public virtual DAO {
+         TOP,
+         BOTTOM,
+         REPLACE,
++        /// A request: AutoDJProcessor::requestTracks() puts each track where
++        /// it fits best among the next tracks (or moves it there if queued).
++        REQUEST,
+     };
+ 
+     PlaylistDAO();
+diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
+index a6b8a5e2..3acb98eb 100644
+--- a/src/library/librarycontrol.cpp
++++ b/src/library/librarycontrol.cpp
+@@ -284,6 +284,18 @@ LibraryControl::LibraryControl(Library* pLibrary)
+                 &LibraryControl::slotAutoDjAddReplace);
+     }
+ 
++    m_pAutoDjAddRequest = std::make_unique<ControlPushButton>(
++            ConfigKey("[Library]", "AutoDjAddRequest"));
++#ifdef MIXXX_USE_QML
++    if (!CmdlineArgs::Instance().isQml())
++#endif
++    {
++        connect(m_pAutoDjAddRequest.get(),
++                &ControlPushButton::valueChanged,
++                this,
++                &LibraryControl::slotAutoDjAddRequest);
++    }
++
+     // Sort controls
+     m_pSortColumn = std::make_unique<ControlEncoder>(ConfigKey("[Library]", "sort_column"));
+     m_pSortOrder = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "sort_order"));
+@@ -657,6 +669,17 @@ void LibraryControl::slotAutoDjAddReplace(double v) {
+     }
+ }
+ 
++void LibraryControl::slotAutoDjAddRequest(double v) {
++    if (!m_pLibraryWidget || v <= 0) {
++        return;
++    }
++
++    WTrackTableView* pTrackTableView = m_pLibraryWidget->getCurrentTrackTableView();
++    if (pTrackTableView) {
++        pTrackTableView->addToAutoDJRequest();
++    }
++}
++
+ void LibraryControl::slotSelectNextTrack(double v) {
+     if (v > 0) {
+         slotSelectTrack(1);
+diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
+index 65e21013..4eb30202 100644
+--- a/src/library/librarycontrol.h
++++ b/src/library/librarycontrol.h
+@@ -100,6 +100,7 @@ class LibraryControl : public QObject {
+     void slotAutoDjAddTop(double v);
+     void slotAutoDjAddBottom(double v);
+     void slotAutoDjAddReplace(double v);
++    void slotAutoDjAddRequest(double v);
+ 
+     void maybeCreateGroupController(const QString& group);
+     void slotNumDecksChanged(double v);
+@@ -155,6 +156,7 @@ class LibraryControl : public QObject {
+     std::unique_ptr<ControlObject> m_pAutoDjAddTop;
+     std::unique_ptr<ControlObject> m_pAutoDjAddBottom;
+     std::unique_ptr<ControlObject> m_pAutoDjAddReplace;
++    std::unique_ptr<ControlObject> m_pAutoDjAddRequest;
+ 
+     // Controls to sort the track view
+     std::unique_ptr<ControlEncoder> m_pSortColumn;
+diff --git a/src/library/playlisttablemodel.cpp b/src/library/playlisttablemodel.cpp
+index d3bd9aff..8e37587a 100644
+--- a/src/library/playlisttablemodel.cpp
++++ b/src/library/playlisttablemodel.cpp
+@@ -4,6 +4,9 @@
+ #include "library/dao/trackschema.h"
+ #include "library/queryutil.h"
+ #include "util/assert.h"
++
++#include <QBrush>
++#include <QFont>
+ #include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+ #include "moc_playlisttablemodel.cpp"
+@@ -344,6 +347,34 @@ void PlaylistTableModel::shuffleTracks(const QModelIndexList& shuffle, const QMo
+     m_pTrackCollectionManager->internalCollection()->getPlaylistDAO().shuffleTracks(m_iPlaylistId, positions, allIds);
+ }
+ 
++void PlaylistTableModel::setHighlightedTracks(const QSet<TrackId>& trackIds) {
++    if (trackIds == m_highlightedTracks) {
++        return;
++    }
++    m_highlightedTracks = trackIds;
++    if (rowCount() > 0 && columnCount() > 0) {
++        emit dataChanged(index(0, 0),
++                index(rowCount() - 1, columnCount() - 1),
++                {Qt::BackgroundRole, Qt::FontRole});
++    }
++}
++
++QVariant PlaylistTableModel::highlightValue(const QModelIndex& index, int role) const {
++    if (m_highlightedTracks.isEmpty() || !m_highlightedTracks.contains(getTrackId(index))) {
++        return QVariant();
++    }
++    if (role == Qt::BackgroundRole) {
++        // amber, translucent like the track colors
++        return QBrush(QColor(240, 160, 32, 110));
++    }
++    if (role == Qt::FontRole) {
++        QFont font;
++        font.setBold(true);
++        return font;
++    }
++    return QVariant();
++}
++
+ void PlaylistTableModel::reorderTracks(const QModelIndexList& rows, const QList<int>& order) {
+     VERIFY_OR_DEBUG_ASSERT(rows.size() == order.size()) {
+         return;
+diff --git a/src/library/playlisttablemodel.h b/src/library/playlisttablemodel.h
+index cdaaffb6..4bea4088 100644
+--- a/src/library/playlisttablemodel.h
++++ b/src/library/playlisttablemodel.h
+@@ -25,6 +25,9 @@ class PlaylistTableModel final : public TrackSetTableModel {
+     /// Reorders the given rows (all at the same positions they take now):
+     /// rows[order[0]] first, then rows[order[1]], ...
+     void reorderTracks(const QModelIndexList& rows, const QList<int>& order);
++    /// Rows of these tracks get a highlight background and bold text (the
++    /// Auto DJ requests).
++    void setHighlightedTracks(const QSet<TrackId>& trackIds);
+ 
+     bool isColumnInternal(int column) final;
+     bool isColumnHiddenByDefault(int column) final;
+@@ -50,10 +53,14 @@ class PlaylistTableModel final : public TrackSetTableModel {
+   signals:
+     void firstTrackChanged();
+ 
++  protected:
++    QVariant highlightValue(const QModelIndex& index, int role) const final;
++
+   private:
+     void initSortColumnMapping() override;
+ 
+     int m_iPlaylistId;
+     bool m_keepHiddenTracks;
+     QHash<int, QString> m_searchTexts;
++    QSet<TrackId> m_highlightedTracks;
+ };
+diff --git a/src/preferences/dialog/dlgprefautodj.cpp b/src/preferences/dialog/dlgprefautodj.cpp
+index 9c23ae92..a82898a2 100644
+--- a/src/preferences/dialog/dlgprefautodj.cpp
++++ b/src/preferences/dialog/dlgprefautodj.cpp
+@@ -81,6 +81,12 @@ DlgPrefAutoDJ::DlgPrefAutoDJ(QWidget* pParent,
+             this,
+             &DlgPrefAutoDJ::slotSetRandomQueueMin);
+ 
++    // Requests: applied with the dialog (slotApply)
++    RequestPositionsSpinBox->setValue(m_pConfig->getValue(
++            ConfigKey("[Auto DJ]", "RequestPositions"), 5));
++    RequestKeepOrderCheckBox->setChecked(m_pConfig->getValue(
++            ConfigKey("[Auto DJ]", "RequestKeepOrder"), false));
++
+     setScrollSafeGuardForAllInputWidgets(this);
+ }
+ 
+@@ -106,10 +112,19 @@ void DlgPrefAutoDJ::slotApply() {
+     m_pConfig->setValue(ConfigKey("[Auto DJ]", "EnableRandomQueue"),
+             m_pConfig->getValue(
+                     ConfigKey("[Auto DJ]", "EnableRandomQueueBuff"), false));
++
++    m_pConfig->setValue(ConfigKey("[Auto DJ]", "RequestPositions"),
++            RequestPositionsSpinBox->value());
++    m_pConfig->setValue(ConfigKey("[Auto DJ]", "RequestKeepOrder"),
++            RequestKeepOrderCheckBox->isChecked());
+ }
+ 
+ void DlgPrefAutoDJ::slotCancel() {
+     // Load actual values and reset Buffer Values where ever needed
++    RequestPositionsSpinBox->setValue(m_pConfig->getValue(
++            ConfigKey("[Auto DJ]", "RequestPositions"), 5));
++    RequestKeepOrderCheckBox->setChecked(m_pConfig->getValue(
++            ConfigKey("[Auto DJ]", "RequestKeepOrder"), false));
+     MinimumAvailableSpinBox->setValue(
+             m_pConfig->getValue(
+                     ConfigKey("[Auto DJ]", "MinimumAvailable"), 20));
+@@ -164,6 +179,9 @@ void DlgPrefAutoDJ::slotResetToDefaults() {
+     m_pConfig->setValue(ConfigKey("[Auto DJ]", "EnableRandomQueueBuff"), false);
+     RandomQueueMinimumSpinBox->setEnabled(false);
+     RandomQueueCheckBox->setEnabled(true);
++
++    RequestPositionsSpinBox->setValue(5);
++    RequestKeepOrderCheckBox->setChecked(false);
+ }
+ 
+ void DlgPrefAutoDJ::slotSetMinimumAvailable(int a_iValue) {
+diff --git a/src/preferences/dialog/dlgprefautodjdlg.ui b/src/preferences/dialog/dlgprefautodjdlg.ui
+index 05542aaf..df81a515 100644
+--- a/src/preferences/dialog/dlgprefautodjdlg.ui
++++ b/src/preferences/dialog/dlgprefautodjdlg.ui
+@@ -257,6 +257,105 @@
+     </widget>
+    </item>
+ 
++   <item>
++    <widget class="QGroupBox" name="RequestOptions">
++      <property name="title">
++       <string>Requests</string>
++      </property>
++      <property name="alignment">
++       <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
++      </property>
++      <layout class="QGridLayout" name="RequestGridLayout">
++
++       <item row="0" column="0">
++        <widget class="QLabel" name="RequestPositionsLabel">
++         <property name="sizePolicy">
++          <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
++           <horstretch>0</horstretch>
++           <verstretch>0</verstretch>
++          </sizepolicy>
++         </property>
++         <property name="text">
++          <string>Play a request within the next tracks</string>
++         </property>
++         <property name="buddy">
++          <cstring>RequestPositionsSpinBox</cstring>
++         </property>
++        </widget>
++       </item>
++
++       <item row="0" column="1">
++        <widget class="QSpinBox" name="RequestPositionsSpinBox">
++         <property name="toolTip">
++          <string>A request (Add to Auto DJ Queue (request)) goes where it fits best by key and tempo among this many next tracks of the queue.</string>
++         </property>
++         <property name="minimum">
++          <number>1</number>
++         </property>
++         <property name="maximum">
++          <number>50</number>
++         </property>
++         <property name="value">
++          <number>5</number>
++         </property>
++         <property name="minimumSize">
++          <size>
++           <width>60</width>
++           <height>0</height>
++          </size>
++         </property>
++         <property name="maximumSize">
++          <size>
++           <width>80</width>
++           <height>16777215</height>
++          </size>
++         </property>
++        </widget>
++       </item>
++
++       <item row="1" column="0">
++        <widget class="QLabel" name="RequestKeepOrderLabel">
++         <property name="sizePolicy">
++          <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
++           <horstretch>0</horstretch>
++           <verstretch>0</verstretch>
++          </sizepolicy>
++         </property>
++         <property name="text">
++          <string>Play requests in the order they came</string>
++         </property>
++         <property name="buddy">
++          <cstring>RequestKeepOrderCheckBox</cstring>
++         </property>
++        </widget>
++       </item>
++
++       <item row="1" column="1">
++        <widget class="QCheckBox" name="RequestKeepOrderCheckBox">
++         <property name="toolTip">
++          <string>Unchecked, a request may play before an earlier one if it fits better.</string>
++         </property>
++        </widget>
++       </item>
++
++       <item row="1" column="2">
++        <spacer name="horizontalSpacerRequest">
++         <property name="orientation">
++          <enum>Qt::Horizontal</enum>
++         </property>
++          <property name="sizePolicy">
++           <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
++            <horstretch>1</horstretch>
++            <verstretch>0</verstretch>
++           </sizepolicy>
++          </property>
++        </spacer>
++       </item>
++
++      </layout>
++    </widget>
++   </item>
++
+    <item>
+     <spacer name="verticalSpacer">
+      <property name="orientation">
+diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
+index d49f180c..9b85871e 100644
+--- a/src/test/autodjprocessor_test.cpp
++++ b/src/test/autodjprocessor_test.cpp
+@@ -1770,3 +1770,97 @@ TEST_F(AutoDJProcessorTest, SortHarmonic) {
+     EXPECT_EQ(tracks[1]->getId(), pAutoDJTableModel->getTrackId(pAutoDJTableModel->index(1, 0)));
+     EXPECT_EQ(tracks[0]->getId(), pAutoDJTableModel->getTrackId(pAutoDJTableModel->index(2, 0)));
+ }
++
++TEST(AutoDJHarmonicOrderTest, RequestSlot) {
++    using mixxx::autodj::harmonicRequestSlot;
++    const QList<HarmonicTrack> queue = {
++            {124.0, key::A_MINOR},       // 0
++            {128.0, key::F_SHARP_MAJOR}, // 1: far key
++            {124.0, key::G_MAJOR},       // 2
++            {126.0, key::E_MINOR},       // 3
++    };
++    const HarmonicTrack previous{120.0, key::C_MAJOR};
++    // F# major at 128 BPM fits best next to the other F# major track
++    EXPECT_EQ(1, harmonicRequestSlot(queue, {128.0, key::F_SHARP_MAJOR}, previous, 0, 4));
++    // E minor at 126 after G major at 124 (or after the E minor track: the
++    // same fit, the earlier slot wins)...
++    const QList<HarmonicTrack> smooth = {
++            {124.0, key::A_MINOR},
++            {124.0, key::G_MAJOR},
++            {126.0, key::E_MINOR},
++    };
++    EXPECT_EQ(2, harmonicRequestSlot(smooth, {126.0, key::E_MINOR}, previous, 0, 3));
++    // ...but not beyond the last allowed slot
++    EXPECT_EQ(1, harmonicRequestSlot(smooth, {126.0, key::E_MINOR}, previous, 0, 1));
++    // nor before the first one (keep the order of requests)
++    EXPECT_EQ(2, harmonicRequestSlot(queue, {128.0, key::F_SHARP_MAJOR}, previous, 2, 4));
++    // Equal fit everywhere (nothing known): the earliest slot
++    EXPECT_EQ(0, harmonicRequestSlot(QList<HarmonicTrack>(4), {}, std::nullopt, 0, 4));
++    // Empty queue
++    EXPECT_EQ(0, harmonicRequestSlot({}, {120.0, key::C_MAJOR}, previous, 0, 4));
++}
++
++TEST_F(AutoDJProcessorTest, Request) {
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    const QList<std::pair<QString, std::pair<double, key::ChromaticKey>>> files = {
++            {"id3-test-data/cover-test-jpg.mp3", {124.0, key::A_MINOR}},
++            {"id3-test-data/cover-test-png.mp3", {128.0, key::F_SHARP_MAJOR}},
++            {"id3-test-data/cover-test-vbr.mp3", {124.0, key::G_MAJOR}},
++            {"id3-test-data/artist.mp3", {126.0, key::E_MINOR}},
++            {"id3-test-data/TOAL_TPE2.mp3", {130.0, key::D_FLAT_MAJOR}},
++            {"id3-test-data/cover-test.flac", {128.0, key::F_SHARP_MAJOR}},
++            {"id3-test-data/cover-test.ogg", {126.0, key::E_MINOR}},
++    };
++    QList<TrackPointer> tracks;
++    for (const auto& [location, bpmKey] : files) {
++        TrackPointer pTrack = getOrAddTrackByLocation(getTestDir().filePath(location));
++        ASSERT_TRUE(pTrack);
++        pTrack->trySetBpm(bpmKey.first);
++        pTrack->setKey(bpmKey.second, mixxx::track::io::key::USER);
++        tracks.append(pTrack);
++    }
++    // Queue: A minor, F# major, G major, E minor, Db major (tracks 0-4)
++    for (int i = 0; i < 5; ++i) {
++        pAutoDJTableModel->appendTrack(tracks[i]->getId());
++    }
++    const auto queue = [pAutoDJTableModel]() {
++        pAutoDJTableModel->select();
++        QList<TrackId> ids;
++        for (int row = 0; row < pAutoDJTableModel->rowCount(); ++row) {
++            ids.append(pAutoDJTableModel->getTrackId(pAutoDJTableModel->index(row, 0)));
++        }
++        return ids;
++    };
++    const auto id = [&tracks](int i) {
++        return tracks[i]->getId();
++    };
++
++    // A new F# major request goes next to the queued F# major track (before
++    // it: the same fit, sooner)
++    pProcessor->requestTracks({id(5)});
++    EXPECT_EQ(QList<TrackId>({id(0), id(5), id(1), id(2), id(3), id(4)}), queue());
++    EXPECT_TRUE(pProcessor->requestedTracks().contains(id(5)));
++
++    // A queued track moves up, at most into the first two positions here
++    config()->set(ConfigKey("[Auto DJ]", "RequestPositions"), QString("2"));
++    pProcessor->requestTracks({id(4)});
++    const QList<TrackId> moved = queue();
++    ASSERT_EQ(6, moved.size());
++    EXPECT_TRUE(moved.indexOf(id(4)) < 2);
++    // and never down
++    const int before = moved.indexOf(id(0));
++    pProcessor->requestTracks({id(0)});
++    EXPECT_TRUE(queue().indexOf(id(0)) <= before);
++
++    // Keep the order of requests: after the last request
++    config()->set(ConfigKey("[Auto DJ]", "RequestKeepOrder"), QString("1"));
++    config()->set(ConfigKey("[Auto DJ]", "RequestPositions"), QString("1"));
++    pProcessor->requestTracks({id(6)});
++    const QList<TrackId> ordered = queue();
++    int lastEarlierRequest = -1;
++    for (const TrackId& requested : {id(5), id(4), id(0)}) {
++        lastEarlierRequest = std::max(lastEarlierRequest,
++                static_cast<int>(ordered.indexOf(requested)));
++    }
++    EXPECT_EQ(lastEarlierRequest + 1, ordered.indexOf(id(6)));
++}
+diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
+index e43c1413..ed536d61 100644
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -1570,6 +1570,24 @@ void WTrackTableView::addToAutoDJReplace() {
+     addToAutoDJ(PlaylistDAO::AutoDJSendLoc::REPLACE);
+ }
+ 
++void WTrackTableView::addToAutoDJRequest() {
++    // No AddToAutoDJ capability check: the Auto DJ queue itself lacks it, and
++    // a request from there moves a queued track up.
++    if (!getTrackModel()) {
++        return;
++    }
++    const QList<TrackId> trackIds = getSelectedTrackIds();
++    if (trackIds.isEmpty()) {
++        qWarning() << "No tracks selected for an Auto DJ request";
++        return;
++    }
++    m_pLibrary->trackCollectionManager()->unhideTracks(trackIds);
++    m_pLibrary->trackCollectionManager()
++            ->internalCollection()
++            ->getPlaylistDAO()
++            .addTracksToAutoDJQueue(trackIds, PlaylistDAO::AutoDJSendLoc::REQUEST);
++}
++
+ void WTrackTableView::selectTrack(const TrackId& trackId) {
+     if (trackId.isValid() && setCurrentTrackId(trackId, 0, true)) {
+         setSelectedTracks({trackId});
+diff --git a/src/widget/wtracktableview.h b/src/widget/wtracktableview.h
+index 1bead4a5..f17bee9a 100644
+--- a/src/widget/wtracktableview.h
++++ b/src/widget/wtracktableview.h
+@@ -54,6 +54,10 @@ class WTrackTableView : public WLibraryTableView {
+     void addToAutoDJBottom();
+     void addToAutoDJTop();
+     void addToAutoDJReplace();
++    /// Auto DJ request: the selected tracks go where they fit best among the
++    /// next tracks of the queue, or move there if queued already. Works in the
++    /// Auto DJ view too.
++    void addToAutoDJRequest();
+     void selectTrack(const TrackId&);
+ 
+     void removeSelectedTracks();
