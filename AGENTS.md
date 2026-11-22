@@ -549,8 +549,14 @@ library lists: Mixxx patch 0012 (`DECKSMITHOS_TOUCH_SCROLL`, set by
 `decksmithos-mixxx`), unverified on the panel. The browse tree shows only
 CONSOLE (`/storage/library`), USB and USB2, the USB entries only while a
 drive is mounted (patch 0013, `DECKSMITHOS_BROWSE_SOURCES`). The search
-box shows an on-screen keyboard while focused (patch 0014,
-`DECKSMITHOS_TOUCH_KEYBOARD`; Mixxx has none on Linux). Auto DJ
+box and every other text field show an on-screen keyboard while focused
+(patch 0014, `DECKSMITHOS_TOUCH_KEYBOARD`; Mixxx has none on Linux). The
+sidebar sections can be ordered, hidden and renamed (Preferences > Library >
+Sidebar, patch 0015); `decksmithos-mixxx-autoconf` sets the order Sources,
+Playlists, History, Crates, Recordings, Tracks, Auto DJ, Rekordbox, Serato,
+Analyze and hides iTunes. The top bar (SOURCE, PLAYLIST, BROWSE, TAG LIST,
+SEARCH, MENU, BACK) opens sections with `[Library],show_<key>` through the
+skin bridge; SEARCH searches Tracks (all music). Auto DJ
 requests: patch 0010 (`[Library],AutoDjAddRequest`, REQUEST button in the
 library), one console button learned from the skin's MENU page (0011).
 Remaining touch work: small

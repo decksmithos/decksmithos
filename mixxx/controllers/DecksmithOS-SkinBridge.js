@@ -9,10 +9,13 @@
 // controls while it loads, which can be after this script starts, so each
 // missing control is retried every second (up to two minutes).
 //
-//   [Skin],dsm_nav_search     library page, focus on the search box
-//   [Skin],dsm_nav_source     library page, sidebar on Computer (folders, USB)
-//   [Skin],dsm_nav_playlist   library page, sidebar on Playlists
-//   [Skin],dsm_nav_taglist    library page, sidebar on Auto DJ (the queue)
+//   [Skin],dsm_nav_source     library page, Sources (console music, USB)
+//   [Skin],dsm_nav_playlist   library page, Playlists
+//   [Skin],dsm_nav_browse     library page as it was left
+//   [Skin],dsm_nav_taglist    library page, Auto DJ (the queue)
+//   [Skin],dsm_nav_search     library page, Tracks (all music), focus on
+//                             the search box
+//   The sections are opened with [Library],show_<key> (Mixxx patch 0015).
 //   [Skin],dsm_xpad_<n>       X-PAD: while held, the BEAT FX effect
 //                             ([EffectRack1_EffectUnit1], focused effect or
 //                             effect 1) is on with its time (parameter 1) at
@@ -29,7 +32,7 @@ var DecksmithSkin = {};
 
 DecksmithSkin.XPAD_BEATS = [1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2, 3 / 4, 1, 2];
 DecksmithSkin.RFX = ["brake_s", "brake_l", "spin_s", "spin_l", "mute", "duck", "buildup"];
-DecksmithSkin.NAV = ["search", "source", "playlist", "taglist"];
+DecksmithSkin.NAV = ["search", "source", "playlist", "taglist", "browse"];
 DecksmithSkin.DECKS = 2; // the skin has RELEASE FX pads for decks 1 and 2
 DecksmithSkin.RETRY_MS = 1000;
 DecksmithSkin.RETRY_MAX = 120;
@@ -112,31 +115,28 @@ DecksmithSkin.retryPending = function() {
 
 // --- Navigation --------------------------------------------------------------
 
-// Sidebar rows below the first one (Tracks), in Mixxx 2.5's order: Tracks,
-// Auto DJ, Playlists, Crates, Computer, ...
-DecksmithSkin.SIDEBAR_ROW = {source: 4, playlist: 2, taglist: 1};
+// Library sections by key ([Library],show_<key>, Mixxx patch 0015)
+DecksmithSkin.SECTION = {
+    source: "computer",
+    playlist: "playlist",
+    taglist: "autodj",
+    search: "tracks",
+};
 
 DecksmithSkin.navigate = function(name) {
     engine.setValue("[Skin]", "show_maximized_library", 1);
-    if (name === "search") {
-        engine.setValue("[Library]", "focused_widget", 1); // search box
-        return;
+    var section = this.SECTION[name];
+    if (section === undefined) {
+        return; // BROWSE: the library page as it was left
     }
-    // SOURCE: Computer (folders, USB drives); PLAYLIST: Playlists;
-    // TAG LIST: Auto DJ (the queue)
-    engine.setValue("[Sidebar]", "sidebar_visible", 1);
-    engine.setValue("[Library]", "focused_widget", 2); // sidebar
-    var row = this.SIDEBAR_ROW[name];
-    engine.beginTimer(100, function() {
-        // In the sidebar MoveVertical moves one row per call, whatever the value
-        for (var i = 0; i < 20; i++) {
-            engine.setValue("[Library]", "MoveVertical", -1); // to the top
-        }
-        for (var j = 0; j < row; j++) {
-            engine.setValue("[Library]", "MoveVertical", 1);
-        }
-        engine.setValue("[Library]", "GoToItem", 1);
-    }, true);
+    engine.setValue("[Library]", "show_" + section, 1);
+    engine.setValue("[Library]", "show_" + section, 0);
+    if (name === "search") {
+        // after the view switch has been handled
+        engine.beginTimer(100, function() {
+            engine.setValue("[Library]", "focused_widget", 1); // search box
+        }, true);
+    }
 };
 
 // --- X-PAD -------------------------------------------------------------------

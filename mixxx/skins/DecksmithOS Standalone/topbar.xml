@@ -2,12 +2,15 @@
      hardware buttons above the screen) on the left, recording status, clock
      and master level on the right. 48 px tall.
 
-     Navigation:
-       BROWSE    library page ([Skin],show_maximized_library); BACK there
-       SEARCH    library page, focus on the search box     } skin bridge
-       SOURCE / PLAYLIST / TAG LIST  library page, sidebar } (mixxx/controllers/
-                                                           DecksmithOS-SkinBridge.js)
-       MENU      skin settings page ([Tab],shortcut) -->
+     Navigation (all but MENU and BACK through the skin bridge,
+     mixxx/controllers/DecksmithOS-SkinBridge.js):
+       SOURCE    library page, Sources (console music, USB drives)
+       PLAYLIST  library page, Playlists
+       BROWSE    library page as it was left
+       TAG LIST  library page, Auto DJ (the queue)
+       SEARCH    library page, Tracks (all music), focus on the search box
+       MENU      skin settings page ([Tab],shortcut)
+       BACK      back to the main page; shown on the library page only -->
 <Template>
   <WidgetGroup>
     <ObjectName>Topbar</ObjectName>
@@ -23,33 +26,43 @@
         <SetVariable name="objname">TopNavBtnPlain</SetVariable>
         <SetVariable name="push">true</SetVariable>
       </Template>
+      <Template src="skin:topnav_button.xml">
+        <SetVariable name="label">PLAYLIST</SetVariable>
+        <SetVariable name="key">[Skin],dsm_nav_playlist</SetVariable>
+        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="push">true</SetVariable>
+      </Template>
+      <Template src="skin:topnav_button.xml">
+        <SetVariable name="label">BROWSE</SetVariable>
+        <SetVariable name="key">[Skin],dsm_nav_browse</SetVariable>
+        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="push">true</SetVariable>
+      </Template>
+      <Template src="skin:topnav_button.xml">
+        <SetVariable name="label">TAG LIST</SetVariable>
+        <SetVariable name="key">[Skin],dsm_nav_taglist</SetVariable>
+        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="push">true</SetVariable>
+      </Template>
+      <Template src="skin:topnav_button.xml">
+        <SetVariable name="label">SEARCH</SetVariable>
+        <SetVariable name="key">[Skin],dsm_nav_search</SetVariable>
+        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="push">true</SetVariable>
+      </Template>
+      <Template src="skin:topnav_button.xml">
+        <SetVariable name="label">MENU</SetVariable>
+        <SetVariable name="key">[Tab],shortcut</SetVariable>
+        <SetVariable name="objname">TopNavBtn</SetVariable>
+        <SetVariable name="push">false</SetVariable>
+      </Template>
 
-      <!-- BROWSE on the main page, BACK on the library page -->
+      <!-- BACK: last, only on the library page (its place stays reserved so
+           the other buttons do not move) -->
       <WidgetGroup>
-        <Layout>stacked</Layout>
+        <Layout>horizontal</Layout>
         <Size>116f,48f</Size>
         <Children>
-          <WidgetGroup>
-            <Layout>horizontal</Layout>
-            <Size>116f,48f</Size>
-            <Children>
-              <PushButton>
-                <ObjectName>TopNavBtn</ObjectName>
-                <Size>110f,38f</Size>
-                <NumberStates>2</NumberStates>
-                <State><Number>0</Number><Text>BROWSE</Text></State>
-                <State><Number>1</Number><Text>BROWSE</Text></State>
-                <Connection>
-                  <ConfigKey>[Skin],show_maximized_library</ConfigKey>
-                </Connection>
-              </PushButton>
-            </Children>
-            <Connection>
-              <ConfigKey>[Skin],show_maximized_library</ConfigKey>
-              <BindProperty>visible</BindProperty>
-              <Transform><Not/></Transform>
-            </Connection>
-          </WidgetGroup>
           <WidgetGroup>
             <Layout>horizontal</Layout>
             <Size>116f,48f</Size>
@@ -72,31 +85,6 @@
           </WidgetGroup>
         </Children>
       </WidgetGroup>
-
-      <Template src="skin:topnav_button.xml">
-        <SetVariable name="label">TAG LIST</SetVariable>
-        <SetVariable name="key">[Skin],dsm_nav_taglist</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
-        <SetVariable name="push">true</SetVariable>
-      </Template>
-      <Template src="skin:topnav_button.xml">
-        <SetVariable name="label">PLAYLIST</SetVariable>
-        <SetVariable name="key">[Skin],dsm_nav_playlist</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
-        <SetVariable name="push">true</SetVariable>
-      </Template>
-      <Template src="skin:topnav_button.xml">
-        <SetVariable name="label">SEARCH</SetVariable>
-        <SetVariable name="key">[Skin],dsm_nav_search</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
-        <SetVariable name="push">true</SetVariable>
-      </Template>
-      <Template src="skin:topnav_button.xml">
-        <SetVariable name="label">MENU</SetVariable>
-        <SetVariable name="key">[Tab],shortcut</SetVariable>
-        <SetVariable name="objname">TopNavBtn</SetVariable>
-        <SetVariable name="push">false</SetVariable>
-      </Template>
 
       <WidgetGroup><Size>0me,48f</Size></WidgetGroup>
 

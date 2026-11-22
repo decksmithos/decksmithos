@@ -13,6 +13,12 @@ Settings written to mixxx.cfg:
                          the Auto DJ transitions script (mapping
                          DecksmithOS-AutoDJ.midi.xml) on the virtual MIDI
                          device (snd-virmidi, card 7)
+  [Library] SidebarOrder  library sections: Sources, Playlists, History,
+                         Crates, Recordings, Tracks, Auto DJ, Rekordbox,
+                         Serato, Analyze (Mixxx patch 0015; changeable in
+                         Preferences > Library > Sidebar)
+  [Library] ShowITunesLibrary 0
+                         no iTunes section (no iTunes on the device)
   [Config] ResizableSkin  a skin chosen in the system menu
                          (decksmithos-mixxx-ui set-skin leaves it in
                          decksmithos-pending-skin; applied here because Mixxx
@@ -47,6 +53,8 @@ DISPLAY_CONF = "/etc/decksmithos/display.conf"
 # "VirMIDI 7-0" with spaces replaced (ControllerManager sanitizeDeviceName).
 AUTODJ_DEVICE = "VirMIDI_7-0"
 AUTODJ_MAPPING = "/usr/share/mixxx/controllers/DecksmithOS-AutoDJ.midi.xml"
+# Library sidebar sections by key (icon name), Mixxx patch 0015
+SIDEBAR_ORDER = "computer,playlist,history,crates,recordings,tracks,autodj,rekordbox,serato,prepare"
 
 
 def screen():
@@ -138,6 +146,8 @@ def main():
     if os.path.isfile(AUTODJ_MAPPING):
         wanted[("[Controller]", AUTODJ_DEVICE)] = "1"
         wanted[("[ControllerPreset]", AUTODJ_DEVICE)] = AUTODJ_MAPPING
+    wanted[("[Library]", "SidebarOrder")] = SIDEBAR_ORDER
+    wanted[("[Library]", "ShowITunesLibrary")] = "0"
     if ppmm:
         row = max(ROW_MIN, min(ROW_MAX, round(ROW_MM * ppmm)))
         wanted[("[Library]", "RowHeight")] = str(row)
