@@ -6,8 +6,8 @@
 // DecksmithOS-AutoDJ.midi.xml), so it needs no Mixxx patch and nothing
 // controller-specific. The skin's buttons push [Skin],dsm_* controls (1 while
 // held, 0 on release); this script watches them. The skin creates those
-// controls when it loads, which can be after this script starts, so the
-// connections are retried until they exist.
+// controls while it loads, which can be after this script starts, so each
+// missing control is retried every second (up to two minutes).
 //
 //   [Skin],dsm_nav_search     library page, focus on the search box
 //   [Skin],dsm_nav_source     library page, sidebar on Computer (folders, USB)
@@ -54,30 +54,19 @@ DecksmithSkin.shutdown = function() {
     });
 };
 
+// Connects a [Skin] control, or keeps it for a later retry while the skin is
+// still being built (the skin creates its controls as it parses its files).
 DecksmithSkin.watch = function(key, callback) {
     var c = engine.makeConnection("[Skin]", key, callback);
     if (c === undefined || !c.isConnected) {
-        return false;
+        this.pending.push({key: key, callback: callback});
+        return;
     }
     this.connections.push(c);
-    return true;
 };
 
 DecksmithSkin.connectAll = function() {
-    // The skin's controls exist once the skin is loaded; probe one of them.
-    var probe = engine.makeConnection("[Skin]", "dsm_nav_search", function() {});
-    if (probe === undefined || !probe.isConnected) {
-        if (++this.tries <= this.RETRY_MAX) {
-            engine.beginTimer(this.RETRY_MS, function() {
-                DecksmithSkin.connectAll();
-            }, true);
-        } else {
-            print("DecksmithOS skin bridge: skin controls not found; is the skin loaded?");
-        }
-        return;
-    }
-    probe.disconnect();
-
+    this.pending = [];
     this.NAV.forEach(function(name) {
         DecksmithSkin.watch("dsm_nav_" + name, function(value) {
             if (value > 0) {
@@ -98,6 +87,27 @@ DecksmithSkin.connectAll = function() {
             });
         });
     }
+    this.retryPending();
+};
+
+DecksmithSkin.retryPending = function() {
+    if (this.pending.length === 0) {
+        return;
+    }
+    if (++this.tries > this.RETRY_MAX) {
+        print("DecksmithOS skin bridge: skin controls not found (" +
+              this.pending.map(function(p) { return p.key; }).join(", ") +
+              "); is the DecksmithOS Standalone skin loaded?");
+        return;
+    }
+    engine.beginTimer(this.RETRY_MS, function() {
+        var waiting = DecksmithSkin.pending;
+        DecksmithSkin.pending = [];
+        waiting.forEach(function(p) {
+            DecksmithSkin.watch(p.key, p.callback);
+        });
+        DecksmithSkin.retryPending();
+    }, true);
 };
 
 // --- Navigation --------------------------------------------------------------
