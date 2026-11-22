@@ -17,6 +17,8 @@
 #   bootloader-status  installed and included EEPROM versions (epoch seconds)
 #   bootloader-update  write the included bootloader if it is newer (never older)
 #   timezone-set ZONE  save and apply the time zone (decksmithos-timezone set)
+#   eject SLOT         unmount a USB slot (/usb or /usb2) and detach its disk
+#                      (Mixxx's EJECT buttons, Mixxx patch 0017)
 set -Eeuo pipefail
 
 MIXXX_STOP_SECONDS=15
@@ -177,7 +179,13 @@ case "${1:-}" in
   timezone-set)
     decksmithos-timezone set "${2:-}"
     ;;
+  eject)
+    case "${2:-}" in
+      /usb|/usb2) /usr/local/sbin/decksmithos-usb-mount eject "$2" ;;
+      *) die "eject: unknown slot '${2:-}'" ;;
+    esac
+    ;;
   *)
-    die "usage: decksmithos-system poweroff|reboot|reboot-writable|reboot-readonly|restart-mixxx|slots|try-slot|commit-slot|rootfs-status|update-find|update-check PATH|update-install PATH|bootloader-status|bootloader-update|timezone-set ZONE"
+    die "usage: decksmithos-system poweroff|reboot|reboot-writable|reboot-readonly|restart-mixxx|slots|try-slot|commit-slot|rootfs-status|update-find|update-check PATH|update-install PATH|bootloader-status|bootloader-update|timezone-set ZONE|eject SLOT"
     ;;
 esac

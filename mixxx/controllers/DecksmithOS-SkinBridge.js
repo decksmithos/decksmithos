@@ -9,13 +9,17 @@
 // controls while it loads, which can be after this script starts, so each
 // missing control is retried every second (up to two minutes).
 //
-//   [Skin],dsm_nav_source     library page, Sources (console music, USB)
 //   [Skin],dsm_nav_playlist   library page, Playlists
 //   [Skin],dsm_nav_browse     library page as it was left
-//   [Skin],dsm_nav_taglist    library page, Auto DJ (the queue)
+//   [Skin],dsm_nav_autodj     library page, Auto DJ (the queue)
 //   [Skin],dsm_nav_search     library page, Tracks (all music), focus on
 //                             the search box
-//   The sections are opened with [Library],show_<key> (Mixxx patch 0015).
+//   [Skin],dsm_nav_back       one level up in the sidebar; at the top it
+//                             closes the library page
+//   The button of the section shown is lit ([Skin],dsm_lit_<name>); tapping
+//   it again closes the library page. Sections are opened with
+//   [Library],show_<key> and followed with [Library],active_<key>,
+//   sidebar_up / sidebar_at_top (Mixxx patch 0015).
 //   [Skin],dsm_xpad_<n>       X-PAD: while held, the BEAT FX effect
 //                             ([EffectRack1_EffectUnit1], focused effect or
 //                             effect 1) is on with its time (parameter 1) at
@@ -32,7 +36,7 @@ var DecksmithSkin = {};
 
 DecksmithSkin.XPAD_BEATS = [1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2, 3 / 4, 1, 2];
 DecksmithSkin.RFX = ["brake_s", "brake_l", "spin_s", "spin_l", "mute", "duck", "buildup"];
-DecksmithSkin.NAV = ["search", "source", "playlist", "taglist", "browse"];
+DecksmithSkin.NAV = ["search", "playlist", "autodj", "browse", "back"];
 DecksmithSkin.DECKS = 2; // the skin has RELEASE FX pads for decks 1 and 2
 DecksmithSkin.RETRY_MS = 1000;
 DecksmithSkin.RETRY_MAX = 120;
@@ -59,10 +63,11 @@ DecksmithSkin.shutdown = function() {
 
 // Connects a [Skin] control, or keeps it for a later retry while the skin is
 // still being built (the skin creates its controls as it parses its files).
-DecksmithSkin.watch = function(key, callback) {
-    var c = engine.makeConnection("[Skin]", key, callback);
+DecksmithSkin.watch = function(key, callback, group) {
+    group = group || "[Skin]";
+    var c = engine.makeConnection(group, key, callback);
     if (c === undefined || !c.isConnected) {
-        this.pending.push({key: key, callback: callback});
+        this.pending.push({key: key, callback: callback, group: group});
         return;
     }
     this.connections.push(c);
@@ -90,6 +95,14 @@ DecksmithSkin.connectAll = function() {
             });
         });
     }
+    // Lit buttons follow the library page and its active section
+    var update = function() {
+        DecksmithSkin.updateLit();
+    };
+    this.watch("show_maximized_library", update);
+    Object.keys(this.SECTION).forEach(function(name) {
+        DecksmithSkin.watch("active_" + DecksmithSkin.SECTION[name], update, "[Library]");
+    });
     this.retryPending();
 };
 
@@ -107,7 +120,7 @@ DecksmithSkin.retryPending = function() {
         var waiting = DecksmithSkin.pending;
         DecksmithSkin.pending = [];
         waiting.forEach(function(p) {
-            DecksmithSkin.watch(p.key, p.callback);
+            DecksmithSkin.watch(p.key, p.callback, p.group);
         });
         DecksmithSkin.retryPending();
     }, true);
@@ -117,20 +130,63 @@ DecksmithSkin.retryPending = function() {
 
 // Library sections by key ([Library],show_<key>, Mixxx patch 0015)
 DecksmithSkin.SECTION = {
-    source: "computer",
     playlist: "playlist",
-    taglist: "autodj",
+    autodj: "autodj",
     search: "tracks",
 };
 
+DecksmithSkin.libraryShown = function() {
+    return engine.getValue("[Skin]", "show_maximized_library") > 0;
+};
+
+// The button that is lit: the active section's, or BROWSE for any other
+// section; none on the main page
+DecksmithSkin.litButton = function() {
+    if (!this.libraryShown()) {
+        return null;
+    }
+    var names = Object.keys(this.SECTION);
+    for (var i = 0; i < names.length; i++) {
+        if (engine.getValue("[Library]", "active_" + this.SECTION[names[i]]) > 0) {
+            return names[i];
+        }
+    }
+    return "browse";
+};
+
+DecksmithSkin.updateLit = function() {
+    var lit = this.litButton();
+    ["playlist", "browse", "autodj", "search"].forEach(function(name) {
+        engine.setValue("[Skin]", "dsm_lit_" + name, name === lit ? 1 : 0);
+    });
+};
+
+DecksmithSkin.closeLibrary = function() {
+    engine.setValue("[Skin]", "show_maximized_library", 0);
+};
+
 DecksmithSkin.navigate = function(name) {
+    if (name === "back") {
+        if (engine.getValue("[Library]", "sidebar_at_top") > 0) {
+            this.closeLibrary();
+        } else {
+            engine.setValue("[Library]", "sidebar_up", 1);
+            engine.setValue("[Library]", "sidebar_up", 0);
+        }
+        return;
+    }
+    if (this.litButton() === name) {
+        this.closeLibrary(); // second tap
+        return;
+    }
     engine.setValue("[Skin]", "show_maximized_library", 1);
     var section = this.SECTION[name];
     if (section === undefined) {
+        this.updateLit();
         return; // BROWSE: the library page as it was left
     }
     if (name !== "search") {
-        // the section's lists (CONSOLE / USB, playlists) are in the sidebar
+        // the section's lists are in the sidebar
         engine.setValue("[Sidebar]", "sidebar_visible", 1);
     }
     engine.setValue("[Library]", "show_" + section, 1);

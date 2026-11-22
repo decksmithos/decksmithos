@@ -122,9 +122,17 @@ fi
 export DECKSMITHOS_SOUND_HOTPLUG_HOOK="/usr/local/bin/decksmithos-soundconfig"
 
 # --- Start Mixxx ----------------------------------------------------------------------
-CORES="${DECKSMITHOS_CORES:-2,3}"
+# CPUs: Mixxx's GUI and background threads share 0-2 with the rest of the
+# system; its audio thread moves itself to CPU 3, which nothing else uses
+# (systemd CPUAffinity=0-2, kernel irqaffinity=0-2; Mixxx patch 0018). Track
+# analysis and the library scan run at a lower priority (nice 10), so that
+# they never delay the GUI and the waveforms.
+CORES="${DECKSMITHOS_CORES:-0-2}"
+export DECKSMITHOS_AUDIO_CPUS="${DECKSMITHOS_AUDIO_CPUS:-3}"
+export DECKSMITHOS_BACKGROUND_NICE=10
 ARGS=(--settings-path "${SETTINGS}/")
 
+# Allowed by LimitNICE in decksmithos-session.service
 renice -n -5 $$ >/dev/null 2>&1 || true
 # No blocking dialogs about busy or failing sound devices: Mixxx starts silent
 # instead of waiting for a click (build/mixxx/patches/0004; ignored by an
@@ -139,4 +147,14 @@ export DECKSMITHOS_NO_SOUND_DIALOGS=1
 export DECKSMITHOS_TOUCH_SCROLL=1
 export DECKSMITHOS_TOUCH_KEYBOARD=1
 export DECKSMITHOS_BROWSE_SOURCES="CONSOLE=/storage/library:USB=/usb:USB2=/usb2"
+# EJECT buttons for the USB slots (patch 0017); decksmithos-system is allowed
+# for dj by /etc/sudoers.d/decksmithos-system
+export DECKSMITHOS_DRIVES="/usb:/usb2"
+export DECKSMITHOS_EJECT_COMMAND="sudo -n /usr/local/sbin/decksmithos-system eject"
+# rekordbox / Serato drives: their playlists and crates appear first in
+# Playlists, the rekordbox analysis (grid, cues, loops, key) is applied to
+# their tracks, all gone when the drive is removed (patch 0016); the library
+# scan that a new drive starts shows no window (patch 0019).
+export DECKSMITHOS_USB_IMPORT="/usb:/usb2"
+export DECKSMITHOS_NO_SCAN_DIALOG=1
 exec taskset -c "${CORES}" mixxx "${ARGS[@]}"

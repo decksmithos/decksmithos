@@ -13,10 +13,14 @@ Settings written to mixxx.cfg:
                          the Auto DJ transitions script (mapping
                          DecksmithOS-AutoDJ.midi.xml) on the virtual MIDI
                          device (snd-virmidi, card 7)
-  [Library] SidebarOrder  library sections: Sources, Playlists, History,
-                         Crates, Recordings, Tracks, Auto DJ, Rekordbox,
-                         Serato, Analyze (Mixxx patch 0015; changeable in
+  [Library] SidebarOrder  library sections: Playlists, Auto DJ, History,
+                         Crates, Recordings, Tracks, Rekordbox, Serato,
+                         Analyze (Mixxx patch 0015; changeable in
                          Preferences > Library > Sidebar)
+  [Library] SidebarHidden computer, rekordbox, serato: no folder tree
+                         (Tracks and the search cover all drives) and no
+                         Rekordbox / Serato sections (their playlists and
+                         crates are in Playlists, patch 0016)
   [Library] ShowITunesLibrary 0
                          no iTunes section (no iTunes on the device)
   [Config] ResizableSkin  a skin chosen in the system menu
@@ -65,7 +69,11 @@ def written_by_mixxx(name, value):
         return False
     return MIXXX_WRITTEN[name] is None or value == MIXXX_WRITTEN[name]
 # Library sidebar sections by key (icon name), Mixxx patch 0015
-SIDEBAR_ORDER = "computer,playlist,history,crates,recordings,tracks,autodj,rekordbox,serato,prepare"
+SIDEBAR_ORDER = "playlist,autodj,history,crates,recordings,tracks,rekordbox,serato,prepare,computer"
+# Hidden: the folder tree ("Sources"; Tracks and SEARCH cover all music) and
+# the Rekordbox / Serato sections (their drives' lists are in Playlists,
+# Mixxx patch 0016)
+SIDEBAR_HIDDEN = "computer,rekordbox,serato"
 
 
 def screen():
@@ -158,6 +166,7 @@ def main():
         wanted[("[Controller]", AUTODJ_DEVICE)] = "1"
         wanted[("[ControllerPreset]", AUTODJ_DEVICE)] = AUTODJ_MAPPING
     wanted[("[Library]", "SidebarOrder")] = SIDEBAR_ORDER
+    wanted[("[Library]", "SidebarHidden")] = SIDEBAR_HIDDEN
     wanted[("[Library]", "ShowITunesLibrary")] = "0"
     if ppmm:
         row = max(ROW_MIN, min(ROW_MAX, round(ROW_MM * ppmm)))

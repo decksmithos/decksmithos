@@ -1124,6 +1124,9 @@ font-size:25px;
 #LibLoadBtn[value="1"] { background-color: #4b93ff; color: #fff; }
 #LibRequestBtn { font-size: 18px; color: #000; background-color: #f0a020; border: 1px solid #fff; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibRequestBtn[value="1"] { background-color: #ffd27a; }
+#LibEjectBtn { font-size: 18px; color: #fff; background-color: #2a2a30; border: 1px solid #8a8a92; border-radius: 3px; margin: 2px 0px; padding: 0px; }
+#LibEjectBtn:pressed { background-color: #4b93ff; }
+#LibEjectBtn[value="1"] { background-color: #d73535; border-color: #d73535; }
 #LibraryWrapper QTableView, #LibraryWrapper WLibraryTextBrowser { font-size: 26px; font-weight: 400; }
 #LibraryWrapper WTrackTableViewHeader::section { font-size: 15px; }
 #LibraryWrapper WLibrarySidebar { font-size: 22px; }

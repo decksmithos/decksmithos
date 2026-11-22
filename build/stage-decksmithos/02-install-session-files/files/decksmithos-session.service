@@ -31,6 +31,13 @@ UnsetEnvironment=TERM
 UtmpIdentifier=tty1
 UtmpMode=user
 WorkingDirectory=~
+# Real time for audio: PortAudio puts Mixxx's audio thread on SCHED_FIFO
+# (without these limits it stays a normal thread: "Engine thread not
+# scheduled with the real-time policy SCHED_FIFO"); locked memory so that it
+# is never paged; decksmithos-mixxx may raise Mixxx's priority (renice).
+LimitRTPRIO=90
+LimitMEMLOCK=infinity
+LimitNICE=-10
 # Plymouth quits and leaves its image on screen (--retain-splash). Not just
 # "deactivate": the still running Plymouth then drew its text-mode progress
 # (three small squares, top left) until X took over.

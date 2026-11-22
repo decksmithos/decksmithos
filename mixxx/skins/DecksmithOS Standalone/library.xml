@@ -78,6 +78,64 @@
                   <ConfigKey>[Library],AutoDjAddRequest</ConfigKey>
                 </Connection>
               </PushButton>
+              <!-- EJECT USB: while a drive is mounted there; red after a
+                   refused eject (a track from it is playing) -->
+              <WidgetGroup>
+                <Layout>horizontal</Layout>
+                <Size>128f,44f</Size>
+                <Children>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibEjectBtn</ObjectName>
+                    <Size>120f,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>&#9167; USB</Text></State>
+                    <State><Number>1</Number><Text>&#9167; USB</Text></State>
+                    <Connection>
+                      <ConfigKey>[Drives],eject_1</ConfigKey>
+                      <ConnectValueToWidget>false</ConnectValueToWidget>
+                    </Connection>
+                    <Connection>
+                      <ConfigKey>[Drives],eject_error_1</ConfigKey>
+                      <ConnectValueFromWidget>false</ConnectValueFromWidget>
+                    </Connection>
+                  </PushButton>
+                </Children>
+                <Connection>
+                  <ConfigKey>[Drives],mounted_1</ConfigKey>
+                  <BindProperty>visible</BindProperty>
+                </Connection>
+              </WidgetGroup>
+              <!-- EJECT USB2: while a drive is mounted there; red after a
+                   refused eject (a track from it is playing) -->
+              <WidgetGroup>
+                <Layout>horizontal</Layout>
+                <Size>128f,44f</Size>
+                <Children>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <PushButton>
+                    <ObjectName>LibEjectBtn</ObjectName>
+                    <Size>120f,44f</Size>
+                    <NumberStates>2</NumberStates>
+                    <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                    <State><Number>0</Number><Text>&#9167; USB2</Text></State>
+                    <State><Number>1</Number><Text>&#9167; USB2</Text></State>
+                    <Connection>
+                      <ConfigKey>[Drives],eject_2</ConfigKey>
+                      <ConnectValueToWidget>false</ConnectValueToWidget>
+                    </Connection>
+                    <Connection>
+                      <ConfigKey>[Drives],eject_error_2</ConfigKey>
+                      <ConnectValueFromWidget>false</ConnectValueFromWidget>
+                    </Connection>
+                  </PushButton>
+                </Children>
+                <Connection>
+                  <ConfigKey>[Drives],mounted_2</ConfigKey>
+                  <BindProperty>visible</BindProperty>
+                </Connection>
+              </WidgetGroup>
               <WidgetGroup><Size>4f,44f</Size></WidgetGroup>
               
             </Children>

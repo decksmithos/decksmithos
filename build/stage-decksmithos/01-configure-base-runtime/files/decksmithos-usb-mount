@@ -6,6 +6,11 @@
 #
 # Called by decksmithos-usb-mount@<kernel name>.service (started from udev):
 #   decksmithos-usb-mount add|remove <kernel name, e.g. sda1>
+# and by decksmithos-system (the EJECT buttons in Mixxx, Mixxx patch 0017):
+#   decksmithos-usb-mount eject <slot, e.g. /usb>
+#     unmounts the slot (fails while a file on it is open, e.g. a loaded
+#     track) and removes the disk from the kernel, so it can be pulled out;
+#     it is mounted again only when plugged in again.
 set -Eeuo pipefail
 
 read -r -a SLOTS <<< "${DECKSMITHOS_USB_SLOTS:-/usb /usb2}"
@@ -14,8 +19,8 @@ LOCK="/run/decksmithos-usb.lock"
 
 log() { printf '[decksmithos-usb] %s\n' "$*"; }
 
-ACTION="${1:?usage: $0 add|remove <kernel name>}"
-NAME="${2:?usage: $0 add|remove <kernel name>}"
+ACTION="${1:?usage: $0 add|remove <kernel name> | eject <slot>}"
+NAME="${2:?usage: $0 add|remove <kernel name> | eject <slot>}"
 DEV="/dev/${NAME}"
 
 # Parent disk of a block device (the device itself if it has no parent).
@@ -103,8 +108,33 @@ do_remove() {
   done
 }
 
+do_eject() {
+  exec 9>"${LOCK}"
+  flock 9
+
+  local slot="${NAME}" known="" s src disk
+  for s in "${SLOTS[@]}"; do
+    [[ "${s}" == "${slot}" ]] && known=1
+  done
+  [[ -n "${known}" ]] || { log "eject: ${slot} is not a USB slot (${SLOTS[*]})"; exit 2; }
+  src="$(slot_source "${slot}")"
+  [[ -n "${src}" ]] || { log "eject: nothing mounted at ${slot}"; return 0; }
+  disk="$(disk_of "${src}")"
+  sync
+  if ! umount "${slot}"; then
+    log "eject: ${slot} is busy (a file on it is open), not ejected"
+    exit 1
+  fi
+  log "${src} unmounted from ${slot} (eject)"
+  # Detach the disk so that it can be pulled out safely (stops/flushes it)
+  if [[ -w "/sys/block/${disk}/device/delete" ]]; then
+    echo 1 > "/sys/block/${disk}/device/delete" && log "${disk} detached" || true
+  fi
+}
+
 case "${ACTION}" in
   add)    do_add ;;
   remove) do_remove ;;
+  eject)  do_eject ;;
   *)      log "unknown action '${ACTION}'"; exit 2 ;;
 esac

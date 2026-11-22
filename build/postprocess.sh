@@ -201,7 +201,7 @@ tmpfs                      /var/tmp        tmpfs  nosuid,nodev,mode=1777,size=12
 /storage/logs              /var/log        none   bind,nofail                         0 0
 EOF
 
-  echo "${BASE_CMDLINE} root=PARTUUID=${root_partuuid} rootfstype=ext4 rootwait panic=1 ${OVERLAYROOT} ${QUIET} ${FB} plymouth.ignore-serial-consoles usbcore.autosuspend=-1" \
+  echo "${BASE_CMDLINE} root=PARTUUID=${root_partuuid} rootfstype=ext4 rootwait panic=1 ${OVERLAYROOT} ${QUIET} ${FB} plymouth.ignore-serial-consoles usbcore.autosuspend=-1 irqaffinity=0-2" \
     | sed -E 's#[[:space:]]+# #g' > "${boot_mnt}/cmdline.txt"
 
   echo "  slot ${slot}: boot PARTUUID=${boot_partuuid}, root PARTUUID=${root_partuuid}"

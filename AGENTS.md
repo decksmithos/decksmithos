@@ -147,6 +147,15 @@ display, audio, and Mixxx functionality.
 
 ### Real-time performance
 
+Implemented (2026-11-22, to be measured): CPUs 0-2 for every service and
+the session (systemd `CPUAffinity=0-2`, kernel `irqaffinity=0-2`), CPU 3
+for Mixxx's audio thread only (it moves itself there, Mixxx patch 0018,
+`DECKSMITHOS_AUDIO_CPUS=3`); `LimitRTPRIO=90`, `LimitMEMLOCK=infinity`,
+`LimitNICE=-10` on `decksmithos-session.service` so that PortAudio's
+SCHED_FIFO request succeeds (before: "Failed bumping priority", audio thread
+SCHED_OTHER); governor `performance` (tmpfiles.d); track analysis and library
+scan at nice 10 (`DECKSMITHOS_BACKGROUND_NICE`).
+
 A real-time/low-latency kernel was considered, but it is not a guarantee
 of low latency. Measure xruns/dropouts, buffer stability, CPU load,
 thermal throttling, USB behavior, and latency on target hardware.
@@ -552,11 +561,26 @@ drive is mounted (patch 0013, `DECKSMITHOS_BROWSE_SOURCES`). The search
 box and every other text field show an on-screen keyboard while focused
 (patch 0014, `DECKSMITHOS_TOUCH_KEYBOARD`; Mixxx has none on Linux). The
 sidebar sections can be ordered, hidden and renamed (Preferences > Library >
-Sidebar, patch 0015); `decksmithos-mixxx-autoconf` sets the order Sources,
-Playlists, History, Crates, Recordings, Tracks, Auto DJ, Rekordbox, Serato,
-Analyze and hides iTunes. The top bar (SOURCE, PLAYLIST, BROWSE, TAG LIST,
-SEARCH, MENU, BACK) opens sections with `[Library],show_<key>` through the
-skin bridge; SEARCH searches Tracks (all music). Auto DJ
+Sidebar, patch 0015); `decksmithos-mixxx-autoconf` sets the order Playlists,
+Auto DJ, History, Crates, Recordings, Tracks, Rekordbox, Serato, Analyze and
+hides the folder tree (Sources; decided 2026-11-22: Tracks and SEARCH cover
+all drives, and two DJs' drives at once are avoided at events) and iTunes.
+The top bar (PLAYLIST, BROWSE, AUTO DJ, SEARCH, MENU, BACK) opens sections
+with `[Library],show_<key>` through the skin bridge; the button of the
+section shown is lit, a second tap closes the library page, BACK goes one
+sidebar level up and closes the page at the top (like a CDJ); SEARCH
+searches Tracks (all music). EJECT buttons for /usb and /usb2 in the library
+bar (patch 0017, `decksmithos-system eject`: unmount and detach; refused
+while a track from the drive plays). rekordbox/Serato drives are imported
+transparently (patch 0016, decided 2026-11-22): rekordbox playlists and
+Serato crates (crates as playlists, to keep their order; subcrates as
+"Parent ▸ Child") become locked playlists "USB ▸ ..." at the top of
+Playlists while the drive is in, the rekordbox analysis is applied to the
+library tracks (rekordbox always wins, like a CDJ), a track loaded before
+the background import gets it at load; the Rekordbox / Serato sections are
+hidden. Not yet: the DJ's own edits kept on the drive in `DECKSMITHOS/`
+(read-write mount only for drives with that folder), unverified with real
+drives. Auto DJ
 requests: patch 0010 (`[Library],AutoDjAddRequest`, REQUEST button in the
 library), one console button learned from the skin's MENU page (0011).
 Remaining touch work: small

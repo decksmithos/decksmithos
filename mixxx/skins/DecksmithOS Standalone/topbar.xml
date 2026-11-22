@@ -2,15 +2,18 @@
      hardware buttons above the screen) on the left, recording status, clock
      and master level on the right. 48 px tall.
 
-     Navigation (all but MENU and BACK through the skin bridge,
-     mixxx/controllers/DecksmithOS-SkinBridge.js):
-       SOURCE    library page, Sources (console music, USB drives)
-       PLAYLIST  library page, Playlists
-       BROWSE    library page as it was left
-       TAG LIST  library page, Auto DJ (the queue)
-       SEARCH    library page, Tracks (all music), focus on the search box
+     Navigation (all but MENU through the skin bridge,
+     mixxx/controllers/DecksmithOS-SkinBridge.js). The button of the section
+     shown lights up ([Skin],dsm_lit_<name>); tapping it again closes the
+     library page, like the browse buttons of a standalone player.
+       PLAYLIST  Playlists
+       BROWSE    the library page as it was left
+       AUTO DJ   the Auto DJ queue
+       SEARCH    Tracks (all music), focus on the search box
        MENU      skin settings page ([Tab],shortcut)
-       BACK      back to the main page; shown on the library page only -->
+       BACK      one level up in the sidebar (a folder's parent, a list's
+                 section); at the top it closes the library page. Shown on
+                 the library page only. -->
 <Template>
   <WidgetGroup>
     <ObjectName>Topbar</ObjectName>
@@ -21,38 +24,37 @@
       <WidgetGroup><Size>6f,48f</Size></WidgetGroup>
 
       <Template src="skin:topnav_button.xml">
-        <SetVariable name="label">SOURCE</SetVariable>
-        <SetVariable name="key">[Skin],dsm_nav_source</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
-        <SetVariable name="push">true</SetVariable>
-      </Template>
-      <Template src="skin:topnav_button.xml">
         <SetVariable name="label">PLAYLIST</SetVariable>
         <SetVariable name="key">[Skin],dsm_nav_playlist</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="lit">[Skin],dsm_lit_playlist</SetVariable>
+        <SetVariable name="objname">TopNavBtn</SetVariable>
         <SetVariable name="push">true</SetVariable>
       </Template>
       <Template src="skin:topnav_button.xml">
         <SetVariable name="label">BROWSE</SetVariable>
         <SetVariable name="key">[Skin],dsm_nav_browse</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="lit">[Skin],dsm_lit_browse</SetVariable>
+        <SetVariable name="objname">TopNavBtn</SetVariable>
         <SetVariable name="push">true</SetVariable>
       </Template>
       <Template src="skin:topnav_button.xml">
-        <SetVariable name="label">TAG LIST</SetVariable>
-        <SetVariable name="key">[Skin],dsm_nav_taglist</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="label">AUTO DJ</SetVariable>
+        <SetVariable name="key">[Skin],dsm_nav_autodj</SetVariable>
+        <SetVariable name="lit">[Skin],dsm_lit_autodj</SetVariable>
+        <SetVariable name="objname">TopNavBtn</SetVariable>
         <SetVariable name="push">true</SetVariable>
       </Template>
       <Template src="skin:topnav_button.xml">
         <SetVariable name="label">SEARCH</SetVariable>
         <SetVariable name="key">[Skin],dsm_nav_search</SetVariable>
-        <SetVariable name="objname">TopNavBtnPlain</SetVariable>
+        <SetVariable name="lit">[Skin],dsm_lit_search</SetVariable>
+        <SetVariable name="objname">TopNavBtn</SetVariable>
         <SetVariable name="push">true</SetVariable>
       </Template>
       <Template src="skin:topnav_button.xml">
         <SetVariable name="label">MENU</SetVariable>
         <SetVariable name="key">[Tab],shortcut</SetVariable>
+        <SetVariable name="lit">[Tab],shortcut</SetVariable>
         <SetVariable name="objname">TopNavBtn</SetVariable>
         <SetVariable name="push">false</SetVariable>
       </Template>
@@ -71,10 +73,11 @@
                 <ObjectName>TopNavBtnBack</ObjectName>
                 <Size>110f,38f</Size>
                 <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
                 <State><Number>0</Number><Text>BACK</Text></State>
                 <State><Number>1</Number><Text>BACK</Text></State>
                 <Connection>
-                  <ConfigKey>[Tab],overview</ConfigKey>
+                  <ConfigKey>[Skin],dsm_nav_back</ConfigKey>
                 </Connection>
               </PushButton>
             </Children>

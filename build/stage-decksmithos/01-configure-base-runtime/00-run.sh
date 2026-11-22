@@ -45,6 +45,10 @@ ln -sfn /usb2 "${ROOTFS_DIR}/media/usb2"
 
 # Stable ALSA name "decksmithos" for the controller's USB audio (see decksmithos-mixxx).
 install -v -m 644 files/asound.conf "${ROOTFS_DIR}/etc/asound.conf"
+# CPUs: 0-2 for everything, 3 for Mixxx's audio thread; full clock
+install -v -d -m 755 "${ROOTFS_DIR}/etc/systemd/system.conf.d"
+install -v -m 644 files/50-decksmithos-cpu.conf "${ROOTFS_DIR}/etc/systemd/system.conf.d/50-decksmithos-cpu.conf"
+install -v -m 644 files/decksmithos-cpufreq.conf "${ROOTFS_DIR}/etc/tmpfiles.d/decksmithos-cpufreq.conf"
 
 on_chroot <<EOF
 systemctl enable decksmithos-storage-init.service
