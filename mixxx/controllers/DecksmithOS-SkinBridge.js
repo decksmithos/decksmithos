@@ -129,6 +129,10 @@ DecksmithSkin.navigate = function(name) {
     if (section === undefined) {
         return; // BROWSE: the library page as it was left
     }
+    if (name !== "search") {
+        // the section's lists (CONSOLE / USB, playlists) are in the sidebar
+        engine.setValue("[Sidebar]", "sidebar_visible", 1);
+    }
     engine.setValue("[Library]", "show_" + section, 1);
     engine.setValue("[Library]", "show_" + section, 0);
     if (name === "search") {

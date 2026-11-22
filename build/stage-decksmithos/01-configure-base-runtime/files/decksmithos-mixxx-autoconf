@@ -53,6 +53,17 @@ DISPLAY_CONF = "/etc/decksmithos/display.conf"
 # "VirMIDI 7-0" with spaces replaced (ControllerManager sanitizeDeviceName).
 AUTODJ_DEVICE = "VirMIDI_7-0"
 AUTODJ_MAPPING = "/usr/share/mixxx/controllers/DecksmithOS-AutoDJ.midi.xml"
+# Values Mixxx writes by itself (its defaults), so they were not chosen by the
+# user when DecksmithOS has not set them yet
+MIXXX_WRITTEN = {"[Preferences]geometry": None, "[Library]ShowITunesLibrary": "1"}
+
+
+def written_by_mixxx(name, value):
+    """True if `value` of the key `name` is one Mixxx writes by itself
+    (None in MIXXX_WRITTEN: any value)."""
+    if name not in MIXXX_WRITTEN:
+        return False
+    return MIXXX_WRITTEN[name] is None or value == MIXXX_WRITTEN[name]
 # Library sidebar sections by key (icon name), Mixxx patch 0015
 SIDEBAR_ORDER = "computer,playlist,history,crates,recordings,tracks,autodj,rekordbox,serato,prepare"
 
@@ -167,7 +178,7 @@ def main():
         # Ours to change: never set, or still the value we set last time (or
         # Mixxx's shipped default for the dialog geometry).
         if current is None or current == auto.get(name) or (
-                name == "[Preferences]geometry" and name not in auto):
+                name not in auto and written_by_mixxx(name, current)):
             if current != value:
                 put(sections, section, key, value)
                 changed.append(f"{section} {key} {value}")
