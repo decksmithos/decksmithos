@@ -17,9 +17,9 @@
               <Template src="skin:waveform_colored.xml">
                 <SetVariable name="channel">3</SetVariable>
                 <SetVariable name="SignalColor">#32323c</SetVariable>
-                <SetVariable name="SignalLowColor">#0551cc</SetVariable>
-                <SetVariable name="SignalMidColor">#a45f26</SetVariable>
-                <SetVariable name="SignalHighColor">#eee3c6</SetVariable>
+                <SetVariable name="SignalLowColor">#2a6cf0</SetVariable>
+                <SetVariable name="SignalMidColor">#f0a020</SetVariable>
+                <SetVariable name="SignalHighColor">#f3ead2</SetVariable>
               </Template>
             </Children>
             <Connection>
@@ -30,16 +30,16 @@
           <Template src="skin:waveform_colored.xml">
             <SetVariable name="channel">1</SetVariable>
             <SetVariable name="SignalColor">#32323c</SetVariable>
-            <SetVariable name="SignalLowColor">#0551cc</SetVariable>
-            <SetVariable name="SignalMidColor">#a45f26</SetVariable>
-            <SetVariable name="SignalHighColor">#eee3c6</SetVariable>
+            <SetVariable name="SignalLowColor">#2a6cf0</SetVariable>
+            <SetVariable name="SignalMidColor">#f0a020</SetVariable>
+            <SetVariable name="SignalHighColor">#f3ead2</SetVariable>
           </Template>
           <Template src="skin:waveform_colored.xml">
             <SetVariable name="channel">2</SetVariable>
             <SetVariable name="SignalColor">#32323c</SetVariable>
-            <SetVariable name="SignalLowColor">#0551cc</SetVariable>
-            <SetVariable name="SignalMidColor">#a45f26</SetVariable>
-            <SetVariable name="SignalHighColor">#eee3c6</SetVariable>
+            <SetVariable name="SignalLowColor">#2a6cf0</SetVariable>
+            <SetVariable name="SignalMidColor">#f0a020</SetVariable>
+            <SetVariable name="SignalHighColor">#f3ead2</SetVariable>
           </Template>
           <WidgetGroup>
             <ObjectName>Waveform4Wrapper</ObjectName>
@@ -49,9 +49,9 @@
               <Template src="skin:waveform_colored.xml">
                 <SetVariable name="channel">4</SetVariable>
                 <SetVariable name="SignalColor">#32323c</SetVariable>
-                <SetVariable name="SignalLowColor">#0551cc</SetVariable>
-                <SetVariable name="SignalMidColor">#a45f26</SetVariable>
-                <SetVariable name="SignalHighColor">#eee3c6</SetVariable>
+                <SetVariable name="SignalLowColor">#2a6cf0</SetVariable>
+                <SetVariable name="SignalMidColor">#f0a020</SetVariable>
+                <SetVariable name="SignalHighColor">#f3ead2</SetVariable>
               </Template>
             </Children>
             <Connection>

@@ -1,0 +1,147 @@
+Description: Numark Mixtrack (Pro) 3: wheel edge, loop rolls, BEATS knob
+ - Jog wheel: while the platter is touched (scratch, iCut, fast seek) the
+   wheel no longer also bends the pitch; on a stopped deck, turning the wheel
+   by its edge (platter not touched) moves through the track, as the wheel
+   edge does with the controller's bundled software.
+ - New option "SHIFT + Auto Loop pads: loop rolls" (off by default): SHIFT +
+   Auto Loop pads 1-4 play loop rolls of 1/8, 1/4, 1/2 and 1 beat while held.
+ - New option "BEATS knob" (default: effect unit dry/wet, unchanged): the
+   knob can instead halve/double the time (parameter 1) of the focused effect,
+   like the controller's beat multiplier with its bundled software.
+ - Fix: PAD MODE + BEATS changed the gain of [Sampler0] and of the other
+   deck's samplers; it now changes samplers 1-4 (left) or 5-8 (right) only.
+ Candidate for upstream (the user submits it; AI-written, see AGENTS.md).
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/res/controllers/Numark-Mixtrack-3-scripts.js b/res/controllers/Numark-Mixtrack-3-scripts.js
+index 7c62b307..058f2beb 100644
+--- a/res/controllers/Numark-Mixtrack-3-scripts.js
++++ b/res/controllers/Numark-Mixtrack-3-scripts.js
+@@ -24,6 +24,15 @@ const ShiftFilterFX4 = engine.getSetting("ShiftFilterFX4") === true;
+ // allow pitch bend with wheel when wheel is not active
+ const PitchBendOnWheelOff = engine.getSetting("PitchBendOnWheelOff") === true;
+ 
++// SHIFT + Auto Loop pads: "true": loop rolls (held) of 1/8, 1/4, 1/2 and 1 beat,
++// "false" (default): loops of those sizes
++const ShiftAutoLoopRoll = engine.getSetting("ShiftAutoLoopRoll") === true;
++
++// BEATS knob: "mix" (default): dry/wet of the deck's effect unit;
++// "beats": halves/doubles the time (parameter 1) of the focused effect, or of
++// effect 1 when none is focused (e.g. Echo's beat length)
++const BeatsKnobMode = engine.getSetting("BeatsKnobMode");
++
+ /**************************
+  *  scriptpause
+  * ---------------
+@@ -716,6 +725,7 @@ NumarkMixtrack3.deck = function(decknum) {
+     this.jogWheelsInScratchMode = false;
+     this.PADMode = false; //false = not pressed; true = pressed
+     this.shiftKey = false;
++    this.rollSize = [0, 0, 0, 0, 0]; // loop roll held on Auto Loop pad 1-4 (0: none)
+     this.touch = false;
+     this.faderstart = false;
+     this.PitchFaderHigh = 0;
+@@ -1423,8 +1433,20 @@ NumarkMixtrack3.WheelMove = function(channel, control, value, status, group) {
+ 
+     var isPlaying = engine.getValue(deck.Jog.group, "play");
+ 
++    // Scratching, iCut and fast seek own the wheel while the platter is touched
++    if (deck.touch || deck.iCutStatus || deck.seekingfast) {
++        return;
++    }
++
++    // Stopped deck, platter not touched (wheel edge): move through the track,
++    // like the edge of the wheel on the hardware's own software
++    if (!isPlaying) {
++        engine.setValue(deck.Jog.group, "jog", adjustedJog / 2);
++        return;
++    }
++
+     // pitch bend when playing - side or platter have same effect
+-    if (isPlaying && (PitchBendOnWheelOff || deck.jogWheelsInScratchMode)) {
++    if (PitchBendOnWheelOff || deck.jogWheelsInScratchMode) {
+         var gammaInputRange = 13; // Max jog speed
+         var maxOutFraction = 0.8; // Where on the curve it should peak; 0.5 is half-way
+         var sensitivity = 0.5; // Adjustment gamma
+@@ -1557,6 +1579,21 @@ NumarkMixtrack3.PADLoopButton = function(channel, control, value, status, group)
+         loopsizeNew = loopsize[padIndex - 1];
+     }
+ 
++    // SHIFT + pad as a loop roll while held (option ShiftAutoLoopRoll). The
++    // roll ends on release even when SHIFT was let go first.
++    if (ShiftAutoLoopRoll && (deck.shiftKey || deck.rollSize[padIndex])) {
++        if (value === DOWN && deck.trackLoaded()) {
++            deck.rollSize[padIndex] = loopsizeNew;
++            engine.setValue(deck.group, "beatlooproll_" + loopsizeNew + "_activate", true);
++            deck.LEDs["padLoop" + padIndex].flashOn(125, PADcolors.yellow, 125);
++        } else if (value === OFF && deck.rollSize[padIndex]) {
++            engine.setValue(deck.group, "beatlooproll_" + deck.rollSize[padIndex] + "_activate", false);
++            deck.rollSize[padIndex] = 0;
++            deck.LEDs["padLoop" + padIndex].onOff(PADcolors.yellow);
++        }
++        return;
++    }
++
+     if (value === DOWN && deck.trackLoaded()) {
+         // make sure all LED are ON
+         deck.LEDs.padLoop1.onOff(PADcolors.yellow);
+@@ -1778,7 +1815,14 @@ NumarkMixtrack3.BeatKnob = function(channel, control, value, status, group) {
+ 
+ 
+     // direct interaction with knob, without any button combination
+-    if (!deck.PADMode && !deck.shiftKey && !deck.TapDown) {
++    if (!deck.PADMode && !deck.shiftKey && !deck.TapDown && BeatsKnobMode === "beats") {
++        var effect = deck.getFocusedEffect() || 1;
++        var effectGroup = "[EffectRack1_EffectUnit" + deck.decknum + "_Effect" + effect + "]";
++        var time = engine.getValue(effectGroup, "parameter1");
++        if (time > 0) {
++            engine.setValue(effectGroup, "parameter1", increase ? time * 2 : time / 2);
++        }
++    } else if (!deck.PADMode && !deck.shiftKey && !deck.TapDown) {
+         var mixValue = engine.getParameter("[EffectRack1_EffectUnit" + deck.decknum + "]", "mix");
+         engine.setParameter("[EffectRack1_EffectUnit" + deck.decknum + "]", "mix", mixValue + increment);
+     }
+@@ -1817,7 +1861,7 @@ NumarkMixtrack3.BeatKnob = function(channel, control, value, status, group) {
+     if (deck.PADMode) {
+         var startingSampler = (deck.decknum < 3) ? 1 : 5;
+ 
+-        for (var i = 0; i <= startingSampler + 3; i++) {
++        for (var i = startingSampler; i <= startingSampler + 3; i++) {
+             var samplerGroup = "[Sampler" + i + "]";
+             var gainValue = engine.getParameter(samplerGroup, "pregain");
+             engine.setParameter(samplerGroup, "pregain", gainValue + increment);
+diff --git a/res/controllers/Numark-Mixtrack-3.midi.xml b/res/controllers/Numark-Mixtrack-3.midi.xml
+index 93c9b5f6..7ed6449b 100644
+--- a/res/controllers/Numark-Mixtrack-3.midi.xml
++++ b/res/controllers/Numark-Mixtrack-3.midi.xml
+@@ -77,6 +77,28 @@
+                 Allows pitch-bend using the jog wheel even when scratch mode is disabled.
+             </description>
+         </option>
++        <option
++            variable="ShiftAutoLoopRoll"
++            label="SHIFT + Auto Loop pads: loop rolls"
++            type="boolean"
++            default="false">
++            <description>
++                SHIFT + Auto Loop pads 1-4 play loop rolls of 1/8, 1/4, 1/2 and 1 beat while held,
++                instead of starting loops of those sizes.
++            </description>
++        </option>
++        <option
++            variable="BeatsKnobMode"
++            label="BEATS knob"
++            type="enum">
++            <value label="Effect unit dry/wet" default="true">mix</value>
++            <value label="Effect time (halve/double)">beats</value>
++            <description>
++                What the BEATS knob changes: the dry/wet mix of the deck's effect unit, or the time
++                (parameter 1) of the focused effect (effect 1 when none is focused), halved or doubled
++                per step, for tempo-synced effects such as Echo.
++            </description>
++        </option>
+     </settings>
+     <controller id="Mixtrack3">
+         <scriptfiles>

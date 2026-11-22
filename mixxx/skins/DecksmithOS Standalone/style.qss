@@ -446,7 +446,6 @@ WPushButton[value="1"] {
   selection-color: #fff;
   font-size:18px;
   font-weight:300;
-  row-height:50px;
 }
 
 #LibraryWrapper WLibrarySidebar {
@@ -1013,3 +1012,135 @@ font-size:25px;
 #EffectSelector::drop-down {
   border: none;
 }
+
+/************************************************************************/
+/*     DecksmithOS standalone layout (2026-11): reference-player look,  */
+/*     text at ~85 % of the reference's physical size on the 7" panel   */
+/*     (reference px x 1.19). Later rules override the older ones.      */
+/************************************************************************/
+
+* { font-family: 'Liberation Sans Narrow', 'Open Sans Condensed', 'Liberation Sans', sans-serif; }
+
+/* Top bar */
+#Topbar { background-color: #0b0b0d; border-bottom: 1px solid #2a2a30; }
+#TopNavBtn, #TopNavBtnPlain, #TopNavBtnBack {
+  font-size: 18px; color: #e8e8ec; background-color: #1d1d22;
+  border: 1px solid #45454d; border-radius: 3px;
+}
+#TopNavBtnPlain[value="1"] { color: #e8e8ec; border-color: #45454d; }
+#TopNavBtn[value="1"], #TopNavBtnBack { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
+#TopNavBtn:pressed, #TopNavBtnPlain:pressed, #TopNavBtnBack:pressed { background-color: #2d2d35; }
+#TopbarClock, #TopbarRecDuration { font-size: 18px; color: #e8e8ec; }
+#TopbarRecDuration[highlight="1"] { color: #ff3b30; }
+#TopbarRecCircle { font-size: 14px; color: #55555c; qproperty-alignment: 'AlignRight | AlignVCenter'; }
+#TopbarRecCircle[highlight="1"] { color: #ff3b30; }
+
+/* Left sidebar, deck info */
+#SidebarDeckBlock { background-color: #000; border: 1px solid #2c2c32; border-top: 2px solid #1e6fd9; margin: 2px 4px 2px 4px; }
+#SidebarDeckName { font-size: 16px; color: #c8c8cc; }
+#SidebarDeckPlaying { font-size: 16px; }
+#SidebarRowIcon { font-size: 20px; color: #c8c8cc; }
+#SidebarKeyInfo { font-size: 24px; color: #f2f2f4; }
+#SidebarLoopArrow { font-size: 22px; color: #8a8a90; }
+#SidebarLoopArrow[highlight="1"] { color: #f87021; }
+#SidebarLoopSize { font-size: 22px; color: #f2f2f4; }
+#SidebarLoopSizeWrapper[highlight="1"] #SidebarLoopSize { color: #f87021; }
+
+/* Pad row */
+#PadRow { background-color: #0b0b0d; }
+#PadGroupTitle { font-size: 13px; color: #9a9aa0; }
+#PadHotcue {
+  font-size: 18px; font-weight: bold; color: #6a6a72;
+  background-color: #1b1b20; border: 1px solid #3a3a42; border-radius: 2px;
+}
+#PadHotcue[displayValue="1"], #PadHotcue[displayValue="2"] { color: #000; border-color: #000; }
+
+/* Deck info panel */
+#Deck { background-color: #000; border: 1px solid #2c2c32; border-top: 2px solid #1e6fd9; border-radius: 0px; margin: 0px 4px 4px 4px; }
+#DeckHeader { background-color: #17171b; }
+#DeckNumberBox { background-color: #222228; }
+#DeckNumberLabel { font-size: 12px; color: #c8c8cc; }
+#DeckNumber { font-size: 24px; color: #fff; }
+#DeckPlayingMark { font-size: 15px; color: transparent; }
+#DeckPlayingMark[highlight="1"] { color: #ff3b30; }
+#DeckNote { font-size: 22px; color: #e8e8ec; }
+#DeckTitleText { font-size: 27px; color: #fff; }
+#DeckSmallLabel, #DeckTimeModeRemain, #DeckTimeModeTime { font-size: 14px; color: #8a8a90; }
+#DeckTimeModeRemain[highlight="1"], #DeckTimeModeTime[highlight="1"] { color: #e8e8ec; }
+#DeckSmallLabelQ { font-size: 14px; color: #8a8a90; }
+#DeckSmallLabelQ[highlight="1"] { color: #f87021; }
+#DeckQuantize { font-size: 16px; color: #8a8a90; border: 1px solid #45454d; border-radius: 2px; background-color: transparent; }
+#DeckQuantize[value="1"] { color: #f87021; border-color: #f87021; }
+#DeckTagMT, #DeckTagSync { font-size: 15px; color: #6a6a72; border: 1px solid #45454d; border-radius: 2px; background-color: transparent; }
+#DeckTagMT[value="1"] { color: #f87021; border-color: #f87021; }
+#DeckTagSync[value="1"] { color: #4b93ff; border-color: #4b93ff; }
+#DeckTrackTime { font-size: 48px; color: #fff; }
+#DeckRangeBox { background-color: #ff3b30; border-radius: 2px; }
+#DeckRangeText { font-size: 14px; color: #fff; }
+#DeckTempo { font-size: 32px; color: #e8e8ec; }
+#DeckTempoPercent { font-size: 20px; color: #e8e8ec; }
+#DeckBPMWrapper { border: 1px solid #e8e8ec; border-radius: 2px; background-color: transparent; }
+#DeckBPMWrapper[highlight="1"] { border-color: #f87021; background-color: transparent; }
+#DeckBPMTitle { font-size: 14px; color: #e8e8ec; padding-left: 4px; }
+#DeckBPMTitleMaster { font-size: 13px; color: #000; background-color: #f87021; }
+#DeckBPM { font-size: 42px; color: #fff; padding-right: 6px; }
+#DeckBPMMaster { font-size: 42px; color: #f87021; padding-right: 6px; }
+
+/* BEAT FX panel */
+#BeatFX_Container { background-color: #000; padding: 0px; }
+#BeatFX_Box { background-color: #141418; border: 1px solid #2c2c32; margin: 0px 4px 0px 4px; }
+#BeatFX_Title { font-size: 15px; color: #c8c8cc; background-color: #26262c; }
+#BeatFX_Name { font-size: 22px; color: #fff; background-color: #1e6fd9; border: none; margin: 4px 6px; padding-left: 6px; }
+#BeatFX_SmallLabel, #BeatFX_Unit { font-size: 13px; color: #9a9aa0; }
+#BeatFX_ChRow { margin: 0px 6px; }
+#BeatFX_Ch, #BeatFX_ChMaster { font-size: 18px; color: #c8c8cc; border: 1px solid #45454d; background-color: #000; }
+#BeatFX_Ch[value="1"], #BeatFX_ChMaster[value="1"] { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
+#BeatFX_Readout { background-color: #000; border: 1px solid #2c2c32; margin: 0px 6px; padding-right: 6px; }
+#BeatFX_Bpm { font-size: 34px; color: #fff; }
+#BeatFX_ParamName { font-size: 15px; color: #9a9aa0; padding-left: 6px; }
+#BeatFX_Beat { font-size: 22px; color: #fff; background-color: transparent; border: none; }
+#BeatFX_OnOff { font-size: 18px; color: #c8c8cc; border: 1px solid #45454d; background-color: #000; margin: 0px 6px; }
+#BeatFX_OnOff[value="1"] { color: #fff; background-color: #c62828; border-color: #ff5a4f; }
+#ZoomRow { margin: 0px 6px; }
+#ZoomBtn { font-size: 22px; color: #c8c8cc; border: 1px solid #45454d; background-color: #000; }
+#ZoomBtn[value="1"] { color: #fff; border-color: #4b93ff; }
+#ZoomLabel { font-size: 15px; color: #4b93ff; }
+#BeatFX_Ch, #BeatFX_ChMaster, #BeatFX_OnOff, #ZoomBtn, #DeckQuantize, #DeckTagMT, #DeckTagSync, #TopNavBtn, #TopNavBtnPlain, #TopNavBtnBack, #PadHotcue { padding: 0px; }
+
+/* Library page */
+#SidebarContainer { background-color: #0b0b0d; }
+#SidebarButton { font-size: 18px; color: #e8e8ec; background-color: #1d1d22; border: 1px solid #45454d; border-radius: 3px; margin: 2px 0px 2px 4px; }
+#SearchBox { font-size: 20px; padding: 4px 8px; text-transform: none; border: 1px solid #45454d; margin: 2px 0px; }
+#LibLoadBtn { font-size: 18px; color: #000; background-color: #d8d8dc; border: 1px solid #fff; border-radius: 3px; margin: 2px 0px; padding: 0px; }
+#LibLoadBtn[value="1"] { background-color: #4b93ff; color: #fff; }
+#LibraryWrapper QTableView, #LibraryWrapper WLibraryTextBrowser { font-size: 26px; font-weight: 400; }
+#LibraryWrapper WTrackTableViewHeader::section { font-size: 15px; }
+#LibraryWrapper WLibrarySidebar { font-size: 22px; }
+
+/* Compact deck strip (library and settings pages) */
+#LibDecks { background-color: #000; border-top: 1px solid #2a2a30; }
+#LibDeck { background-color: #000; border-top: 2px solid #1e6fd9; margin: 0px 4px; }
+#LibDeckName { font-size: 15px; color: #fff; background-color: #26262c; margin: 2px 8px 0px 4px; }
+#LibDeckName[highlight="1"] { color: #ff3b30; }
+#LibDeckSmall { font-size: 13px; color: #9a9aa0; padding-left: 6px; }
+#LibDeckTime { font-size: 30px; color: #fff; padding-left: 4px; }
+#LibDeckBpmBox { border: 1px solid #e8e8ec; border-radius: 2px; }
+#LibDeckBpmBox[highlight="1"] { border-color: #f87021; }
+#LibDeckBpm { font-size: 34px; color: #fff; padding-right: 6px; }
+#LibDeckBpmBox[highlight="1"] #LibDeckBpm { color: #f87021; }
+
+/* Settings page (MENU) */
+#ShortcutSectionTitle { font-size: 15px; color: #9a9aa0; }
+#ShortcutPanel WPushButton#DecksModeBtn, #ShortcutPanel WPushButton#RecordingToggleBtn, #ShortcutPanel WPushButton#MixxxSettingsBtn { font-size: 20px; }
+#ShortcutRecDuration { font-size: 22px; }
+
+/* Pad row pages, BEAT FX and RELEASE FX */
+#PadRelease { font-size: 16px; color: #e8e8ec; background-color: #1b1b20; border: 1px solid #3a3a42; border-radius: 2px; padding: 0px; }
+#PadRelease[value="1"], #PadXpad[value="1"] { color: #fff; background-color: #1e6fd9; border-color: #4b93ff; }
+#PadXpad { font-size: 22px; color: #e8e8ec; background-color: #1b1b20; border: 1px solid #3a3a42; border-radius: 2px; padding: 0px; }
+#PadFxSlotName { font-size: 20px; color: #fff; background-color: #1b1b20; border: 1px solid #3a3a42; border-radius: 2px; }
+#PadFxSlot { background-color: transparent; border: 2px solid transparent; }
+#PadFxSlot[value="1"] { background-color: rgba(30,111,217,110); border-color: #4b93ff; }
+#PadModeBtn { font-size: 16px; color: #c8c8cc; border: 1px solid #45454d; background-color: #000; margin: 0px 6px; padding: 0px; }
+#PadModeBtn[value="1"] { color: #fff; background-color: #3a3a42; border-color: #e8e8ec; }
+#LibraryWrapper WLibrarySidebar::item { min-height: 44px; }

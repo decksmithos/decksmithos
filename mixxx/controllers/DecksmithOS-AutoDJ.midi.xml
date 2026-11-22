@@ -3,11 +3,12 @@
   <info>
     <name>DecksmithOS Auto DJ</name>
     <author>DecksmithOS</author>
-    <description>Beat-matched Auto DJ transitions with a bass swap (DecksmithOS). Runs on a virtual MIDI device; has no controls.</description>
+    <description>Beat-matched Auto DJ transitions with a bass swap, and the on-screen buttons of the DecksmithOS Standalone skin that need a script (navigation, X-PAD, RELEASE FX). Runs on a virtual MIDI device; has no controls.</description>
   </info>
   <controller id="DecksmithOS-AutoDJ">
     <scriptfiles>
       <file functionprefix="DecksmithAutoDJ" filename="DecksmithOS-AutoDJ.js"/>
+      <file functionprefix="DecksmithSkin" filename="DecksmithOS-SkinBridge.js"/>
     </scriptfiles>
     <controls/>
     <outputs/>

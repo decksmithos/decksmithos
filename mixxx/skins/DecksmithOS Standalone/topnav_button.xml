@@ -1,0 +1,23 @@
+<!-- One top-bar navigation button (110 x 38 in a 116 x 48 cell).
+     Variables: label, key (the control the button toggles), push (true: momentary, for the skin bridge's
+     [Skin],dsm_* controls), objname (TopNavBtn: lights up while the control is on; TopNavBtnPlain: never
+     lights up, for buttons that share one control). -->
+<Template>
+  <WidgetGroup>
+    <Layout>horizontal</Layout>
+    <Size>116f,48f</Size>
+    <Children>
+      <PushButton>
+        <ObjectName><Variable name="objname"/></ObjectName>
+        <Size>110f,38f</Size>
+        <NumberStates>2</NumberStates>
+        <LeftClickIsPushButton><Variable name="push"/></LeftClickIsPushButton>
+        <State><Number>0</Number><Text><Variable name="label"/></Text></State>
+        <State><Number>1</Number><Text><Variable name="label"/></Text></State>
+        <Connection>
+          <ConfigKey><Variable name="key"/></ConfigKey>
+        </Connection>
+      </PushButton>
+    </Children>
+  </WidgetGroup>
+</Template>

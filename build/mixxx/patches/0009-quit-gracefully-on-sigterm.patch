@@ -1,0 +1,98 @@
+Description: Quit gracefully on SIGTERM
+ SIGTERM (system shutdown, `kill`, a session manager or systemd stopping
+ Mixxx) killed Mixxx without saving: hot cues, beat grids and other track
+ changes still pending, settings, effect units (effects.xml) and the skin's
+ persistent controls were lost (upstream issue #15767). Mixxx now quits on
+ SIGTERM the same way as File > Exit, without the "deck is playing"
+ confirmation, through a socket pair and a QSocketNotifier (the signal
+ handler itself only writes one byte). The handler resets to the default
+ action after the first SIGTERM, so a second one still kills a Mixxx that
+ hangs while shutting down. SIGINT (Ctrl+C) is not changed (see #12786).
+ Unix only.
+ Candidate for upstream (the user submits it; AI-written, see AGENTS.md).
+Author: DecksmithOS
+Bug: https://github.com/mixxxdj/mixxx/issues/15767
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/src/main.cpp b/src/main.cpp
+index 11afd512..8610505f 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -11,6 +11,13 @@
+ #include <cstdio>
+ #include <stdexcept>
+ 
++#ifdef Q_OS_UNIX
++#include <QSocketNotifier>
++#include <csignal>
++#include <sys/socket.h>
++#include <unistd.h>
++#endif
++
+ #include "config.h"
+ #include "controllers/controllermanager.h"
+ #include "coreservices.h"
+@@ -37,6 +44,52 @@ constexpr int kFatalErrorOnStartupExitCode = 1;
+ constexpr int kParseCmdlineArgsErrorExitCode = 2;
+ 
+ constexpr char kScaleFactorEnvVar[] = "QT_SCALE_FACTOR";
++
++#ifdef Q_OS_UNIX
++// SIGTERM (e.g. a system shutdown, `kill`, systemd stopping a session)
++// quits Mixxx the same way as File > Exit, so that the library, settings
++// and effects are saved instead of being lost (#15767). The signal handler
++// only writes to a socket (async-signal-safe); the event loop picks it up.
++// The handler is installed once and then reset to the default action
++// (SA_RESETHAND), so a second SIGTERM still kills a Mixxx that hangs while
++// shutting down. SIGINT (Ctrl+C in a terminal) keeps its default action.
++int s_sigtermSockets[2] = {-1, -1};
++
++void sigtermHandler(int) {
++    const char byte = 1;
++    const auto written = ::write(s_sigtermSockets[0], &byte, sizeof(byte));
++    Q_UNUSED(written);
++}
++
++void quitOnSigterm(QCoreApplication* pApp) {
++    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s_sigtermSockets) != 0) {
++        qWarning() << "Failed to create the SIGTERM socket pair; SIGTERM will "
++                      "terminate Mixxx without saving";
++        return;
++    }
++    auto* pNotifier = new QSocketNotifier(
++            s_sigtermSockets[1], QSocketNotifier::Read, pApp);
++    QObject::connect(pNotifier, &QSocketNotifier::activated, pApp, [pApp, pNotifier] {
++        pNotifier->setEnabled(false);
++        char byte;
++        const auto bytesRead = ::read(s_sigtermSockets[1], &byte, sizeof(byte));
++        Q_UNUSED(bytesRead);
++        qInfo() << "SIGTERM received, shutting down";
++        // Leaves all event loops, including those of open dialogs, without
++        // asking for confirmation: the system wants Mixxx to stop.
++        pApp->quit();
++    });
++
++    struct sigaction action = {};
++    action.sa_handler = sigtermHandler;
++    sigemptyset(&action.sa_mask);
++    action.sa_flags = SA_RESTART | SA_RESETHAND;
++    if (::sigaction(SIGTERM, &action, nullptr) != 0) {
++        qWarning() << "Failed to install the SIGTERM handler; SIGTERM will "
++                      "terminate Mixxx without saving";
++    }
++}
++#endif
+ const QString kConfigGroup = QStringLiteral("[Config]");
+ const QString kScaleFactorKey = QStringLiteral("ScaleFactor");
+ const QString kNotifyMaxDbgTimeKey = QStringLiteral("notify_max_dbg_time");
+@@ -107,6 +160,9 @@ int runMixxx(MixxxApplication* pApp, const CmdlineArgs& args) {
+             mainWindow.show();
+ 
+             qDebug() << "Running Mixxx";
++#ifdef Q_OS_UNIX
++            quitOnSigterm(pApp);
++#endif
+             exitCode = pApp->exec();
+         }
+     }

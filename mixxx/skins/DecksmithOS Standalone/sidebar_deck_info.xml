@@ -8,14 +8,14 @@
   <WidgetGroup>
     <ObjectName>SidebarDeckBlock</ObjectName>
     <Layout>vertical</Layout>
-    <Size>110f,0me</Size>
+    <Size>140f,0me</Size>
     <Children>
 
       <!-- ══ 2-DECK LAYOUT ══ vertical, classic header at top ══════════ -->
       <WidgetGroup>
         <ObjectName>SidebarDeckLayout2</ObjectName>
         <Layout>vertical</Layout>
-        <Size>110f,0me</Size>
+        <Size>140f,0me</Size>
         <Connection>
           <ConfigKey>[Skin],show_4decks</ConfigKey>
           <BindProperty>visible</BindProperty>
@@ -25,9 +25,9 @@
           <WidgetGroup>
             <ObjectName>SidebarDeckHeader</ObjectName>
             <Layout>horizontal</Layout>
-            <Size>110f,20f</Size>
+            <Size>140f,28f</Size>
             <Children>
-              <WidgetGroup><Size>10f,20f</Size></WidgetGroup>
+              <WidgetGroup><Size>10f,28f</Size></WidgetGroup>
               <Label>
                 <ObjectName>SidebarDeckName</ObjectName>
                 <Text>DECK </Text>
@@ -54,27 +54,27 @@
                   <BindProperty>visible</BindProperty>
                 </Connection>
               </Label>
-              <WidgetGroup><Size>0me,20f</Size></WidgetGroup>
+              <WidgetGroup><Size>0me,28f</Size></WidgetGroup>
             </Children>
           </WidgetGroup>
           <WidgetGroup>
             <ObjectName>SidebarHeaderDivider</ObjectName>
-            <Size>110f,2f</Size>
+            <Size>140f,2f</Size>
           </WidgetGroup>
           <WidgetGroup>
             <ObjectName>SidebarKeyRow</ObjectName>
             <Layout>horizontal</Layout>
-            <Size>110f,24f</Size>
+            <Size>140f,40f</Size>
             <Children>
-              <WidgetGroup><Size>10f,24f</Size></WidgetGroup>
+              <WidgetGroup><Size>10f,40f</Size></WidgetGroup>
               <Label>
                 <ObjectName>SidebarRowIcon</ObjectName>
                 <Text>&#9837;</Text>
               </Label>
-              <WidgetGroup><Size>4f,24f</Size></WidgetGroup>
+              <WidgetGroup><Size>6f,40f</Size></WidgetGroup>
               <Key>
                 <ObjectName>SidebarKeyInfo</ObjectName>
-                <Size>me,24f</Size>
+                <Size>me,40f</Size>
                 <TooltipId>visual_key</TooltipId>
                 <DisplayCents>false</DisplayCents>
                 <Connection>
@@ -85,14 +85,14 @@
           </WidgetGroup>
           <WidgetGroup>
             <ObjectName>SidebarRowDivider</ObjectName>
-            <Size>110f,1f</Size>
+            <Size>140f,1f</Size>
           </WidgetGroup>
           <WidgetGroup>
             <ObjectName>SidebarLoopRow</ObjectName>
             <Layout>horizontal</Layout>
-            <Size>110f,24f</Size>
+            <Size>140f,40f</Size>
             <Children>
-              <WidgetGroup><Size>10f,24f</Size></WidgetGroup>
+              <WidgetGroup><Size>10f,40f</Size></WidgetGroup>
               <Label>
                 <ObjectName>SidebarLoopArrow</ObjectName>
                 <Text>&#8634;</Text>
@@ -101,15 +101,15 @@
                   <BindProperty>highlight</BindProperty>
                 </Connection>
               </Label>
-              <WidgetGroup><Size>4f,24f</Size></WidgetGroup>
+              <WidgetGroup><Size>6f,40f</Size></WidgetGroup>
               <WidgetGroup>
                 <ObjectName>SidebarLoopSizeWrapper</ObjectName>
                 <Layout>horizontal</Layout>
-                <Size>me,24f</Size>
+                <Size>me,40f</Size>
                 <Children>
                   <BeatSpinBox>
                     <ObjectName>SidebarLoopSize</ObjectName>
-                    <Size>me,24f</Size>
+                    <Size>me,40f</Size>
                     <TooltipId>beatloop_size</TooltipId>
                     <Value>[Channel<Variable name="channel"/>],beatloop_size</Value>
                   </BeatSpinBox>
@@ -121,6 +121,7 @@
               </WidgetGroup>
             </Children>
           </WidgetGroup>
+          <WidgetGroup><Size>140f,0me</Size></WidgetGroup>
         </Children>
       </WidgetGroup>
 
@@ -128,7 +129,7 @@
       <WidgetGroup>
         <ObjectName>SidebarDeckLayout4</ObjectName>
         <Layout>horizontal</Layout>
-        <Size>110f,0me</Size>
+        <Size>140f,0me</Size>
         <Connection>
           <ConfigKey>[Skin],show_4decks</ConfigKey>
           <BindProperty>visible</BindProperty>

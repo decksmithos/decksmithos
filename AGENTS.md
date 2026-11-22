@@ -538,12 +538,13 @@ controller-agnostic: the library page follows the standard
 `[Skin],show_maximized_library` control, never a skin-private control.
 Implemented, unverified on the panel: the mouse cursor is hidden
 (`unclutter-xfixes --start-hidden --hide-on-touch` in `.xsession`; a
-real mouse shows it while moving), and a long press (800 ms) is a right
-click (evdev `EmulateThirdButton`, td2 profile
-`xorg.conf.d/92-touch-longpress.conf`). Trade-off: a touch reaches Mixxx
-as a left click only on finger movement or release, so holding an
-on-screen button (cue preview) is not possible by touch; delete the file
-to turn it off. Remaining touch work: library row height and finger scrolling, small
+real mouse shows it while moving). **No long-press right click**
+(decided 2026-11-22): the evdev `EmulateThirdButton` emulation was
+removed from the td2 profile because it delivered a touch to Mixxx only
+on finger movement or release, which made held on-screen buttons
+(momentary effects, cue preview) impossible. Controllers do not send
+right clicks either, so the skins must not depend on right click
+(context menus and knob reset stay mouse-only). Remaining touch work: library row height and finger scrolling, small
 buttons outside the top bar (BEAT FX channel buttons, Q), verification on
 the real panel. None of these skins fits 480×320.
 
@@ -717,7 +718,8 @@ Verified behavior (Touch Display 2, rotated, see §15):
 -   The theme uses Plymouth's `script` module (`decksmithos.script`).
 -   The `script` module **does not honor `DeviceRotation`** in
     `plymouthd.conf`. Rotation is applied inside the script instead,
-    e.g. `logo.image.Rotate(1.5708)` (π/2 radians, 90°).
+    e.g. `logo.image.Rotate(-1.5708)` (−π/2 radians; +π/2 for the
+    opposite mounting, see §15).
 -   Boot to Mixxx without text or black gaps (2026-11-20, verified on
     the CM5): both profiles boot `quiet splash vt.global_cursor_default=0
     logo.nologo`; Plymouth starts with systemd (no initramfs) at ~1 s.
@@ -959,7 +961,7 @@ these are not yet tested on DecksmithOS. The gaps:
 | 20 | Touch library browsing: big rows, finger scroll, BPM/key filter buttons, playlist editing on the unit (all flagships) | Mixxx library, small rows; search filters by typing | Open -- likely the most visible gap on the 7" screen |
 | 21 | Playback survives pulling the USB stick: whole track in RAM (CDJ-3000/X) | Unknown; Mixxx reads in chunks | Measure first (checklist §8), then decide |
 | 22 | rekordbox USB sticks as the main workflow: playlists, cues, grids (all AlphaTheta) | Mixxx's Rekordbox library feature (`/media/usb*` links exist) | Measure with the user's sticks; key for Pioneer users |
-| 23 | Phrase display (rekordbox PHRASE) and a touch beatgrid editor (Engine) | Basic grid adjust; no phrases | Open |
+| 23 | Phrase display (rekordbox PHRASE) and a touch beatgrid editor (Engine) | Mixxx patch 0007 (2026-11-22): rekordbox phrases as a band in the overview, downbeats and bar.beat counter, imported with the Rekordbox view; no own phrase analysis | Phrases: test with a real rekordbox USB. Upstream PRs #16581/#16582/#16491 target main's renderer and were not ported (see build/mixxx/README.md). Beatgrid editor: open |
 | 24 | Stems: on-device separation (Prime 4 G2, System One) or stem files (Engine) | No | Open; on-device separation only with measured CPU headroom (no xruns) |
 | 25 | Smart Cue / Gate Cue cue modes (CDJ-3000X, XDJ-RX3/AZ) | Hot cue preview exists in Mixxx; no Smart Cue | Open; must stay controller-agnostic |
 | 26 | Streaming and cloud libraries: Beatport, TIDAL, Apple Music, Dropbox (most 2023+ units) | No | Proposal: no for release (no network by design); revisit only with an offline-cache design |
@@ -1036,23 +1038,30 @@ if they are missing.
 Every layer must be configured separately; fixing one does not fix the
 others.
 
+The panel is mounted with the glass's narrow margin on the left (the
+enclosure in `hardware/enclosure` needs this so that the display cables
+reach J5 and the GPIO header). The values below are for that orientation.
+The opposite mounting (narrow margin on the right) was verified on the
+device with `rotate=270`, Xorg `right`, touch `SwapAxes` + `InvertY` and
+Plymouth +π/2; the current values are that set turned by 180 degrees and
+must be validated again on the device (checklist below).
+
 1.  **Kernel console/framebuffer** --- appended to the existing single
     line in `cmdline.txt` (do not replace existing arguments):
 
     ``` text
-    video=DSI-1:720x1280@60,rotate=270
+    video=DSI-1:720x1280@60,rotate=90
     ```
 
-    `rotate=270` is the value verified on the device (together with
-    Xorg `right` and Plymouth +π/2 below); an earlier note said 90.
+    (`rotate=270` for the opposite mounting, verified on the device.)
 
 2.  **Xorg output** --- `/etc/X11/xorg.conf.d/90-display-rotate.conf`,
-    a `Monitor` section for `DSI-1` with `Option "Rotate" "right"`.
+    a `Monitor` section for `DSI-1` with `Option "Rotate" "left"`.
 3.  **Touch input** --- `/etc/X11/xorg.conf.d/91-touch-rotate.conf`,
     an `InputClass` matching the Goodix touch controller with
-    `Option "SwapAxes" "1"` and `Option "InvertY" "1"`. These are
+    `Option "SwapAxes" "1"` and `Option "InvertX" "1"`. These are
     evdev options (the touch device uses the evdev driver via
-    `45-evdev.conf`); `92-touch-longpress.conf` relies on evdev too.
+    `45-evdev.conf`).
 4.  **Plymouth** --- rotation inside `decksmithos.script` (see §8),
     because `DeviceRotation` is ignored by the `script` module.
 

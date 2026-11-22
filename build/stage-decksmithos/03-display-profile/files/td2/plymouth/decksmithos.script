@@ -18,10 +18,11 @@ screen.h = Window.GetHeight ();
 
 logo.image = Image ("splash.png");
 band.w = logo.image.GetWidth ();
-# After the 90 degree rotation the band is BAND_H wide and band.w tall.
+# After the -90 degree rotation (panel mounted with the narrow glass margin
+# on the left, see 90-display-rotate.conf) the band is BAND_H wide and band.w tall.
 scale = Math.Min (screen.h / band.w, screen.w / BAND_H);
 logo.image = logo.image.Scale (logo.image.GetWidth () * scale, logo.image.GetHeight () * scale);
-logo.image = logo.image.Rotate (1.5708);
+logo.image = logo.image.Rotate (-1.5708);
 logo.sprite = Sprite ();
 
 logo.w = logo.image.GetWidth ();

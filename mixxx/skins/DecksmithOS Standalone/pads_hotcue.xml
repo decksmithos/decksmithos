@@ -1,0 +1,117 @@
+<!-- Hot cue pads A-H of one deck, 2 rows of 4 (80 px tall). Tap: set or
+     jump (held: preview while the deck is stopped). The pad takes the hot
+     cue's colour once set. Variable: channel. -->
+<Template>
+  <WidgetGroup>
+    <ObjectName>PadGroup</ObjectName>
+    <Layout>vertical</Layout>
+    <Size>0me,80f</Size>
+    <Children>
+      <Label>
+        <ObjectName>PadGroupTitle</ObjectName>
+        <Size>0me,16f</Size>
+        <Text>HOT CUE</Text>
+        <Alignment>center</Alignment>
+      </Label>
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Size>0me,30f</Size>
+        <Children>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>1</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>A</Text></State>
+            <State><Number>1</Number><Text>A</Text></State>
+            <State><Number>2</Number><Text>A</Text></State>
+          </HotcueButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>2</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>B</Text></State>
+            <State><Number>1</Number><Text>B</Text></State>
+            <State><Number>2</Number><Text>B</Text></State>
+          </HotcueButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>3</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>C</Text></State>
+            <State><Number>1</Number><Text>C</Text></State>
+            <State><Number>2</Number><Text>C</Text></State>
+          </HotcueButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>4</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>D</Text></State>
+            <State><Number>1</Number><Text>D</Text></State>
+            <State><Number>2</Number><Text>D</Text></State>
+          </HotcueButton>
+        </Children>
+      </WidgetGroup>
+      <WidgetGroup><Size>0me,4f</Size></WidgetGroup>
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Size>0me,30f</Size>
+        <Children>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>5</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>E</Text></State>
+            <State><Number>1</Number><Text>E</Text></State>
+            <State><Number>2</Number><Text>E</Text></State>
+          </HotcueButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>6</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>F</Text></State>
+            <State><Number>1</Number><Text>F</Text></State>
+            <State><Number>2</Number><Text>F</Text></State>
+          </HotcueButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>7</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>G</Text></State>
+            <State><Number>1</Number><Text>G</Text></State>
+            <State><Number>2</Number><Text>G</Text></State>
+          </HotcueButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <HotcueButton>
+            <ObjectName>PadHotcue</ObjectName>
+            <Size>0me,30f</Size>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Hotcue>8</Hotcue>
+            <NumberStates>3</NumberStates>
+            <State><Number>0</Number><Text>H</Text></State>
+            <State><Number>1</Number><Text>H</Text></State>
+            <State><Number>2</Number><Text>H</Text></State>
+          </HotcueButton>
+        </Children>
+      </WidgetGroup>
+    </Children>
+  </WidgetGroup>
+</Template>

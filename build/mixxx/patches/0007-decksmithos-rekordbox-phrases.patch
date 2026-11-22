@@ -1,0 +1,1137 @@
+Description: Phrase band, downbeats and bar counter from rekordbox analysis
+ Like the phrase display of Pioneer players: the rekordbox song structure
+ (PSSI tag in the .EXT analysis file) is shown as a coloured band at the
+ bottom of the waveform overview (WOverview, <PhraseBandHeight>, default 6 px,
+ 0 hides it). The first downbeat (PQTZ beat number 1) marks bars in the
+ scrolling waveform: downbeats 2 px wide in <DownbeatColor> (default: beat
+ colour), and a "bar.beat" counter next to the play marker (allshader
+ waveforms only; <ShowDownbeats>, <ShowBarCounter>, default on). Tracks
+ without rekordbox data can take the beat closest to the intro start as the
+ first downbeat with <DownbeatFromIntroStart>true</...> (off by default; same
+ idea as upstream PR #16491).
+ .
+ The data is imported when a track is loaded from the Rekordbox library
+ view, together with the beat grid and cues, and stored as an analysis of
+ type 1001 (mixxx::TrackStructure, versioned QDataStream). No database
+ schema change, no beats protobuf change: stock Mixxx ignores the extra
+ analysis rows; deleting a track's analyses removes them.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 38d62644..270b77ab 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1152,6 +1152,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/track/beatutils.cpp
+   src/track/bpm.cpp
+   src/track/cue.cpp
++  src/track/trackstructure.cpp
+   src/track/cueinfo.cpp
+   src/track/cueinfoimporter.cpp
+   src/track/globaltrackcache.cpp
+@@ -2230,6 +2231,7 @@ if(BUILD_TESTING)
+     src/test/trackmetadataexport_test.cpp
+     src/test/tracknumberstest.cpp
+     src/test/trackreftest.cpp
++    src/test/trackstructuretest.cpp
+     src/test/trackupdate_test.cpp
+     src/test/uuid_test.cpp
+     src/test/wbatterytest.cpp
+diff --git a/src/library/dao/analysisdao.cpp b/src/library/dao/analysisdao.cpp
+index d485fc5d..b7f8a936 100644
+--- a/src/library/dao/analysisdao.cpp
++++ b/src/library/dao/analysisdao.cpp
+@@ -416,3 +416,44 @@ bool AnalysisDao::deleteAnalysesByType(
+ 
+     return true;
+ }
++
++mixxx::TrackStructurePointer AnalysisDao::loadTrackStructure(TrackId trackId) {
++    if (!trackId.isValid()) {
++        return nullptr;
++    }
++    const QList<AnalysisInfo> analyses =
++            getAnalysesForTrackByType(trackId, TYPE_DECKSMITHOS_TRACK_STRUCTURE);
++    for (const auto& analysis : analyses) {
++        auto pStructure = mixxx::TrackStructure::fromByteArray(analysis.data);
++        if (pStructure) {
++            return pStructure;
++        }
++    }
++    return nullptr;
++}
++
++bool AnalysisDao::saveTrackStructure(TrackId trackId,
++        const mixxx::TrackStructurePointer& pStructure) {
++    if (!trackId.isValid()) {
++        return false;
++    }
++    const QList<AnalysisInfo> analyses =
++            getAnalysesForTrackByType(trackId, TYPE_DECKSMITHOS_TRACK_STRUCTURE);
++    AnalysisInfo info;
++    for (const auto& analysis : analyses) {
++        if (info.analysisId == -1 && pStructure && !pStructure->isEmpty()) {
++            info.analysisId = analysis.analysisId;
++        } else {
++            deleteAnalysis(analysis.analysisId);
++        }
++    }
++    if (!pStructure || pStructure->isEmpty()) {
++        return true;
++    }
++    info.trackId = trackId;
++    info.type = TYPE_DECKSMITHOS_TRACK_STRUCTURE;
++    info.description = QStringLiteral("DecksmithOS track structure");
++    info.version = QStringLiteral("1");
++    info.data = pStructure->toByteArray();
++    return saveAnalysis(&info);
++}
+diff --git a/src/library/dao/analysisdao.h b/src/library/dao/analysisdao.h
+index 27314b2b..8f747ebd 100644
+--- a/src/library/dao/analysisdao.h
++++ b/src/library/dao/analysisdao.h
+@@ -5,6 +5,7 @@
+ #include "preferences/usersettings.h"
+ #include "library/dao/dao.h"
+ #include "track/trackid.h"
++#include "track/trackstructure.h"
+ #include "waveform/waveform.h"
+ 
+ class QSqlDatabase;
+@@ -16,7 +17,10 @@ class AnalysisDao : public DAO {
+     enum AnalysisType {
+         TYPE_UNKNOWN = 0,
+         TYPE_WAVEFORM,
+-        TYPE_WAVESUMMARY
++        TYPE_WAVESUMMARY,
++        // DecksmithOS: track structure (phrases, downbeat). A high number
++        // that upstream Mixxx will not use; Mixxx ignores unknown types.
++        TYPE_DECKSMITHOS_TRACK_STRUCTURE = 1001,
+     };
+ 
+     struct AnalysisInfo {
+@@ -57,6 +61,11 @@ class AnalysisDao : public DAO {
+             ConstWaveformPointer pWaveform,
+             ConstWaveformPointer pWaveSummary);
+ 
++    mixxx::TrackStructurePointer loadTrackStructure(TrackId trackId);
++    /// Saves the structure, or deletes it if pStructure is null or empty.
++    bool saveTrackStructure(TrackId trackId,
++            const mixxx::TrackStructurePointer& pStructure);
++
+   private:
+     QDir getAnalysisStoragePath() const;
+     QByteArray loadDataFromFile(const QString& fileName) const;
+diff --git a/src/library/dao/trackdao.cpp b/src/library/dao/trackdao.cpp
+index 064b8d7c..248c4a6c 100644
+--- a/src/library/dao/trackdao.cpp
++++ b/src/library/dao/trackdao.cpp
+@@ -1537,6 +1537,8 @@ TrackPointer TrackDAO::getTrackById(TrackId trackId) const {
+ 
+     // Populate track cues from the cues table.
+     pTrack->setCuePoints(m_cueDao.getCuesForTrack(trackId));
++    // DecksmithOS: phrases and downbeat, stored as an analysis
++    pTrack->setStructure(m_analysisDao.loadTrackStructure(trackId));
+     pTrack->markClean();
+ 
+     // Synchronize the track's metadata with the corresponding source
+diff --git a/src/library/rekordbox/rekordboxfeature.cpp b/src/library/rekordbox/rekordboxfeature.cpp
+index 5bea078a..e6859a80 100644
+--- a/src/library/rekordbox/rekordboxfeature.cpp
++++ b/src/library/rekordbox/rekordboxfeature.cpp
+@@ -27,6 +27,7 @@
+ #include "track/keyfactory.h"
+ #include "track/keyutils.h"
+ #include "track/track.h"
++#include "track/trackstructure.h"
+ #include "util/color/color.h"
+ #include "util/db/dbconnectionpooled.h"
+ #include "util/db/dbconnectionpooler.h"
+@@ -893,11 +894,139 @@ void setHotCue(TrackPointer track,
+     }
+ }
+ 
++/// Beat grid (PQTZ) and song structure (PSSI) collected from the ANLZ files
++struct rekordbox_structure_t {
++    QVector<mixxx::audio::FramePos> beats;
++    QVector<int> beatNumbers; // position in the bar, 1 to 4
++    rekordbox_anlz_t::track_mood_t mood{};
++    int endBeat = 0;
++    struct entry_t {
++        int beat; // 1-based index into beats
++        int kindId;
++    };
++    QVector<entry_t> entries;
++};
++
++mixxx::TrackStructure::Phrase rekordboxPhrase(
++        rekordbox_anlz_t::track_mood_t mood, int kindId) {
++    using Kind = mixxx::TrackStructure::PhraseKind;
++    const auto phrase = [](Kind kind, int number = 0) {
++        return mixxx::TrackStructure::Phrase{{}, {}, kind, static_cast<quint8>(number)};
++    };
++    switch (mood) {
++    case rekordbox_anlz_t::TRACK_MOOD_HIGH:
++        switch (kindId) {
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_INTRO:
++            return phrase(Kind::Intro);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_UP:
++            return phrase(Kind::Up);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_DOWN:
++            return phrase(Kind::Down);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_CHORUS:
++            return phrase(Kind::Chorus);
++        case rekordbox_anlz_t::MOOD_HIGH_PHRASE_OUTRO:
++            return phrase(Kind::Outro);
++        }
++        break;
++    case rekordbox_anlz_t::TRACK_MOOD_MID:
++        if (kindId >= rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_1 &&
++                kindId <= rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_6) {
++            return phrase(Kind::Verse,
++                    kindId - rekordbox_anlz_t::MOOD_MID_PHRASE_VERSE_1 + 1);
++        }
++        [[fallthrough]];
++    case rekordbox_anlz_t::TRACK_MOOD_LOW:
++        switch (kindId) {
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_INTRO:
++            return phrase(Kind::Intro);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1B:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_1C:
++            return phrase(Kind::Verse, 1);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2B:
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_VERSE_2C:
++            return phrase(Kind::Verse, 2);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_BRIDGE:
++            return phrase(Kind::Bridge);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_CHORUS:
++            return phrase(Kind::Chorus);
++        case rekordbox_anlz_t::MOOD_LOW_PHRASE_OUTRO:
++            return phrase(Kind::Outro);
++        }
++        break;
++    }
++    return phrase(Kind::Other);
++}
++
++/// Position of a 1-based rekordbox beat number. Beats after the end of
++/// the grid are extrapolated with the last beat length.
++mixxx::audio::FramePos rekordboxBeatPosition(
++        const QVector<mixxx::audio::FramePos>& beats, int beat) {
++    const int index = beat - 1;
++    if (index < 0 || beats.isEmpty()) {
++        return {};
++    }
++    if (index < beats.size()) {
++        return beats[index];
++    }
++    if (beats.size() < 2) {
++        return {};
++    }
++    const double beatLength = beats.last() - beats[beats.size() - 2];
++    return beats.last() + beatLength * (index - beats.size() + 1);
++}
++
++mixxx::TrackStructurePointer makeTrackStructure(const rekordbox_structure_t& data) {
++    mixxx::audio::FramePos firstDownbeat;
++    for (int i = 0; i < data.beatNumbers.size(); ++i) {
++        if (data.beatNumbers[i] == 1) {
++            firstDownbeat = data.beats[i];
++            break;
++        }
++    }
++    QVector<mixxx::TrackStructure::Phrase> phrases;
++    for (int i = 0; i < data.entries.size(); ++i) {
++        const int endBeat = i + 1 < data.entries.size()
++                ? data.entries[i + 1].beat
++                : data.endBeat;
++        auto phrase = rekordboxPhrase(data.mood, data.entries[i].kindId);
++        phrase.start = rekordboxBeatPosition(data.beats, data.entries[i].beat);
++        phrase.end = rekordboxBeatPosition(data.beats, endBeat);
++        if (!phrase.start.isValid() || !phrase.end.isValid() ||
++                phrase.end <= phrase.start) {
++            continue;
++        }
++        phrases.append(phrase);
++    }
++    if (phrases.isEmpty() && !firstDownbeat.isValid()) {
++        return nullptr;
++    }
++    mixxx::TrackStructure::Mood mood = mixxx::TrackStructure::Mood::Unknown;
++    if (!phrases.isEmpty()) {
++        switch (data.mood) {
++        case rekordbox_anlz_t::TRACK_MOOD_HIGH:
++            mood = mixxx::TrackStructure::Mood::High;
++            break;
++        case rekordbox_anlz_t::TRACK_MOOD_MID:
++            mood = mixxx::TrackStructure::Mood::Mid;
++            break;
++        case rekordbox_anlz_t::TRACK_MOOD_LOW:
++            mood = mixxx::TrackStructure::Mood::Low;
++            break;
++        }
++    }
++    // rekordbox only knows 4/4
++    return std::make_shared<const mixxx::TrackStructure>(
++            mood, std::move(phrases), firstDownbeat, 4);
++}
++
+ void readAnalyze(TrackPointer track,
+         mixxx::audio::SampleRate sampleRate,
+         int timingOffset,
+         bool ignoreCues,
+-        const QString& anlzPath) {
++        const QString& anlzPath,
++        rekordbox_structure_t* pStructure) {
+     if (!QFile(anlzPath).exists()) {
+         return;
+     }
+@@ -929,6 +1058,7 @@ void readAnalyze(TrackPointer track,
+                             section->body());
+ 
+             QVector<mixxx::audio::FramePos> beats;
++            QVector<int> beatNumbers;
+ 
+             for (const auto& beat : *beatGridTag->beats()) {
+                 int time = static_cast<int>(beat->time()) - timingOffset;
+@@ -937,6 +1067,11 @@ void readAnalyze(TrackPointer track,
+                     time = 1;
+                 }
+                 beats << mixxx::audio::FramePos(sampleRateKhz * static_cast<double>(time));
++                beatNumbers << static_cast<int>(beat->beat_number());
++            }
++            if (pStructure) {
++                pStructure->beats = beats;
++                pStructure->beatNumbers = beatNumbers;
+             }
+ 
+             const auto pBeats = mixxx::Beats::fromBeatPositions(
+@@ -1076,6 +1211,42 @@ void readAnalyze(TrackPointer track,
+                 }
+             }
+         } break;
++        case rekordbox_anlz_t::SECTION_TAGS_SONG_STRUCTURE: {
++            if (!pStructure) {
++                break;
++            }
++            auto* songStructureTag =
++                    static_cast<rekordbox_anlz_t::song_structure_tag_t*>(
++                            section->body());
++            const auto* pBody = songStructureTag->body();
++            if (!pBody || !pBody->entries()) {
++                break;
++            }
++            pStructure->mood = pBody->mood();
++            pStructure->endBeat = pBody->end_beat();
++            pStructure->entries.clear();
++            for (const auto& entry : *pBody->entries()) {
++                int kindId = 0;
++                switch (pBody->mood()) {
++                case rekordbox_anlz_t::TRACK_MOOD_HIGH:
++                    kindId = static_cast<rekordbox_anlz_t::phrase_high_t*>(
++                            entry->kind())
++                                     ->id();
++                    break;
++                case rekordbox_anlz_t::TRACK_MOOD_LOW:
++                    kindId = static_cast<rekordbox_anlz_t::phrase_low_t*>(
++                            entry->kind())
++                                     ->id();
++                    break;
++                default: // the parser reads unknown moods as mid
++                    kindId = static_cast<rekordbox_anlz_t::phrase_mid_t*>(
++                            entry->kind())
++                                     ->id();
++                    break;
++                }
++                pStructure->entries.append({static_cast<int>(entry->beat()), kindId});
++            }
++        } break;
+         default:
+             break;
+         }
+@@ -1295,12 +1466,23 @@ TrackPointer RekordboxPlaylistModel::getTrack(const QModelIndex& index) const {
+                     .toString();
+     QString anlzPathExt = anlzPath.left(anlzPath.length() - 3) + "EXT";
+ 
++    rekordbox_structure_t structure;
+     if (QFile(anlzPathExt).exists()) {
+         // Beatgrids appear to be only correct in legacy ANLZ file
+-        readAnalyze(track, sampleRate, timingOffset, true, anlzPath);
+-        readAnalyze(track, sampleRate, timingOffset, false, anlzPathExt);
++        readAnalyze(track, sampleRate, timingOffset, true, anlzPath, &structure);
++        readAnalyze(track, sampleRate, timingOffset, false, anlzPathExt, &structure);
+     } else {
+-        readAnalyze(track, sampleRate, timingOffset, false, anlzPath);
++        readAnalyze(track, sampleRate, timingOffset, false, anlzPath, &structure);
++    }
++
++    // DecksmithOS: phrases (PSSI, in the .EXT file) and the first downbeat
++    // (PQTZ), shown by the waveform overview and the beat renderer
++    const auto pTrackStructure = makeTrackStructure(structure);
++    if (pTrackStructure) {
++        track->setStructure(pTrackStructure);
++        m_pTrackCollectionManager->internalCollection()
++                ->getAnalysisDAO()
++                .saveTrackStructure(track->getId(), pTrackStructure);
+     }
+ 
+     // Assume that the key of the file the has been analyzed in Recordbox is correct
+diff --git a/src/test/trackstructuretest.cpp b/src/test/trackstructuretest.cpp
+new file mode 100644
+index 00000000..13e0f01b
+--- /dev/null
++++ b/src/test/trackstructuretest.cpp
+@@ -0,0 +1,48 @@
++#include <gtest/gtest.h>
++
++#include "track/trackstructure.h"
++
++namespace {
++
++using mixxx::TrackStructure;
++using mixxx::audio::FramePos;
++
++TEST(TrackStructureTest, SerializationRoundTrip) {
++    const QVector<TrackStructure::Phrase> phrases{
++            {FramePos(1000), FramePos(50000), TrackStructure::PhraseKind::Intro, 0},
++            {FramePos(50000), FramePos(90000.5), TrackStructure::PhraseKind::Verse, 3},
++    };
++    const TrackStructure structure(
++            TrackStructure::Mood::Mid, phrases, FramePos(1000), 4);
++    const auto pLoaded = TrackStructure::fromByteArray(structure.toByteArray());
++    ASSERT_NE(nullptr, pLoaded);
++    EXPECT_EQ(TrackStructure::Mood::Mid, pLoaded->mood());
++    EXPECT_EQ(FramePos(1000), pLoaded->firstDownbeat());
++    EXPECT_EQ(4, pLoaded->beatsPerBar());
++    ASSERT_EQ(2, pLoaded->phrases().size());
++    EXPECT_EQ(FramePos(90000.5), pLoaded->phrases()[1].end);
++    EXPECT_EQ(TrackStructure::PhraseKind::Verse, pLoaded->phrases()[1].kind);
++    EXPECT_EQ(QStringLiteral("Verse 3"),
++            TrackStructure::phraseLabel(pLoaded->phrases()[1]));
++}
++
++TEST(TrackStructureTest, InvalidDownbeat) {
++    const TrackStructure structure(TrackStructure::Mood::Unknown, {}, FramePos(), 4);
++    const auto pLoaded = TrackStructure::fromByteArray(structure.toByteArray());
++    ASSERT_NE(nullptr, pLoaded);
++    EXPECT_FALSE(pLoaded->firstDownbeat().isValid());
++    EXPECT_TRUE(pLoaded->isEmpty());
++}
++
++TEST(TrackStructureTest, RejectsBadData) {
++    EXPECT_EQ(nullptr, TrackStructure::fromByteArray(QByteArray("garbage")));
++    const TrackStructure structure(TrackStructure::Mood::High,
++            {{FramePos(0), FramePos(10), TrackStructure::PhraseKind::Up, 0}},
++            FramePos(0),
++            4);
++    QByteArray data = structure.toByteArray();
++    data.chop(5);
++    EXPECT_EQ(nullptr, TrackStructure::fromByteArray(data));
++}
++
++} // namespace
+diff --git a/src/track/track.cpp b/src/track/track.cpp
+index f37d90ca..2fd1c3f5 100644
+--- a/src/track/track.cpp
++++ b/src/track/track.cpp
+@@ -510,6 +510,21 @@ mixxx::BeatsPointer Track::getBeats() const {
+     return m_pBeats;
+ }
+ 
++mixxx::TrackStructurePointer Track::getStructure() const {
++    const auto locked = lockMutex(&m_qMutex);
++    return m_pStructure;
++}
++
++void Track::setStructure(mixxx::TrackStructurePointer pStructure) {
++    auto locked = lockMutex(&m_qMutex);
++    if (m_pStructure == pStructure) {
++        return;
++    }
++    m_pStructure = std::move(pStructure);
++    locked.unlock();
++    emit structureUpdated();
++}
++
+ void Track::undoBeatsChange() {
+     if (!canUndoBeatsChange()) {
+         return;
+diff --git a/src/track/track.h b/src/track/track.h
+index 9ba5e163..2453270f 100644
+--- a/src/track/track.h
++++ b/src/track/track.h
+@@ -13,6 +13,7 @@
+ #include "track/cueinfoimporter.h"
+ #include "track/track_decl.h"
+ #include "track/trackrecord.h"
++#include "track/trackstructure.h"
+ #include "util/color/predefinedcolorpalettes.h"
+ #include "util/compatibility/qmutex.h"
+ #include "util/fileaccess.h"
+@@ -346,6 +347,12 @@ class Track : public QObject {
+     // Get the track's Beats list
+     mixxx::BeatsPointer getBeats() const;
+ 
++    /// Song structure (phrases, first downbeat), e.g. imported from
++    /// rekordbox. Not part of the library record: it is stored separately
++    /// as an analysis and does not mark the track dirty.
++    mixxx::TrackStructurePointer getStructure() const;
++    void setStructure(mixxx::TrackStructurePointer pStructure);
++
+     // Set the track's Beats if not locked
+     bool trySetBeats(mixxx::BeatsPointer pBeats);
+     bool trySetAndLockBeats(mixxx::BeatsPointer pBeats);
+@@ -449,6 +456,7 @@ class Track : public QObject {
+     void colorUpdated(const mixxx::RgbColor::optional_t& color);
+     void ratingUpdated(int rating);
+     void cuesUpdated();
++    void structureUpdated();
+     void loopRemove();
+     void analyzed();
+ 
+@@ -573,6 +581,8 @@ class Track : public QObject {
+     bool m_undoingBeatsChange;
+     PerformanceTimer m_beatChangeTimer;
+ 
++    mixxx::TrackStructurePointer m_pStructure;
++
+     // Visual waveform data
+     ConstWaveformPointer m_waveform;
+     ConstWaveformPointer m_waveformSummary;
+diff --git a/src/track/trackstructure.cpp b/src/track/trackstructure.cpp
+new file mode 100644
+index 00000000..d2776645
+--- /dev/null
++++ b/src/track/trackstructure.cpp
+@@ -0,0 +1,147 @@
++#include "track/trackstructure.h"
++
++#include <QDataStream>
++#include <QIODevice>
++
++#include "util/fpclassify.h"
++
++namespace mixxx {
++
++namespace {
++
++constexpr quint32 kMagic = 0x44535453; // "DSTS"
++constexpr quint16 kVersion = 1;
++constexpr int kMaxPhrases = 1024;
++
++// Not std::isfinite(): Mixxx is built with -ffast-math
++double framePosToDouble(audio::FramePos pos) {
++    return pos.isValid() ? pos.value() : audio::FramePos::kInvalidValue;
++}
++
++audio::FramePos framePosFromDouble(double value) {
++    return util_isfinite(value) ? audio::FramePos(value) : audio::FramePos();
++}
++
++} // namespace
++
++TrackStructure::TrackStructure(Mood mood,
++        QVector<Phrase> phrases,
++        audio::FramePos firstDownbeat,
++        int beatsPerBar)
++        : m_mood(mood),
++          m_phrases(std::move(phrases)),
++          m_firstDownbeat(firstDownbeat),
++          m_beatsPerBar(beatsPerBar > 0 ? beatsPerBar : 4) {
++}
++
++QByteArray TrackStructure::toByteArray() const {
++    QByteArray data;
++    QDataStream out(&data, QIODevice::WriteOnly);
++    out.setVersion(QDataStream::Qt_5_12);
++    out << kMagic << kVersion << static_cast<quint8>(m_mood)
++        << framePosToDouble(m_firstDownbeat)
++        << static_cast<qint32>(m_beatsPerBar)
++        << static_cast<qint32>(m_phrases.size());
++    for (const auto& phrase : m_phrases) {
++        out << framePosToDouble(phrase.start) << framePosToDouble(phrase.end)
++            << static_cast<quint8>(phrase.kind) << phrase.number;
++    }
++    return data;
++}
++
++// static
++TrackStructurePointer TrackStructure::fromByteArray(const QByteArray& data) {
++    QDataStream in(data);
++    in.setVersion(QDataStream::Qt_5_12);
++    quint32 magic = 0;
++    quint16 version = 0;
++    in >> magic >> version;
++    if (magic != kMagic || version != kVersion) {
++        return nullptr;
++    }
++    quint8 mood = 0;
++    double firstDownbeat = 0;
++    qint32 beatsPerBar = 0;
++    qint32 count = 0;
++    in >> mood >> firstDownbeat >> beatsPerBar >> count;
++    if (in.status() != QDataStream::Ok || count < 0 || count > kMaxPhrases) {
++        return nullptr;
++    }
++    QVector<Phrase> phrases;
++    phrases.reserve(count);
++    for (qint32 i = 0; i < count; ++i) {
++        double start = 0;
++        double end = 0;
++        quint8 kind = 0;
++        quint8 number = 0;
++        in >> start >> end >> kind >> number;
++        if (kind > static_cast<quint8>(PhraseKind::Outro)) {
++            kind = static_cast<quint8>(PhraseKind::Other);
++        }
++        phrases.append(Phrase{framePosFromDouble(start),
++                framePosFromDouble(end),
++                static_cast<PhraseKind>(kind),
++                number});
++    }
++    if (in.status() != QDataStream::Ok) {
++        return nullptr;
++    }
++    if (mood > static_cast<quint8>(Mood::Low)) {
++        mood = static_cast<quint8>(Mood::Unknown);
++    }
++    return std::make_shared<const TrackStructure>(static_cast<Mood>(mood),
++            std::move(phrases),
++            framePosFromDouble(firstDownbeat),
++            beatsPerBar);
++}
++
++// static
++QColor TrackStructure::phraseColor(PhraseKind kind) {
++    // Close to the colours of the rekordbox / CDJ phrase display.
++    switch (kind) {
++    case PhraseKind::Intro:
++        return QColor(0xe0, 0x30, 0x4a);
++    case PhraseKind::Verse:
++        return QColor(0x3a, 0x6e, 0xe8);
++    case PhraseKind::Bridge:
++        return QColor(0xe8, 0xb8, 0x20);
++    case PhraseKind::Chorus:
++        return QColor(0x50, 0xc8, 0x40);
++    case PhraseKind::Up:
++        return QColor(0xa0, 0x50, 0xf0);
++    case PhraseKind::Down:
++        return QColor(0x40, 0x48, 0xb0);
++    case PhraseKind::Outro:
++        return QColor(0x30, 0xa8, 0xd8);
++    case PhraseKind::Other:
++        break;
++    }
++    return QColor(0x80, 0x80, 0x80);
++}
++
++// static
++QString TrackStructure::phraseLabel(const Phrase& phrase) {
++    switch (phrase.kind) {
++    case PhraseKind::Intro:
++        return QStringLiteral("Intro");
++    case PhraseKind::Verse:
++        return phrase.number > 0
++                ? QStringLiteral("Verse %1").arg(phrase.number)
++                : QStringLiteral("Verse");
++    case PhraseKind::Bridge:
++        return QStringLiteral("Bridge");
++    case PhraseKind::Chorus:
++        return QStringLiteral("Chorus");
++    case PhraseKind::Up:
++        return QStringLiteral("Up");
++    case PhraseKind::Down:
++        return QStringLiteral("Down");
++    case PhraseKind::Outro:
++        return QStringLiteral("Outro");
++    case PhraseKind::Other:
++        break;
++    }
++    return QString();
++}
++
++} // namespace mixxx
+diff --git a/src/track/trackstructure.h b/src/track/trackstructure.h
+new file mode 100644
+index 00000000..91fdf994
+--- /dev/null
++++ b/src/track/trackstructure.h
+@@ -0,0 +1,88 @@
++#pragma once
++
++#include <QByteArray>
++#include <QColor>
++#include <QString>
++#include <QVector>
++#include <memory>
++
++#include "audio/frame.h"
++
++namespace mixxx {
++
++class TrackStructure;
++typedef std::shared_ptr<const TrackStructure> TrackStructurePointer;
++
++/// Song structure of a track: its phrases and the position of its first
++/// downbeat. Imported from rekordbox analysis files (PSSI and PQTZ tags).
++///
++/// DecksmithOS addition. It is stored as an analysis of its own type, so the
++/// library database schema and the beats format stay unchanged.
++class TrackStructure final {
++  public:
++    /// The mood rekordbox assigns to the whole track. It determines the
++    /// phrase names.
++    enum class Mood : quint8 {
++        Unknown = 0,
++        High = 1,
++        Mid = 2,
++        Low = 3,
++    };
++
++    /// Phrase names as rekordbox shows them.
++    enum class PhraseKind : quint8 {
++        Other = 0,
++        Intro = 1,
++        Verse = 2,
++        Bridge = 3,
++        Chorus = 4,
++        Up = 5,
++        Down = 6,
++        Outro = 7,
++    };
++
++    struct Phrase {
++        audio::FramePos start;
++        audio::FramePos end;
++        PhraseKind kind;
++        /// Verse number (1 to 6) for verses, otherwise 0
++        quint8 number;
++    };
++
++    TrackStructure(Mood mood,
++            QVector<Phrase> phrases,
++            audio::FramePos firstDownbeat,
++            int beatsPerBar);
++
++    Mood mood() const {
++        return m_mood;
++    }
++    const QVector<Phrase>& phrases() const {
++        return m_phrases;
++    }
++    /// The first beat of a bar, or invalid if unknown
++    audio::FramePos firstDownbeat() const {
++        return m_firstDownbeat;
++    }
++    int beatsPerBar() const {
++        return m_beatsPerBar;
++    }
++    bool isEmpty() const {
++        return m_phrases.isEmpty() && !m_firstDownbeat.isValid();
++    }
++
++    QByteArray toByteArray() const;
++    /// Returns nullptr if the data is not a valid track structure.
++    static TrackStructurePointer fromByteArray(const QByteArray& data);
++
++    static QColor phraseColor(PhraseKind kind);
++    static QString phraseLabel(const Phrase& phrase);
++
++  private:
++    Mood m_mood;
++    QVector<Phrase> m_phrases;
++    audio::FramePos m_firstDownbeat;
++    int m_beatsPerBar;
++};
++
++} // namespace mixxx
+diff --git a/src/waveform/renderers/allshader/waveformrenderbeat.cpp b/src/waveform/renderers/allshader/waveformrenderbeat.cpp
+index 3f793efd..b698de09 100644
+--- a/src/waveform/renderers/allshader/waveformrenderbeat.cpp
++++ b/src/waveform/renderers/allshader/waveformrenderbeat.cpp
+@@ -1,11 +1,14 @@
+ #include "waveform/renderers/allshader/waveformrenderbeat.h"
+ 
+ #include <QDomNode>
++#include <cmath>
+ 
+ #include "skin/legacy/skincontext.h"
+ #include "track/track.h"
++#include "track/trackstructure.h"
+ #include "waveform/renderers/allshader/matrixforwidgetgeometry.h"
+ #include "waveform/renderers/waveformwidgetrenderer.h"
++#include "waveform/waveformwidgetfactory.h"
+ #include "widget/wskincolor.h"
+ 
+ namespace allshader {
+@@ -13,17 +16,104 @@ namespace allshader {
+ WaveformRenderBeat::WaveformRenderBeat(WaveformWidgetRenderer* waveformWidget,
+         ::WaveformRendererAbstract::PositionSource type)
+         : WaveformRenderer(waveformWidget),
+-          m_isSlipRenderer(type == ::WaveformRendererAbstract::Slip) {
++          m_isSlipRenderer(type == ::WaveformRendererAbstract::Slip),
++          m_showDownbeats(true),
++          m_showBarCounter(true),
++          m_downbeatFromIntroStart(false) {
+ }
+ 
+ void WaveformRenderBeat::initializeGL() {
+     WaveformRenderer::initializeGL();
+     m_shader.init();
++    m_digitsRenderer.init();
+ }
+ 
+ void WaveformRenderBeat::setup(const QDomNode& node, const SkinContext& context) {
+     m_color = QColor(context.selectString(node, "BeatColor"));
+     m_color = WSkinColor::getCorrectColor(m_color).toRgb();
++
++    // DecksmithOS: bars. Downbeats are drawn 2 px wide in <DownbeatColor>
++    // (default: the beat colour).
++    m_downbeatColor = QColor(context.selectString(node, "DownbeatColor"));
++    if (m_downbeatColor.isValid()) {
++        m_downbeatColor = WSkinColor::getCorrectColor(m_downbeatColor).toRgb();
++    } else {
++        m_downbeatColor = m_color;
++    }
++    m_showDownbeats = context.selectBool(node, "ShowDownbeats", true);
++    m_showBarCounter = context.selectBool(node, "ShowBarCounter", true);
++    // Tracks without rekordbox data: take the beat closest to the intro
++    // start as the first downbeat (as proposed upstream in mixxx#16491)
++    m_downbeatFromIntroStart = context.selectBool(node, "DownbeatFromIntroStart", false);
++}
++
++std::optional<mixxx::Beats::ConstIterator> WaveformRenderBeat::firstDownbeat(
++        const TrackPointer& pTrack,
++        const mixxx::BeatsPointer& pBeats,
++        int* pBeatsPerBar) {
++    mixxx::audio::FramePos anchor;
++    *pBeatsPerBar = 4;
++    const mixxx::TrackStructurePointer pStructure = pTrack->getStructure();
++    if (pStructure && pStructure->firstDownbeat().isValid()) {
++        anchor = pStructure->firstDownbeat();
++        *pBeatsPerBar = pStructure->beatsPerBar();
++    } else if (m_downbeatFromIntroStart) {
++        const CuePointer pIntro = pTrack->findCueByType(mixxx::CueType::Intro);
++        if (pIntro) {
++            anchor = pIntro->getPosition();
++        }
++    }
++    if (!anchor.isValid()) {
++        return std::nullopt;
++    }
++    if (pBeats != m_pCachedBeats || anchor != m_cachedAnchor) {
++        m_pCachedBeats = pBeats;
++        m_cachedAnchor = anchor;
++        m_cachedDownbeat = std::nullopt;
++        const auto closestBeat = pBeats->findClosestBeat(anchor);
++        if (closestBeat.isValid()) {
++            const auto it = pBeats->iteratorFrom(closestBeat);
++            if (it != pBeats->cend()) {
++                m_cachedDownbeat = it;
++            }
++        }
++    }
++    return m_cachedDownbeat;
++}
++
++void WaveformRenderBeat::drawBarCounter(const QMatrix4x4& matrix,
++        const mixxx::BeatsPointer& pBeats,
++        mixxx::Beats::ConstIterator downbeat,
++        int beatsPerBar,
++        ::WaveformRendererAbstract::PositionSource positionType) {
++    const auto playPosition = mixxx::audio::FramePos::fromEngineSamplePos(
++            m_waveformRenderer->getTruePosSample(positionType));
++    if (!playPosition.isValid()) {
++        return;
++    }
++    // The beat at or before the play position
++    auto it = pBeats->iteratorFrom(playPosition);
++    if (it == pBeats->cend()) {
++        return;
++    }
++    if (*it > playPosition) {
++        --it;
++    }
++    const int beatIndex = it - downbeat;
++    if (beatIndex < 0) {
++        return; // before the first bar
++    }
++    const QString text = QStringLiteral("%1.%2").arg(
++            QString::number(beatIndex / beatsPerBar + 1),
++            QString::number(beatIndex % beatsPerBar + 1));
++
++    m_digitsRenderer.updateTexture(
++            WaveformWidgetFactory::instance()->getUntilMarkTextPointSize(),
++            std::roundf(m_waveformRenderer->getBreadth() * 0.33f),
++            m_waveformRenderer->getDevicePixelRatio());
++    const float markerX = static_cast<float>(
++            m_waveformRenderer->getPlayMarkerPosition() * m_waveformRenderer->getLength());
++    m_digitsRenderer.draw(matrix, markerX + 6.f, 0.f, text);
+ }
+ 
+ void WaveformRenderBeat::paintGL() {
+@@ -87,9 +177,21 @@ void WaveformRenderBeat::paintGL() {
+         numBeatsInRange++;
+     }
+ 
++    int beatsPerBar = 4;
++    const std::optional<mixxx::Beats::ConstIterator> downbeat =
++            (m_showDownbeats || m_showBarCounter)
++            ? firstDownbeat(trackInfo, trackBeats, &beatsPerBar)
++            : std::nullopt;
++    const bool drawDownbeats = m_showDownbeats && downbeat.has_value();
++
+     const int reserved = numBeatsInRange * numVerticesPerLine;
+     m_vertices.clear();
+     m_vertices.reserve(reserved);
++    m_downbeatVertices.clear();
++    if (drawDownbeats) {
++        m_downbeatVertices.reserve(
++                (numBeatsInRange / beatsPerBar + 1) * numVerticesPerLine);
++    }
+ 
+     for (auto it = trackBeats->iteratorFrom(startPosition);
+             it != trackBeats->cend() && *it <= endPosition;
+@@ -102,6 +204,18 @@ void WaveformRenderBeat::paintGL() {
+         xBeatPoint = qRound(xBeatPoint * devicePixelRatio) / devicePixelRatio;
+ 
+         const float x1 = static_cast<float>(xBeatPoint);
++
++        if (drawDownbeats) {
++            const int index = it - *downbeat;
++            if (((index % beatsPerBar) + beatsPerBar) % beatsPerBar == 0) {
++                m_downbeatVertices.addRectangle(x1,
++                        0.f,
++                        x1 + 2.f,
++                        m_isSlipRenderer ? rendererBreadth / 2 : rendererBreadth);
++                continue;
++            }
++        }
++
+         const float x2 = x1 + 1.f;
+ 
+         m_vertices.addRectangle(x1,
+@@ -110,7 +224,7 @@ void WaveformRenderBeat::paintGL() {
+                 m_isSlipRenderer ? rendererBreadth / 2 : rendererBreadth);
+     }
+ 
+-    DEBUG_ASSERT(reserved == m_vertices.size());
++    DEBUG_ASSERT(reserved >= m_vertices.size());
+ 
+     const int positionLocation = m_shader.positionLocation();
+     const int matrixLocation = m_shader.matrixLocation();
+@@ -129,8 +243,21 @@ void WaveformRenderBeat::paintGL() {
+ 
+     glDrawArrays(GL_TRIANGLES, 0, m_vertices.size());
+ 
++    if (m_downbeatVertices.size() > 0) {
++        m_downbeatColor.setAlphaF(alpha / 100.0f);
++        m_shader.setAttributeArray(
++                positionLocation, GL_FLOAT, m_downbeatVertices.constData(), 2);
++        m_shader.setUniformValue(colorLocation, m_downbeatColor);
++        glDrawArrays(GL_TRIANGLES, 0, m_downbeatVertices.size());
++    }
++
+     m_shader.disableAttributeArray(positionLocation);
+     m_shader.release();
++
++    // DecksmithOS: "bar.beat" next to the play marker
++    if (m_showBarCounter && !m_isSlipRenderer && downbeat.has_value()) {
++        drawBarCounter(matrix, trackBeats, *downbeat, beatsPerBar, positionType);
++    }
+ }
+ 
+ } // namespace allshader
+diff --git a/src/waveform/renderers/allshader/waveformrenderbeat.h b/src/waveform/renderers/allshader/waveformrenderbeat.h
+index d3b2b79d..81f7d10b 100644
+--- a/src/waveform/renderers/allshader/waveformrenderbeat.h
++++ b/src/waveform/renderers/allshader/waveformrenderbeat.h
+@@ -1,9 +1,13 @@
+ #pragma once
+ 
+ #include <QColor>
++#include <optional>
+ 
+ #include "shaders/unicolorshader.h"
++#include "track/beats.h"
++#include "track/track_decl.h"
+ #include "util/class.h"
++#include "waveform/renderers/allshader/digitsrenderer.h"
+ #include "waveform/renderers/allshader/vertexdata.h"
+ #include "waveform/renderers/allshader/waveformrenderer.h"
+ 
+@@ -25,11 +29,34 @@ class allshader::WaveformRenderBeat final : public allshader::WaveformRenderer {
+     void initializeGL() override;
+ 
+   private:
++    /// DecksmithOS: the beat that starts a bar, from the track structure
++    /// (rekordbox) or, if enabled by the skin, the beat closest to the intro
++    /// start. Cached because the beat lookup is expensive.
++    std::optional<mixxx::Beats::ConstIterator> firstDownbeat(
++            const TrackPointer& pTrack,
++            const mixxx::BeatsPointer& pBeats,
++            int* pBeatsPerBar);
++    void drawBarCounter(const QMatrix4x4& matrix,
++            const mixxx::BeatsPointer& pBeats,
++            mixxx::Beats::ConstIterator downbeat,
++            int beatsPerBar,
++            ::WaveformRendererAbstract::PositionSource positionType);
++
+     mixxx::UnicolorShader m_shader;
+     QColor m_color;
++    QColor m_downbeatColor;
+     VertexData m_vertices;
++    VertexData m_downbeatVertices;
++    DigitsRenderer m_digitsRenderer;
+ 
+     bool m_isSlipRenderer;
++    bool m_showDownbeats;
++    bool m_showBarCounter;
++    bool m_downbeatFromIntroStart;
++
++    mixxx::BeatsPointer m_pCachedBeats;
++    mixxx::audio::FramePos m_cachedAnchor;
++    std::optional<mixxx::Beats::ConstIterator> m_cachedDownbeat;
+ 
+     DISALLOW_COPY_AND_ASSIGN(WaveformRenderBeat);
+ };
+diff --git a/src/widget/woverview.cpp b/src/widget/woverview.cpp
+index 683810c6..fb72107a 100644
+--- a/src/widget/woverview.cpp
++++ b/src/widget/woverview.cpp
+@@ -7,6 +7,8 @@
+ #include <QPainter>
+ #include <QPen>
+ #include <QVBoxLayout>
++#include <algorithm>
++#include <cmath>
+ 
+ #include "analyzer/analyzerprogress.h"
+ #include "control/controlproxy.h"
+@@ -15,6 +17,7 @@
+ #include "moc_woverview.cpp"
+ #include "preferences/colorpalettesettings.h"
+ #include "track/track.h"
++#include "track/trackstructure.h"
+ #include "util/colorcomponents.h"
+ #include "util/dnd.h"
+ #include "util/duration.h"
+@@ -59,6 +62,7 @@ WOverview::WOverview(
+           m_dragMarginH(kDragOutsideLimitX),
+           m_dragMarginV(kDragOutsideLimitY),
+           m_iLabelFontSize(10),
++          m_phraseBandHeight(6),
+           m_a(1.0),
+           m_b(0.0),
+           m_analyzerProgress(kAnalyzerProgressUnknown),
+@@ -147,6 +151,12 @@ void WOverview::setup(const QDomNode& node, const SkinContext& context) {
+         m_iLabelFontSize = labelFontSize;
+     }
+ 
++    // DecksmithOS: <PhraseBandHeight> in pixels (before scaling), 0 hides it
++    okay = false;
++    const int phraseBandHeight = context.selectInt(node, "PhraseBandHeight", &okay);
++    m_phraseBandHeight = static_cast<int>(
++            std::round((okay ? std::max(phraseBandHeight, 0) : 6) * m_scaleFactor));
++
+     // Clear the background pixmap, if it exists.
+     m_backgroundPixmap = QPixmap();
+     m_backgroundPixmapPath = context.selectString(node, "BgPixmap");
+@@ -356,6 +366,10 @@ void WOverview::slotLoadingTrack(TrackPointer pNewTrack, TrackPointer pOldTrack)
+                 &Track::cuesUpdated,
+                 this,
+                 &WOverview::receiveCuesUpdated);
++        disconnect(m_pCurrentTrack.get(),
++                &Track::structureUpdated,
++                this,
++                nullptr);
+     }
+ 
+     m_waveformSourceImage = QImage();
+@@ -379,6 +393,10 @@ void WOverview::slotLoadingTrack(TrackPointer pNewTrack, TrackPointer pOldTrack)
+                 &WOverview::slotWaveformSummaryUpdated);
+         slotWaveformSummaryUpdated();
+         connect(pNewTrack.get(), &Track::cuesUpdated, this, &WOverview::receiveCuesUpdated);
++        connect(pNewTrack.get(),
++                &Track::structureUpdated,
++                this,
++                [this]() { update(); });
+     } else {
+         m_pCurrentTrack.reset();
+         m_pWaveform.clear();
+@@ -668,6 +686,12 @@ void WOverview::paintEvent(QPaintEvent* pEvent) {
+         drawEndOfTrackBackground(&painter);
+         drawAxis(&painter);
+         drawWaveformPixmap(&painter);
++        if (getTrackSamples() > 0) {
++            drawPhrases(&painter,
++                    1.0f,
++                    static_cast<CSAMPLE_GAIN>(length() - 2) /
++                            static_cast<CSAMPLE_GAIN>(getTrackSamples()));
++        }
+         drawPlayedOverlay(&painter);
+         drawPlayPosition(&painter);
+         drawEndOfTrackFrame(&painter);
+@@ -837,6 +861,37 @@ void WOverview::drawAnalyzerProgress(QPainter* pPainter) {
+     }
+ }
+ 
++void WOverview::drawPhrases(QPainter* pPainter, const float offset, const float gain) {
++    if (m_phraseBandHeight <= 0) {
++        return;
++    }
++    const mixxx::TrackStructurePointer pStructure = m_pCurrentTrack->getStructure();
++    if (!pStructure || pStructure->phrases().isEmpty()) {
++        return;
++    }
++    PainterScope painterScope(pPainter);
++    pPainter->setPen(Qt::NoPen);
++    const qreal bandHeight = std::min(m_phraseBandHeight, breadth());
++    for (const auto& phrase : pStructure->phrases()) {
++        const qreal start = offset + phrase.start.toEngineSamplePos() * gain;
++        // 1 px gap between phrases
++        const qreal end = offset + phrase.end.toEngineSamplePos() * gain - 1.0;
++        if (end <= start) {
++            continue;
++        }
++        const QColor color = mixxx::TrackStructure::phraseColor(phrase.kind);
++        if (m_orientation == Qt::Horizontal) {
++            pPainter->fillRect(QRectF(QPointF(start, height() - bandHeight),
++                                       QPointF(end, height())),
++                    color);
++        } else {
++            pPainter->fillRect(QRectF(QPointF(width() - bandHeight, start),
++                                       QPointF(width(), end)),
++                    color);
++        }
++    }
++}
++
+ void WOverview::drawRangeMarks(QPainter* pPainter, const float& offset, const float& gain) {
+     for (auto&& markRange : m_markRanges) {
+         if (!markRange.active() || !markRange.visible()) {
+diff --git a/src/widget/woverview.h b/src/widget/woverview.h
+index f28e78a2..f3018d53 100644
+--- a/src/widget/woverview.h
++++ b/src/widget/woverview.h
+@@ -98,6 +98,7 @@ class WOverview : public WWidget, public TrackDropTarget {
+     void drawEndOfTrackFrame(QPainter* pPainter);
+     void drawAnalyzerProgress(QPainter* pPainter);
+     void drawRangeMarks(QPainter* pPainter, const float& offset, const float& gain);
++    void drawPhrases(QPainter* pPainter, const float offset, const float gain);
+     void drawMarks(QPainter* pPainter, const float offset, const float gain);
+     void drawPickupPosition(QPainter* pPainter);
+     void drawTimeRuler(QPainter* pPainter);
+@@ -174,6 +175,8 @@ class WOverview : public WWidget, public TrackDropTarget {
+     int m_dragMarginH;
+     int m_dragMarginV;
+     int m_iLabelFontSize;
++    // DecksmithOS: height of the phrase band at the bottom, 0 = hidden
++    int m_phraseBandHeight;
+ 
+     // Coefficient value-position linear transposition
+     double m_a;

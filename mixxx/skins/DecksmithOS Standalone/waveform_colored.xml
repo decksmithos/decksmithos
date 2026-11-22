@@ -9,12 +9,21 @@
         <ObjectName>Waveform<Variable name="channel"/></ObjectName>
         <Channel><Variable name="channel"/></Channel>
         <BgColor>#000</BgColor>
-        <BeatColor>#3a3a3a3a</BeatColor>
+        <BeatColor>#80ffffff</BeatColor>
         <PlayPosColor>#ffffffff</PlayPosColor>
+        <!-- bars from rekordbox's grid (Mixxx patch 0007; ignored without it):
+             downbeats in red like the reference player, bar.beat counter -->
+        <DownbeatColor>#ff3030</DownbeatColor>
+        <ShowDownbeats>true</ShowDownbeats>
+        <ShowBarCounter>true</ShowBarCounter>
         <SignalColor><Variable name="SignalColor"/></SignalColor>
         <SignalLowColor><Variable name="SignalLowColor"/></SignalLowColor>
         <SignalMidColor><Variable name="SignalMidColor"/></SignalMidColor>
         <SignalHighColor><Variable name="SignalHighColor"/></SignalHighColor>
+        <!-- the RGB and "Stacked" waveform types use these -->
+        <SignalRGBLowColor><Variable name="SignalLowColor"/></SignalRGBLowColor>
+        <SignalRGBMidColor><Variable name="SignalMidColor"/></SignalRGBMidColor>
+        <SignalRGBHighColor><Variable name="SignalHighColor"/></SignalRGBHighColor>
         <DefaultMark>
           <Align>bottom|right</Align>
           <Color>#FF0000</Color>

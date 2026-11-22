@@ -1,0 +1,101 @@
+<!-- RELEASE FX pads of one deck (80 px tall), handled by the skin bridge
+     (mixxx/controllers/DecksmithOS-SkinBridge.js): brakes and backspins on
+     tap, BUILD UP / MUTE / DUCKING while held. Variable: channel. -->
+<Template>
+  <WidgetGroup>
+    <ObjectName>PadGroup</ObjectName>
+    <Layout>vertical</Layout>
+    <Size>0me,80f</Size>
+    <Children>
+      <Label>
+        <ObjectName>PadGroupTitle</ObjectName>
+        <Size>0me,16f</Size>
+        <Text>RELEASE FX</Text>
+        <Alignment>center</Alignment>
+      </Label>
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Size>0me,30f</Size>
+        <Children>
+          <PushButton>
+            <ObjectName>PadRelease</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberStates>2</NumberStates>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <State><Number>0</Number><Text>V.BRAKE SHORT</Text></State>
+            <State><Number>1</Number><Text>V.BRAKE SHORT</Text></State>
+            <Connection><ConfigKey>[Skin],dsm_rfx_<Variable name="channel"/>_brake_s</ConfigKey></Connection>
+          </PushButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <PushButton>
+            <ObjectName>PadRelease</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberStates>2</NumberStates>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <State><Number>0</Number><Text>B.SPIN SHORT</Text></State>
+            <State><Number>1</Number><Text>B.SPIN SHORT</Text></State>
+            <Connection><ConfigKey>[Skin],dsm_rfx_<Variable name="channel"/>_spin_s</ConfigKey></Connection>
+          </PushButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <PushButton>
+            <ObjectName>PadRelease</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberStates>2</NumberStates>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <State><Number>0</Number><Text>BUILD UP</Text></State>
+            <State><Number>1</Number><Text>BUILD UP</Text></State>
+            <Connection><ConfigKey>[Skin],dsm_rfx_<Variable name="channel"/>_buildup</ConfigKey></Connection>
+          </PushButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <PushButton>
+            <ObjectName>PadRelease</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberStates>2</NumberStates>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <State><Number>0</Number><Text>MUTE</Text></State>
+            <State><Number>1</Number><Text>MUTE</Text></State>
+            <Connection><ConfigKey>[Skin],dsm_rfx_<Variable name="channel"/>_mute</ConfigKey></Connection>
+          </PushButton>
+        </Children>
+      </WidgetGroup>
+      <WidgetGroup><Size>0me,4f</Size></WidgetGroup>
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Size>0me,30f</Size>
+        <Children>
+          <PushButton>
+            <ObjectName>PadRelease</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberStates>2</NumberStates>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <State><Number>0</Number><Text>V.BRAKE LONG</Text></State>
+            <State><Number>1</Number><Text>V.BRAKE LONG</Text></State>
+            <Connection><ConfigKey>[Skin],dsm_rfx_<Variable name="channel"/>_brake_l</ConfigKey></Connection>
+          </PushButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <PushButton>
+            <ObjectName>PadRelease</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberStates>2</NumberStates>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <State><Number>0</Number><Text>B.SPIN LONG</Text></State>
+            <State><Number>1</Number><Text>B.SPIN LONG</Text></State>
+            <Connection><ConfigKey>[Skin],dsm_rfx_<Variable name="channel"/>_spin_l</ConfigKey></Connection>
+          </PushButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <PushButton>
+            <ObjectName>PadRelease</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberStates>2</NumberStates>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <State><Number>0</Number><Text>DUCKING</Text></State>
+            <State><Number>1</Number><Text>DUCKING</Text></State>
+            <Connection><ConfigKey>[Skin],dsm_rfx_<Variable name="channel"/>_duck</ConfigKey></Connection>
+          </PushButton>
+          <WidgetGroup><Size>6f,30f</Size></WidgetGroup>
+          <WidgetGroup><Size>0me,30f</Size></WidgetGroup>
+        </Children>
+      </WidgetGroup>
+    </Children>
+  </WidgetGroup>
+</Template>

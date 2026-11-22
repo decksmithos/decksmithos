@@ -84,6 +84,9 @@ install -v -m 644 -D files/snd-virmidi.modules-load.conf "${ROOTFS_DIR}/etc/modu
 # soundconfig.xml is not shipped: decksmithos-mixxx generates it for the detected
 # controller audio (a config without outputs makes Mixxx stop at a dialog).
 install -v -m 644 files/mixxx.cfg "${ROOTFS_DIR}/usr/share/decksmithos/mixxx-defaults/mixxx.cfg"
+# Default effect units (Echo, Flanger, Filter in units 1-2), seeded once like
+# mixxx.cfg; Mixxx saves its own copy when it quits.
+install -v -m 644 files/effects.xml "${ROOTFS_DIR}/usr/share/decksmithos/mixxx-defaults/effects.xml"
 
 on_chroot <<EOF
 chmod +x /home/${FIRST_USER_NAME}/.xsession

@@ -11,22 +11,22 @@
           <WidgetGroup>
             <ObjectName>SidebarContainer</ObjectName>
             <Layout>horizontal</Layout>
-            <Size>0me,40f</Size>
+            <Size>0me,48f</Size>
             <Children>
             <!-- Back-to-Overview navigation now lives in the topbar
                  (always visible there as "BACK" while in Library) -->
 
             <PushButton>
                 <ObjectName>SidebarButton</ObjectName>
-                <Size>75f,40f</Size>
+                <Size>120f,44f</Size>
                 <NumberStates>2</NumberStates>
                 <State>
                   <Number>0</Number>
-                  <Text>BROWSE</Text>
+                  <Text>LISTS</Text>
                 </State>
                 <State>
                   <Number>1</Number>
-                  <Text>BROWSE</Text>
+                  <Text>TRACKS</Text>
                 </State>
                 <Connection>
                   <ConfigKey>[Sidebar],sidebar_visible</ConfigKey>
@@ -37,8 +37,33 @@
 
               <SearchBox>
                 <ObjectName>SearchBox</ObjectName>
-                <Size>0me,40f</Size>
+                <Size>0me,44f</Size>
               </SearchBox>
+              <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+              <PushButton>
+                <ObjectName>LibLoadBtn</ObjectName>
+                <Size>120f,44f</Size>
+                <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                <State><Number>0</Number><Text>LOAD 1</Text></State>
+                <State><Number>1</Number><Text>LOAD 1</Text></State>
+                <Connection>
+                  <ConfigKey>[Channel1],LoadSelectedTrack</ConfigKey>
+                </Connection>
+              </PushButton>
+              <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+              <PushButton>
+                <ObjectName>LibLoadBtn</ObjectName>
+                <Size>120f,44f</Size>
+                <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                <State><Number>0</Number><Text>LOAD 2</Text></State>
+                <State><Number>1</Number><Text>LOAD 2</Text></State>
+                <Connection>
+                  <ConfigKey>[Channel2],LoadSelectedTrack</ConfigKey>
+                </Connection>
+              </PushButton>
+              <WidgetGroup><Size>4f,44f</Size></WidgetGroup>
               
             </Children>
           </WidgetGroup>
@@ -86,16 +111,7 @@
           </WidgetGroup>
         </Children>
       </WidgetGroup>
-      <WidgetGroup>
-        <ObjectName>Decks</ObjectName>
-        <Layout>horizontal</Layout>
-        <Size>0me,110max</Size>
-        <Children>
-          <Template src="skin:deckminimal.xml">
-            <SetVariable name="channel">1</SetVariable>
-          </Template>
-        </Children>
-      </WidgetGroup>
+      <Template src="skin:libdecks.xml"/>
     </Children>
   </WidgetGroup>
   
