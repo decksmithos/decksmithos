@@ -1,8 +1,12 @@
 # Rebuild the pinned Debian Mixxx source package (build/mixxx/mixxx.conf)
 # for Debian trixie arm64 on a native GitHub-hosted arm64 runner.
 #
-# - push / pull request touching build/mixxx: build and test, keep the .debs as a
-#   workflow artifact for 14 days.
+# Manual runs only (Actions > Mixxx package > Run workflow, or
+# `gh workflow run mixxx-deb.yml -f publish=true`): pushes do not start it,
+# because a build without a release is not used and only costs runner time.
+# Every amd64 test build happens locally first.
+# - manual run: build and test, keep the .debs as a workflow artifact for 14
+#   days.
 # - manual run with "publish": additionally create a GitHub release holding the
 #   .debs, .buildinfo, .changes and SHA256SUMS. An existing release is never
 #   overwritten; bump MIXXX_LOCAL_SUFFIX to publish a new build.
@@ -19,15 +23,6 @@ on:
         description: Publish the packages as a GitHub release
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths:
-      - build/mixxx/**
-      - .github/workflows/mixxx-deb.yml
-  pull_request:
-    paths:
-      - build/mixxx/**
-      - .github/workflows/mixxx-deb.yml
 
 permissions:
   contents: read
