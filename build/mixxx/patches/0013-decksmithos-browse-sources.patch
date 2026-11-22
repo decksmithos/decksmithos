@@ -3,14 +3,14 @@ Description: Browse: fixed sources instead of the file system tree
  feature into "Sources": only these folders at the top (no Quick Links,
  Removable Devices or /), each shown only while it is on a file system other
  than the root one, i.e. while a drive is mounted there. Checked every 2 s;
- a drive that goes away also clears its file list. No context menu then.
- Without the variable nothing changes.
+ a drive that goes away also clears its file list. The root page explains
+ the sources. No context menu then. Without the variable nothing changes.
 Author: DecksmithOS
 Forwarded: not-needed
 Last-Update: 2026-11-22
 ---
 diff --git a/src/library/browse/browsefeature.cpp b/src/library/browse/browsefeature.cpp
-index 235c16b6..47be1818 100644
+index 235c16b6..a7969b1a 100644
 --- a/src/library/browse/browsefeature.cpp
 +++ b/src/library/browse/browsefeature.cpp
 @@ -5,6 +5,7 @@
@@ -142,6 +142,29 @@ index 235c16b6..47be1818 100644
  
      // Make sure that this is reset whenever the tree changes
      // and it may have become a dangling pointer
+@@ -510,6 +601,22 @@ std::vector<std::unique_ptr<TreeItem>> BrowseFeature::getChildDirectoryItems(
+ }
+ 
+ QString BrowseFeature::getRootViewHtml() const {
++    if (!m_sources.isEmpty()) {
++        QStringList labels;
++        for (const Source& source : std::as_const(m_sources)) {
++            labels.append(source.label.toHtmlEscaped());
++        }
++        QString html;
++        html.append(QStringLiteral("<h2>%1</h2>").arg(tr("Sources")));
++        html.append(QStringLiteral("<p>%1</p>")
++                            .arg(tr("Pick a source on the left to browse its folders: "
++                                    "%1. A drive shows up while it is connected.")
++                                            .arg(labels.join(QStringLiteral(", ")))));
++        html.append(QStringLiteral("<p>%1</p>")
++                            .arg(tr("To search the music of all sources at once, "
++                                    "search in Tracks.")));
++        return html;
++    }
+     QString browseTitle = tr("Computer");
+     QString browseSummary = tr("\"Computer\" lets you navigate, view, and load tracks"
+                         " from folders on your hard disk and external devices.");
 diff --git a/src/library/browse/browsefeature.h b/src/library/browse/browsefeature.h
 index d809406a..51881f92 100644
 --- a/src/library/browse/browsefeature.h

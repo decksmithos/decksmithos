@@ -81,7 +81,8 @@ so the source is patched in this order:
 | `0011-decksmithos-midi-request-button` | `[AutoDJ],request_learn` / `request_learn_clear` / `request_learned`: learn one MIDI controller button for requests from the skin, stored in `mixxx.cfg`, mapping untouched | appliance only |
 | `0012-decksmithos-touch-scroll` | `DECKSMITHOS_TOUCH_SCROLL`: library sidebar and track tables scroll by dragging (kinetic); no dragging tracks out of them then | appliance only |
 | `0013-decksmithos-browse-sources` | `DECKSMITHOS_BROWSE_SOURCES="LABEL=/path:..."`: "Computer" becomes "Sources" with only these folders, each shown while a drive is mounted there (checked every 2 s) | appliance only |
-| `0014-decksmithos-touch-keyboard` | `DECKSMITHOS_TOUCH_KEYBOARD`: on-screen keyboard at the bottom of the window while the search box has the focus | appliance only |
+| `0014-decksmithos-touch-keyboard` | `DECKSMITHOS_TOUCH_KEYBOARD`: on-screen keyboard at the bottom of the window while the search box or any other text field has the focus | appliance only |
+| `0015-decksmithos-library-sidebar` | sidebar order / hidden / labels (`[Library] SidebarOrder`, `SidebarHidden`, `SidebarLabels`, editor in Preferences > Library > Sidebar); `[Library],show_<key>` opens a section | ours |
 
 Refresh 0000 with `build/mixxx/make-stable-patch.sh [branch [commit]]`
 (default: head of `2.5`). It also tries each DecksmithOS patch on top and

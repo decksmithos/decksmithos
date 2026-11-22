@@ -1,12 +1,14 @@
-Description: Search: on-screen keyboard (DECKSMITHOS_TOUCH_KEYBOARD)
- With DECKSMITHOS_TOUCH_KEYBOARD set, the library search box shows an
- on-screen keyboard while it has the focus: a panel across the bottom of the
- window (45 % of its height) with digits, letters, - and ', Backspace (repeats
- while held), CLEAR, SPACE, HIDE and SEARCH (Return: search, then the focus
- goes to the tracks and the keyboard hides). Its keys never take the focus;
- they send key events to the search box. Styled with WTouchKeyboard and
- #TouchKeyboardKey. Mixxx has no on-screen keyboard on Linux (only iOS's
- system keyboard). Without the variable nothing changes.
+Description: On-screen keyboard (DECKSMITHOS_TOUCH_KEYBOARD)
+ With DECKSMITHOS_TOUCH_KEYBOARD set, an on-screen keyboard appears at the
+ bottom of the window while a text field has the focus: the library search
+ box (its own keyboard: SEARCH = Return, CLEAR clears the search) and any
+ other editable QLineEdit (an application event filter: preferences,
+ renaming, table cell editors; ENTER = Return), not spin boxes. Digits,
+ letters, - and ', Backspace (repeats while held), CLEAR, SPACE, HIDE; 45 %
+ of the window height. Its keys never take the focus; they send key events
+ to the field. Styled with WTouchKeyboard and #TouchKeyboardKey. Mixxx has
+ no on-screen keyboard on Linux (only iOS's system keyboard). Without the
+ variable nothing changes.
 Author: DecksmithOS
 Forwarded: not-needed
 Last-Update: 2026-11-22
@@ -24,7 +26,7 @@ index 38d62644..eadc438b 100644
    src/widget/wsettingscheckboxlabel.cpp
    src/widget/wsingletoncontainer.cpp
 diff --git a/src/widget/wsearchlineedit.cpp b/src/widget/wsearchlineedit.cpp
-index 44d9ff95..ed08bda2 100644
+index 44d9ff95..7e676c2c 100644
 --- a/src/widget/wsearchlineedit.cpp
 +++ b/src/widget/wsearchlineedit.cpp
 @@ -17,6 +17,7 @@
@@ -35,25 +37,35 @@ index 44d9ff95..ed08bda2 100644
  #include "wskincolor.h"
  
  #define ENABLE_TRACE_LOG false
-@@ -463,6 +464,17 @@ void WSearchLineEdit::focusInEvent(QFocusEvent* event) {
+@@ -90,6 +91,9 @@ WSearchLineEdit::WSearchLineEdit(QWidget* pParent, UserSettingsPointer pConfig)
+           m_clearButton(make_parented<QToolButton>(this)),
+           m_queryEmitted(false) {
+     qRegisterMetaType<FocusWidget>("FocusWidget");
++    // DecksmithOS: the on-screen keyboard for the other text fields too
++    // (DECKSMITHOS_TOUCH_KEYBOARD; once per application)
++    WTouchKeyboard::installFocusFilter();
+     setAcceptDrops(false);
+     setEditable(true);
+     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+@@ -463,6 +467,17 @@ void WSearchLineEdit::focusInEvent(QFocusEvent* event) {
      // unchanged text. Ie. force-search to refresh view, for example to clean
      // the view from tracks that don't match the query anymore
      m_queryEmitted = false;
 +
 +    if (WTouchKeyboard::isEnabled()) {
 +        if (!m_pTouchKeyboard) {
-+            m_pTouchKeyboard = new WTouchKeyboard(this);
++            m_pTouchKeyboard = new WTouchKeyboard(window(), QStringLiteral("SEARCH"));
 +            connect(m_pTouchKeyboard,
 +                    &WTouchKeyboard::clearRequested,
 +                    this,
 +                    &WSearchLineEdit::slotClearSearch);
 +        }
-+        m_pTouchKeyboard->showForTarget();
++        m_pTouchKeyboard->showFor(this);
 +    }
  }
  
  void WSearchLineEdit::focusOutEvent(QFocusEvent* event) {
-@@ -472,6 +484,11 @@ void WSearchLineEdit::focusOutEvent(QFocusEvent* event) {
+@@ -472,6 +487,11 @@ void WSearchLineEdit::focusOutEvent(QFocusEvent* event) {
      }
      slotSaveSearch();
      QComboBox::focusOutEvent(event);
@@ -97,15 +109,20 @@ index 110230d0..7c6f3124 100644
  };
 diff --git a/src/widget/wtouchkeyboard.cpp b/src/widget/wtouchkeyboard.cpp
 new file mode 100644
-index 00000000..32319225
+index 00000000..48feed72
 --- /dev/null
 +++ b/src/widget/wtouchkeyboard.cpp
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,188 @@
 +#include "widget/wtouchkeyboard.h"
 +
++#include <QAbstractSpinBox>
 +#include <QApplication>
++#include <QComboBox>
++#include <QFocusEvent>
 +#include <QGridLayout>
++#include <QHash>
 +#include <QKeyEvent>
++#include <QLineEdit>
 +#include <QPushButton>
 +
 +#include "moc_wtouchkeyboard.cpp"
@@ -113,13 +130,13 @@ index 00000000..32319225
 +namespace {
 +
 +// Keys per row; each row is 10 columns wide. Special keys: "<" Backspace,
-+// "CLEAR", "SPACE" (4 columns), "HIDE", "SEARCH" (Return).
++// "CLEAR", "HIDE" (2 columns), "SPACE" (5), "RETURN" (3, labelled per use).
 +const QList<QStringList> kRows = {
 +        {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"},
 +        {"Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"},
 +        {"A", "S", "D", "F", "G", "H", "J", "K", "L", "<"},
 +        {"Z", "X", "C", "V", "B", "N", "M", "-", "'", "CLEAR"},
-+        {"HIDE", "SPACE", "SEARCH"},
++        {"HIDE", "SPACE", "RETURN"},
 +};
 +
 +/// Height of the keyboard as a part of the window height
@@ -132,11 +149,51 @@ index 00000000..32319225
 +        " border: 1px solid #44444c; border-radius: 4px; font-size: 24px; }"
 +        "#TouchKeyboardKey:pressed { background-color: #4b93ff; }");
 +
++/// Shows a keyboard (one per window) for editable line edits that get the
++/// focus, except the search box's (it has its own) and spin boxes'.
++class FocusFilter : public QObject {
++  public:
++    using QObject::QObject;
++
++  protected:
++    bool eventFilter(QObject* pObject, QEvent* pEvent) override {
++        if (pEvent->type() != QEvent::FocusIn && pEvent->type() != QEvent::FocusOut) {
++            return false;
++        }
++        auto* pLineEdit = qobject_cast<QLineEdit*>(pObject);
++        if (!pLineEdit || qobject_cast<QComboBox*>(pLineEdit->parentWidget()) ||
++                qobject_cast<QAbstractSpinBox*>(pLineEdit->parentWidget())) {
++            return false;
++        }
++        QWidget* pWindow = pLineEdit->window();
++        if (pEvent->type() == QEvent::FocusIn) {
++            if (pLineEdit->isReadOnly() || !pLineEdit->isEnabled()) {
++                return false;
++            }
++            QPointer<WTouchKeyboard>& pKeyboard = m_keyboards[pWindow];
++            if (!pKeyboard) {
++                pKeyboard = new WTouchKeyboard(pWindow, QStringLiteral("ENTER"));
++            }
++            pKeyboard->showFor(pLineEdit);
++        } else {
++            const auto reason = static_cast<QFocusEvent*>(pEvent)->reason();
++            WTouchKeyboard* pKeyboard = m_keyboards.value(pWindow);
++            if (pKeyboard && pKeyboard->target() == pLineEdit &&
++                    reason != Qt::PopupFocusReason) {
++                pKeyboard->hide();
++            }
++        }
++        return false;
++    }
++
++  private:
++    QHash<QWidget*, QPointer<WTouchKeyboard>> m_keyboards;
++};
++
 +} // namespace
 +
-+WTouchKeyboard::WTouchKeyboard(QWidget* pTarget)
-+        : QFrame(pTarget->window()),
-+          m_pTarget(pTarget) {
++WTouchKeyboard::WTouchKeyboard(QWidget* pWindow, const QString& returnLabel)
++        : QFrame(pWindow) {
 +    setStyleSheet(kDefaultStyle);
 +    setFocusPolicy(Qt::NoFocus);
 +    auto* pLayout = new QGridLayout(this);
@@ -152,8 +209,11 @@ index 00000000..32319225
 +            } else if (label == QStringLiteral("SPACE")) {
 +                text = QString();
 +                span = 5;
-+            } else if (label == QStringLiteral("HIDE") || label == QStringLiteral("SEARCH")) {
++            } else if (label == QStringLiteral("HIDE")) {
 +                span = 2;
++            } else if (label == QStringLiteral("RETURN")) {
++                text = returnLabel;
++                span = 3;
 +            }
 +            auto* pKey = new QPushButton(text, this);
 +            pKey->setObjectName(QStringLiteral("TouchKeyboardKey"));
@@ -167,15 +227,15 @@ index 00000000..32319225
 +                } else if (label == QStringLiteral("SPACE")) {
 +                    sendKey(Qt::Key_Space, QStringLiteral(" "));
 +                } else if (label == QStringLiteral("CLEAR")) {
-+                    emit clearRequested();
++                    clearTarget();
 +                } else if (label == QStringLiteral("HIDE")) {
 +                    hide();
-+                } else if (label == QStringLiteral("SEARCH")) {
++                } else if (label == QStringLiteral("RETURN")) {
 +                    sendKey(Qt::Key_Return, QStringLiteral("\r"));
 +                } else {
-+                    // Search ignores case: send lower case
-+                    const QString character = label.toLower();
-+                    sendKey(QKeySequence(label)[0].key(), character);
++                    // Search ignores case; names are usually typed in
++                    // lower case on a phone as well: send lower case
++                    sendKey(QKeySequence(label)[0].key(), label.toLower());
 +                }
 +            });
 +            pLayout->addWidget(pKey, row, column, 1, span);
@@ -185,7 +245,7 @@ index 00000000..32319225
 +    for (int column = 0; column < 10; ++column) {
 +        pLayout->setColumnStretch(column, 1);
 +    }
-+    window()->installEventFilter(this);
++    pWindow->installEventFilter(this);
 +    hide();
 +}
 +
@@ -194,7 +254,18 @@ index 00000000..32319225
 +    return !qEnvironmentVariableIsEmpty("DECKSMITHOS_TOUCH_KEYBOARD");
 +}
 +
-+void WTouchKeyboard::showForTarget() {
++// static
++void WTouchKeyboard::installFocusFilter() {
++    static bool s_installed = false;
++    if (s_installed || !isEnabled() || !qApp) {
++        return;
++    }
++    qApp->installEventFilter(new FocusFilter(qApp));
++    s_installed = true;
++}
++
++void WTouchKeyboard::showFor(QWidget* pTarget) {
++    m_pTarget = pTarget;
 +    place();
 +    show();
 +    raise();
@@ -213,6 +284,14 @@ index 00000000..32319225
 +    return QFrame::eventFilter(pObject, pEvent);
 +}
 +
++void WTouchKeyboard::clearTarget() {
++    if (auto* pLineEdit = qobject_cast<QLineEdit*>(m_pTarget.data())) {
++        pLineEdit->clear();
++    } else {
++        emit clearRequested();
++    }
++}
++
 +void WTouchKeyboard::sendKey(int key, const QString& text) {
 +    if (!m_pTarget) {
 +        return;
@@ -224,10 +303,10 @@ index 00000000..32319225
 +}
 diff --git a/src/widget/wtouchkeyboard.h b/src/widget/wtouchkeyboard.h
 new file mode 100644
-index 00000000..d03dfcce
+index 00000000..4f21d062
 --- /dev/null
 +++ b/src/widget/wtouchkeyboard.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,45 @@
 +#pragma once
 +
 +#include <QFrame>
@@ -236,23 +315,31 @@ index 00000000..d03dfcce
 +class QWidget;
 +
 +/// DecksmithOS: an on-screen keyboard for a touch screen without a physical
-+/// keyboard. A panel across the bottom of the window of its target; the keys
-+/// never take the focus and send key events to the target (letters, digits,
-+/// space, Backspace, Return), plus a key that clears the target's text.
-+/// WSearchLineEdit shows it while it has the focus if DECKSMITHOS_TOUCH_KEYBOARD
-+/// is set. Style it with WTouchKeyboard / #TouchKeyboardKey in the skin.
++/// keyboard, enabled by DECKSMITHOS_TOUCH_KEYBOARD. A panel across the bottom
++/// of a window; its keys never take the focus and send key events to the
++/// target widget (letters, digits, space, Backspace, Return), plus CLEAR.
++///  - The library search box (WSearchLineEdit) shows its own keyboard while
++///    it has the focus (Return = SEARCH, CLEAR = clear the search).
++///  - installFocusFilter() shows one for any other editable QLineEdit that
++///    gets the focus (preferences, renaming, cell editors), in its window.
++/// Style it with WTouchKeyboard / #TouchKeyboardKey.
 +class WTouchKeyboard : public QFrame {
 +    Q_OBJECT
 +  public:
-+    /// The keyboard is a child of `pTarget`'s window.
-+    explicit WTouchKeyboard(QWidget* pTarget);
++    /// A keyboard at the bottom of `pWindow` (a top-level widget)
++    WTouchKeyboard(QWidget* pWindow, const QString& returnLabel);
 +
 +    static bool isEnabled();
++    /// Once per application, if enabled
++    static void installFocusFilter();
 +
-+    /// Shows the keyboard at the bottom of the window, above everything else.
-+    void showForTarget();
++    void showFor(QWidget* pTarget);
++    QWidget* target() const {
++        return m_pTarget;
++    }
 +
 +  signals:
++    /// CLEAR on a target that is not a QLineEdit
 +    void clearRequested();
 +
 +  protected:
@@ -260,6 +347,7 @@ index 00000000..d03dfcce
 +
 +  private:
 +    void sendKey(int key, const QString& text);
++    void clearTarget();
 +    void place();
 +
 +    QPointer<QWidget> m_pTarget;

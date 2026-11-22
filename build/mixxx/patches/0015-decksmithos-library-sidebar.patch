@@ -1,0 +1,439 @@
+Description: Library sidebar: order, hide and rename sections; show controls
+ The sidebar sections (library features) follow [Library] SidebarOrder (keys
+ = icon names, comma separated; unlisted ones follow in Mixxx's order),
+ [Library] SidebarHidden hides sections and [Library] SidebarLabels
+ (key=Label;...) renames them. Preferences > Library > Sidebar edits all
+ three: tick to show, double-click to rename, drag or Up/Down to order; the
+ order and hidden sections apply at the next start, labels at once.
+ [Library],show_<key> (show_tracks, show_autodj, show_playlist, show_crates,
+ show_computer, show_history, ...) selects and opens a section, so a skin or
+ controller can jump to it without counting sidebar rows.
+ Mixxx has no way to order or rename the sidebar.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-22
+---
+diff --git a/src/library/library.cpp b/src/library/library.cpp
+index 3a17c062..54f2446f 100644
+--- a/src/library/library.cpp
++++ b/src/library/library.cpp
+@@ -2,9 +2,12 @@
+ 
+ #include <QApplication>
+ #include <QDir>
++#include <QHash>
++#include <algorithm>
+ #include <QMessageBox>
+ 
+ #include "control/controlobject.h"
++#include "control/controlpushbutton.h"
+ #include "controllers/keyboard/keyboardeventfilter.h"
+ #include "library/analysis/analysisfeature.h"
+ #include "library/autodj/autodjfeature.h"
+@@ -45,6 +48,49 @@ namespace {
+ 
+ const mixxx::Logger kLogger("Library");
+ 
++const QString kLibraryGroup = QStringLiteral("[Library]");
++const ConfigKey kSidebarOrderKey = ConfigKey(kLibraryGroup, QStringLiteral("SidebarOrder"));
++const ConfigKey kSidebarHiddenKey = ConfigKey(kLibraryGroup, QStringLiteral("SidebarHidden"));
++const ConfigKey kSidebarLabelsKey = ConfigKey(kLibraryGroup, QStringLiteral("SidebarLabels"));
++
++QStringList configList(const UserSettingsPointer& pConfig, const ConfigKey& key) {
++    QStringList items;
++    const QStringList parts = pConfig->getValueString(key).split(QChar(','), Qt::SkipEmptyParts);
++    for (const QString& part : parts) {
++        items.append(part.trimmed());
++    }
++    return items;
++}
++
++QHash<QString, QString> configLabels(const UserSettingsPointer& pConfig) {
++    QHash<QString, QString> labels;
++    const QStringList pairs =
++            pConfig->getValueString(kSidebarLabelsKey).split(QChar(';'), Qt::SkipEmptyParts);
++    for (const QString& pair : pairs) {
++        const int equals = pair.indexOf(QChar('='));
++        if (equals > 0 && equals < pair.size() - 1) {
++            labels.insert(pair.left(equals).trimmed(), pair.mid(equals + 1).trimmed());
++        }
++    }
++    return labels;
++}
++
++/// m_features in the configured order: listed keys first, then the rest
++QList<LibraryFeature*> orderedFeatures(
++        const QList<LibraryFeature*>& features, const QStringList& order) {
++    QList<LibraryFeature*> ordered = features;
++    std::stable_sort(ordered.begin(),
++            ordered.end(),
++            [&order](LibraryFeature* a, LibraryFeature* b) {
++                const auto rank = [&order](LibraryFeature* f) {
++                    const int i = static_cast<int>(order.indexOf(f->iconName()));
++                    return i < 0 ? static_cast<int>(order.size()) : i;
++                };
++                return rank(a) < rank(b);
++            });
++    return ordered;
++}
++
+ } // namespace
+ 
+ using namespace mixxx::library::prefs;
+@@ -257,6 +303,76 @@ Library::Library(
+     m_editMetadataSelectedClick = m_pConfig->getValue(
+             kEditMetadataSelectedClickConfigKey,
+             kEditMetadataSelectedClickDefault);
++
++    addFeaturesToSidebar();
++}
++
++void Library::addFeaturesToSidebar() {
++    const QStringList hidden = configList(m_pConfig, kSidebarHiddenKey);
++    const QList<LibraryFeature*> features =
++            orderedFeatures(m_features, configList(m_pConfig, kSidebarOrderKey));
++    for (LibraryFeature* pFeature : features) {
++        if (!hidden.contains(pFeature->iconName())) {
++            m_pSidebarModel->addLibraryFeature(pFeature);
++            addShowFeatureControl(pFeature);
++        }
++    }
++    m_pSidebarModel->setFeatureLabels(configLabels(m_pConfig));
++    m_bSidebarDeferred = false;
++}
++
++void Library::addShowFeatureControl(LibraryFeature* pFeature) {
++    auto pControl = std::make_unique<ControlPushButton>(
++            ConfigKey(kLibraryGroup, QStringLiteral("show_") + pFeature->iconName()));
++    connect(pControl.get(),
++            &ControlObject::valueChanged,
++            this,
++            [this, pFeature](double value) {
++                if (value > 0) {
++                    m_pSidebarModel->slotFeatureSelect(pFeature);
++                    pFeature->activate();
++                }
++            });
++    m_showFeatureControls.push_back(std::move(pControl));
++}
++
++QList<Library::SidebarEntry> Library::sidebarEntries(bool mixxxDefaults) const {
++    const QStringList hidden =
++            mixxxDefaults ? QStringList() : configList(m_pConfig, kSidebarHiddenKey);
++    const QHash<QString, QString> labels =
++            mixxxDefaults ? QHash<QString, QString>() : configLabels(m_pConfig);
++    const QStringList order =
++            mixxxDefaults ? QStringList() : configList(m_pConfig, kSidebarOrderKey);
++    QList<SidebarEntry> entries;
++    for (LibraryFeature* pFeature : orderedFeatures(m_features, order)) {
++        const QString key = pFeature->iconName();
++        entries.append(SidebarEntry{key,
++                pFeature->title().toString(),
++                labels.value(key),
++                !hidden.contains(key)});
++    }
++    return entries;
++}
++
++void Library::saveSidebarEntries(const QList<SidebarEntry>& entries) {
++    QStringList order;
++    QStringList hidden;
++    QStringList labels;
++    for (const SidebarEntry& entry : entries) {
++        order.append(entry.key);
++        if (!entry.visible) {
++            hidden.append(entry.key);
++        }
++        const QString label = entry.label.trimmed().remove(QChar(';'));
++        if (!label.isEmpty() && label != entry.title) {
++            labels.append(entry.key + QChar('=') + label);
++        }
++    }
++    m_pConfig->setValue(kSidebarOrderKey, order.join(QChar(',')));
++    m_pConfig->setValue(kSidebarHiddenKey, hidden.join(QChar(',')));
++    m_pConfig->setValue(kSidebarLabelsKey, labels.join(QChar(';')));
++    // Labels apply at once; order and visibility at the next start
++    m_pSidebarModel->setFeatureLabels(configLabels(m_pConfig));
+ }
+ 
+ Library::~Library() = default;
+@@ -471,7 +587,11 @@ void Library::addFeature(LibraryFeature* feature) {
+         return;
+     }
+     m_features.push_back(feature);
+-    m_pSidebarModel->addLibraryFeature(feature);
++    if (!m_bSidebarDeferred) {
++        // Added after start: at the end, like Mixxx does
++        m_pSidebarModel->addLibraryFeature(feature);
++        addShowFeatureControl(feature);
++    }
+     connect(feature,
+             &LibraryFeature::pasteFromSidebar,
+             this,
+diff --git a/src/library/library.h b/src/library/library.h
+index 0c9523ba..2605ca59 100644
+--- a/src/library/library.h
++++ b/src/library/library.h
+@@ -4,6 +4,8 @@
+ #include <QList>
+ #include <QObject>
+ #include <QPointer>
++#include <memory>
++#include <vector>
+ 
+ #include "analyzer/trackanalysisscheduler.h"
+ #include "library/library_decl.h"
+@@ -42,6 +44,8 @@ class LibraryExporter;
+ 
+ // A Library class is a container for all the model-side aspects of the library.
+ // A library widget can be attached to the Library object by calling bindLibraryWidget.
++class ControlPushButton;
++
+ class Library: public QObject {
+     Q_OBJECT
+ 
+@@ -73,6 +77,26 @@ class Library: public QObject {
+ 
+     void addFeature(LibraryFeature* feature);
+ 
++    /// DecksmithOS: the sidebar's sections, configurable in the library
++    /// preferences (applied when Mixxx starts):
++    ///   [Library] SidebarOrder   keys in order, comma separated; sections
++    ///                            not listed follow in Mixxx's order
++    ///   [Library] SidebarHidden  keys of hidden sections, comma separated
++    ///   [Library] SidebarLabels  key=Label pairs, separated by ';'
++    /// The key of a section is its icon name: tracks, autodj, playlist,
++    /// crates, computer, recordings, history, prepare, rekordbox, serato, ...
++    /// [Library],show_<key> selects a section (not if hidden).
++    struct SidebarEntry {
++        QString key;
++        QString title; // Mixxx's own title
++        QString label; // empty: the title
++        bool visible = true;
++    };
++    /// All sections in the configured order (hidden ones included), or
++    /// Mixxx's own order, all shown and with their titles
++    QList<SidebarEntry> sidebarEntries(bool mixxxDefaults = false) const;
++    void saveSidebarEntries(const QList<SidebarEntry>& entries);
++
+     /// Needed for exposing models to QML
+     LibraryTableModel* trackTableModel() const;
+ 
+@@ -166,6 +190,10 @@ class Library: public QObject {
+     parented_ptr<LibraryControl> m_pLibraryControl;
+ 
+     QList<LibraryFeature*> m_features;
++    void addFeaturesToSidebar();
++    void addShowFeatureControl(LibraryFeature* pFeature);
++    bool m_bSidebarDeferred = true;
++    std::vector<std::unique_ptr<ControlPushButton>> m_showFeatureControls;
+     const static QString m_sTrackViewName;
+     const static QString m_sAutoDJViewName;
+     WLibrary* m_pLibraryWidget;
+diff --git a/src/library/sidebarmodel.cpp b/src/library/sidebarmodel.cpp
+index 3914c7f4..6041ad3d 100644
+--- a/src/library/sidebarmodel.cpp
++++ b/src/library/sidebarmodel.cpp
+@@ -256,8 +256,13 @@ QVariant SidebarModel::data(const QModelIndex& index, int role) const {
+     if (index.internalPointer() == this) {
+         //If it points to SidebarModel
+         switch (role) {
+-        case Qt::DisplayRole:
++        case Qt::DisplayRole: {
++            const auto label = m_featureLabels.constFind(m_sFeatures[index.row()]->iconName());
++            if (label != m_featureLabels.constEnd()) {
++                return *label;
++            }
+             return m_sFeatures[index.row()]->title();
++        }
+         case Qt::DecorationRole:
+             return m_sFeatures[index.row()]->icon();
+         case SidebarModel::IconNameRole:
+@@ -560,6 +565,13 @@ void SidebarModel::slotFeatureLoadingFinished(LibraryFeature* pFeature) {
+     slotFeatureSelect(pFeature);
+ }
+ 
++void SidebarModel::setFeatureLabels(const QHash<QString, QString>& labels) {
++    m_featureLabels = labels;
++    if (!m_sFeatures.isEmpty()) {
++        emit dataChanged(index(0, 0), index(static_cast<int>(m_sFeatures.size()) - 1, 0));
++    }
++}
++
+ void SidebarModel::featureRenamed(LibraryFeature* pFeature) {
+     for (int i=0; i < m_sFeatures.size(); ++i) {
+         if (m_sFeatures[i] == pFeature) {
+diff --git a/src/library/sidebarmodel.h b/src/library/sidebarmodel.h
+index c987dff7..456ed65d 100644
+--- a/src/library/sidebarmodel.h
++++ b/src/library/sidebarmodel.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <QAbstractItemModel>
++#include <QHash>
+ #include <QList>
+ #include <QModelIndex>
+ #include <QVariant>
+@@ -57,6 +58,9 @@ class SidebarModel : public QAbstractItemModel {
+     void renameItem(const QModelIndex& index);
+     void deleteItem(const QModelIndex& index);
+     void slotFeatureSelect(LibraryFeature* pFeature, const QModelIndex& index = QModelIndex());
++    /// DecksmithOS: labels shown instead of the sections' titles, by key
++    /// (icon name)
++    void setFeatureLabels(const QHash<QString, QString>& labels);
+ 
+     // Slots for every single QAbstractItemModel signal
+     // void slotColumnsAboutToBeInserted(const QModelIndex& parent, int start, int end);
+@@ -89,6 +93,7 @@ class SidebarModel : public QAbstractItemModel {
+     QModelIndex translateIndex(const QModelIndex& index, const QAbstractItemModel* model);
+     void featureRenamed(LibraryFeature*);
+     QList<LibraryFeature*> m_sFeatures;
++    QHash<QString, QString> m_featureLabels;
+     unsigned int m_iDefaultSelectedIndex; /** Index of the item in the sidebar model to select at startup. */
+ 
+     QTimer* const m_pressedUntilClickedTimer;
+diff --git a/src/preferences/dialog/dlgpreflibrary.cpp b/src/preferences/dialog/dlgpreflibrary.cpp
+index 142a5333..ef0b5d64 100644
+--- a/src/preferences/dialog/dlgpreflibrary.cpp
++++ b/src/preferences/dialog/dlgpreflibrary.cpp
+@@ -5,6 +5,12 @@
+ #include <QFileDialog>
+ #include <QFontDialog>
+ #include <QFontMetrics>
++#include <QGroupBox>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QListWidget>
++#include <QPushButton>
++#include <QVBoxLayout>
+ #include <QMessageBox>
+ #include <QStandardPaths>
+ #include <QUrl>
+@@ -41,6 +47,7 @@ DlgPrefLibrary::DlgPrefLibrary(
+           m_pRateRangeDeck1(make_parented<ControlProxy>(
+                   QStringLiteral("[Channel1]"), QStringLiteral("rateRange"), this)) {
+     setupUi(this);
++    setupSidebarEditor();
+ 
+     connect(pushButton_add_dir,
+             &QPushButton::clicked,
+@@ -235,7 +242,67 @@ void DlgPrefLibrary::populateDirList() {
+     }
+ }
+ 
++void DlgPrefLibrary::setupSidebarEditor() {
++    auto* pGroup = new QGroupBox(tr("Sidebar"), this);
++    auto* pLayout = new QVBoxLayout(pGroup);
++    auto* pHint = new QLabel(
++            tr("Order, show and rename the library sections. Tick to show; "
++               "double-tap a name to rename it. The order and hidden sections "
++               "apply when Mixxx starts again, names at once."),
++            pGroup);
++    pHint->setWordWrap(true);
++    pLayout->addWidget(pHint);
++    auto* pRow = new QHBoxLayout();
++    m_pSidebarList = new QListWidget(pGroup);
++    m_pSidebarList->setDragDropMode(QAbstractItemView::InternalMove);
++    m_pSidebarList->setEditTriggers(
++            QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
++    m_pSidebarList->setMinimumHeight(260);
++    pRow->addWidget(m_pSidebarList, 1);
++    auto* pButtons = new QVBoxLayout();
++    auto* pUp = new QPushButton(tr("Up"), pGroup);
++    auto* pDown = new QPushButton(tr("Down"), pGroup);
++    connect(pUp, &QPushButton::clicked, this, [this]() {
++        moveSidebarItem(-1);
++    });
++    connect(pDown, &QPushButton::clicked, this, [this]() {
++        moveSidebarItem(1);
++    });
++    pButtons->addWidget(pUp);
++    pButtons->addWidget(pDown);
++    pButtons->addStretch(1);
++    pRow->addLayout(pButtons);
++    pLayout->addLayout(pRow);
++    // After the music directories
++    verticalLayout->insertWidget(1, pGroup);
++}
++
++void DlgPrefLibrary::populateSidebarList(bool mixxxDefaults) {
++    m_pSidebarList->clear();
++    for (const auto& entry : m_pLibrary->sidebarEntries(mixxxDefaults)) {
++        auto* pItem = new QListWidgetItem(
++                entry.label.isEmpty() ? entry.title : entry.label, m_pSidebarList);
++        pItem->setData(Qt::UserRole, entry.key);
++        pItem->setData(Qt::UserRole + 1, entry.title);
++        pItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable |
++                Qt::ItemIsUserCheckable | Qt::ItemIsEditable | Qt::ItemIsDragEnabled);
++        pItem->setCheckState(entry.visible ? Qt::Checked : Qt::Unchecked);
++    }
++}
++
++void DlgPrefLibrary::moveSidebarItem(int delta) {
++    const int row = m_pSidebarList->currentRow();
++    const int newRow = row + delta;
++    if (row < 0 || newRow < 0 || newRow >= m_pSidebarList->count()) {
++        return;
++    }
++    QListWidgetItem* pItem = m_pSidebarList->takeItem(row);
++    m_pSidebarList->insertItem(newRow, pItem);
++    m_pSidebarList->setCurrentRow(newRow);
++}
++
+ void DlgPrefLibrary::slotResetToDefaults() {
++    populateSidebarList(true);
+     checkBox_library_scan->setChecked(false);
+     spinbox_history_track_duplicate_distance->setValue(
+             kHistoryTrackDuplicateDistanceDefault);
+@@ -271,6 +338,7 @@ void DlgPrefLibrary::slotResetToDefaults() {
+ 
+ void DlgPrefLibrary::slotUpdate() {
+     populateDirList();
++    populateSidebarList(false);
+     checkBox_library_scan->setChecked(m_pConfig->getValue(
+             kRescanOnStartupConfigKey, false));
+ 
+@@ -507,6 +575,17 @@ void DlgPrefLibrary::slotSeratoMetadataExportClicked(bool checked) {
+ }
+ 
+ void DlgPrefLibrary::slotApply() {
++    QList<Library::SidebarEntry> sidebarEntries;
++    for (int row = 0; row < m_pSidebarList->count(); ++row) {
++        const QListWidgetItem* pItem = m_pSidebarList->item(row);
++        sidebarEntries.append(Library::SidebarEntry{
++                pItem->data(Qt::UserRole).toString(),
++                pItem->data(Qt::UserRole + 1).toString(),
++                pItem->text(),
++                pItem->checkState() == Qt::Checked});
++    }
++    m_pLibrary->saveSidebarEntries(sidebarEntries);
++
+     m_pConfig->set(kRescanOnStartupConfigKey,
+             ConfigValue((int)checkBox_library_scan->isChecked()));
+ 
+diff --git a/src/preferences/dialog/dlgpreflibrary.h b/src/preferences/dialog/dlgpreflibrary.h
+index 97d64dc5..597871b5 100644
+--- a/src/preferences/dialog/dlgpreflibrary.h
++++ b/src/preferences/dialog/dlgpreflibrary.h
+@@ -2,6 +2,8 @@
+ 
+ #include <QFont>
+ #include <QStandardItemModel>
++
++class QListWidget;
+ #include <memory>
+ 
+ #include "library/library_decl.h"
+@@ -70,6 +72,11 @@ class DlgPrefLibrary : public DlgPreferencePage, public Ui::DlgPrefLibraryDlg  {
+ 
+   private:
+     void populateDirList();
++    // DecksmithOS: the sidebar sections (order, shown, label)
++    void setupSidebarEditor();
++    void populateSidebarList(bool mixxxDefaults);
++    void moveSidebarItem(int delta);
++    QListWidget* m_pSidebarList = nullptr;
+     void setLibraryFont(const QFont& font);
+     void resetLibraryFont();
+     void updateSearchLineEditHistoryOptions();
