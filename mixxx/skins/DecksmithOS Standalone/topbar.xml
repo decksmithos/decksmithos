@@ -12,6 +12,7 @@
        SEARCH    Tracks (all music), focus on the search box
        MENU      skin settings page ([Tab],shortcut); tapped again, back to
                  the main page
+       NEXT      while Auto DJ runs: the planned transition; a tap changes it
      No BACK button: every page closes with a second tap on its lit button,
      and the sidebar is in reach of a finger. -->
 <Template>
@@ -68,6 +69,38 @@
             </Connection>
           </PushButton>
         </Children>
+      </WidgetGroup>
+
+      <!-- The planned Auto DJ transition, on every page while Auto DJ runs
+           (DecksmithOS-AutoDJ.js, [Skin],dsm_adj_next); a tap picks the next
+           one that suits the two tracks. Also in the Auto DJ row. -->
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Size>186f,48f</Size>
+        <Children>
+          <WidgetGroup><Size>6f,48f</Size></WidgetGroup>
+          <PushButton>
+            <ObjectName>TopAdjNextBtn</ObjectName>
+            <Size>174f,38f</Size>
+            <NumberStates>9</NumberStates>
+            <State><Number>0</Number><Text>NEXT: -</Text></State>
+            <State><Number>1</Number><Text>NEXT: BLEND</Text></State>
+            <State><Number>2</Number><Text>NEXT: FILTER</Text></State>
+            <State><Number>3</Number><Text>NEXT: ECHO</Text></State>
+            <State><Number>4</Number><Text>NEXT: REVERB</Text></State>
+            <State><Number>5</Number><Text>NEXT: FADE</Text></State>
+            <State><Number>6</Number><Text>NEXT: LOOP</Text></State>
+            <State><Number>7</Number><Text>NEXT: RISER</Text></State>
+            <State><Number>8</Number><Text>NEXT: BRAKE</Text></State>
+            <Connection>
+              <ConfigKey>[Skin],dsm_adj_next</ConfigKey>
+            </Connection>
+          </PushButton>
+        </Children>
+        <Connection>
+          <ConfigKey>[AutoDJ],enabled</ConfigKey>
+          <BindProperty>visible</BindProperty>
+        </Connection>
       </WidgetGroup>
 
       <WidgetGroup><Size>0me,48f</Size></WidgetGroup>

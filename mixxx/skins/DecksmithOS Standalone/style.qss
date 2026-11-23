@@ -1040,6 +1040,9 @@ font-size:25px;
 #TopNavBtn[value="2"] { color: #6fe0a0; border: 2px solid #2fbf71; }
 #TopNavBtn[value="3"] { color: #fff; background-color: #1e6fd9; border: 2px solid #2fbf71; }
 #TopNavBtn:pressed { background-color: #2d2d35; }
+#TopAdjNextBtn { font-size: 18px; padding: 0px; color: #8fc1ff; background-color: #1d1d22; border: 1px solid #1e6fd9; border-radius: 3px; }
+#TopAdjNextBtn[value="0"] { color: #6a6a72; border-color: #45454d; }
+#TopAdjNextBtn:pressed { background-color: #2d2d35; }
 #TopbarClock, #TopbarRecDuration { font-size: 18px; color: #e8e8ec; }
 #TopbarRecDuration[highlight="1"] { color: #ff3b30; }
 #TopbarRecCircle { font-size: 14px; color: #55555c; qproperty-alignment: 'AlignRight | AlignVCenter'; }
