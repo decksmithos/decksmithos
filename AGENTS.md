@@ -567,8 +567,11 @@ hides the folder tree (Sources; decided 2026-11-22: Tracks and SEARCH cover
 all drives, and two DJs' drives at once are avoided at events) and iTunes.
 The top bar (PLAYLIST, BROWSE, AUTO DJ, SEARCH, MENU) opens sections
 with `[Library],show_<key>` through the skin bridge; the button of the
-section shown is lit, a second tap closes the library page (BROWSE closes it
-from any section); no BACK button (removed 2026-11-22: with touch lists and
+section shown is lit, a second tap closes the library page, a tap on
+another button switches to its section; BROWSE always opens Tracks (all music)
+and stays lit in Crates, History, ... opened from the sidebar (Playlists and
+Auto DJ have their own buttons; fixed 2026-11-23: it used to reopen the last
+section, lighting that section's button); no BACK button (removed 2026-11-22: with touch lists and
 second-tap close it had no use left); SEARCH
 searches Tracks (all music). EJECT buttons for /usb and /usb2 in the library
 bar (patch 0017, `decksmithos-system eject`: unmount and detach; refused

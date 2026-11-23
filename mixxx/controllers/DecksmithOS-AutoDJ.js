@@ -111,6 +111,13 @@ DecksmithAutoDJ.init = function(id, debugging) {
                     DecksmithAutoDJ.onTrackLoaded(group);
                 }
             }));
+        // a track loaded before it was analyzed gets its tempo and key later
+        ["file_bpm", "key"].forEach(function(key) {
+            DecksmithAutoDJ.connections.push(
+                engine.makeConnection(group, key, function() {
+                    DecksmithAutoDJ.onAnalysis(group);
+                }));
+        });
     });
     this.connections.push(engine.makeConnection("[Master]", "crossfader",
         function(value) {
@@ -139,6 +146,16 @@ DecksmithAutoDJ.init = function(id, debugging) {
     this.history = [];
     this.timers = {};
     this.log("ready");
+    // Reloaded while Auto DJ runs (a controller plugged in sets up the
+    // controllers again): plan the next transition again
+    this.startTimer("resume", 1000, function() {
+        DecksmithAutoDJ.DECKS.forEach(function(group) {
+            if (!DecksmithAutoDJ.plan && engine.getValue(group, "track_loaded") > 0 &&
+                    !engine.getValue(group, "play")) {
+                DecksmithAutoDJ.onTrackLoaded(group);
+            }
+        });
+    }, true);
 };
 
 DecksmithAutoDJ.shutdown = function() {
@@ -306,12 +323,30 @@ DecksmithAutoDJ.onTrackLoaded = function(group) {
         return;
     }
     var c = this.choose(from, group);
-    this.plan = {from: from, to: group, name: c.name, matched: c.matched, pre: false};
+    this.plan = {from: from, to: group, name: c.name, matched: c.matched, pre: false,
+        complete: c.change !== null && c.keys !== null};
     engine.setValue("[AutoDJ]", "next_transition_beats",
         c.name ? this.TRANSITIONS[c.name].beats : -1);
     this.log("next: " + (c.name || "Mixxx crossfade (no transition allowed)") +
              " (tempo " + (c.change === null ? "?" : c.change.toFixed(1) + " %") +
              ", key steps " + (c.keys === null ? "?" : c.keys) + ")");
+};
+
+// The tempo or key of a deck changed (its analysis finished): choose again if
+// the plan was made without them and has not started yet
+DecksmithAutoDJ.onAnalysis = function(group) {
+    var p = this.plan;
+    if (!p || p.complete || p.pre || this.transition ||
+            (group !== p.from && group !== p.to)) {
+        return;
+    }
+    // tempo and key arrive one after the other
+    this.startTimer("replan", 500, function() {
+        var q = DecksmithAutoDJ.plan;
+        if (q && !q.complete && !q.pre && !DecksmithAutoDJ.transition) {
+            DecksmithAutoDJ.onTrackLoaded(q.to);
+        }
+    }, true);
 };
 
 // --- Before the transition ------------------------------------------------------

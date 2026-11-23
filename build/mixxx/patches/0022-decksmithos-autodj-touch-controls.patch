@@ -9,13 +9,13 @@ Description: Auto DJ queue and sources from a touch screen
    queue" ([Auto DJ] EnableRandomQueue).
 Author: DecksmithOS
 Forwarded: no
-Last-Update: 2026-11-22
+Last-Update: 2026-11-23
 ---
 diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
-index 98efc9a5..cf5eed27 100644
+index cb071296..2c6e3962 100644
 --- a/src/library/autodj/autodjprocessor.cpp
 +++ b/src/library/autodj/autodjprocessor.cpp
-@@ -143,7 +143,8 @@ AutoDJProcessor::AutoDJProcessor(
+@@ -145,7 +145,8 @@ AutoDJProcessor::AutoDJProcessor(
            m_enabledAutoDJ(ConfigKey(kControlGroup, QStringLiteral("enabled"))),
            m_nextTransitionBeats(ConfigKey(kControlGroup, QStringLiteral("next_transition_beats"))),
            m_phraseAlign(ConfigKey(kControlGroup, QStringLiteral("phrase_align"))),
@@ -25,7 +25,7 @@ index 98efc9a5..cf5eed27 100644
      m_pAutoDJTableModel = make_parented<PlaylistTableModel>(
              this, pTrackCollectionManager, "mixxx.db.model.autodj");
      m_pAutoDJTableModel->selectPlaylist(iAutoDJPlaylistId);
-@@ -186,6 +187,25 @@ AutoDJProcessor::AutoDJProcessor(
+@@ -188,6 +189,25 @@ AutoDJProcessor::AutoDJProcessor(
              });
      m_secondsToTransition.setReadOnly();
      m_secondsToTransition.forceSet(-1);
@@ -232,10 +232,10 @@ index 0289a6e2..3fbc633c 100644
      parented_ptr<QAction> m_pCreateImportPlaylistAction;
      parented_ptr<QAction> m_pExportPlaylistAction;
 diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
-index 2fa56008..0105e401 100644
+index 5d9b05c2..af086d07 100644
 --- a/src/test/autodjprocessor_test.cpp
 +++ b/src/test/autodjprocessor_test.cpp
-@@ -2000,3 +2000,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
+@@ -2057,3 +2057,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
      EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
      EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
  }

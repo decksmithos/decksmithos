@@ -10,14 +10,15 @@
 // missing control is retried every second (up to two minutes).
 //
 //   [Skin],dsm_nav_playlist   library page, Playlists
-//   [Skin],dsm_nav_browse     library page as it was left; closes it again
+//   [Skin],dsm_nav_browse     library page, Tracks (all music)
 //   [Skin],dsm_nav_autodj     library page, Auto DJ (the queue)
 //   [Skin],dsm_nav_search     library page, Tracks (all music), focus on
 //                             the search box
 //   AUTO DJ has a green outline while Auto DJ runs ([Skin],dsm_lit_autodj
 //   + 2).
 //   The button of the section shown is lit ([Skin],dsm_lit_<name>); tapping
-//   it again closes the library page (there is no BACK button). Sections
+//   it again closes the library page (there is no BACK button); tapping
+//   another button switches to its section. Sections
 //   are opened with [Library],show_<key> and followed with
 //   [Library],active_<key> (Mixxx patch 0015).
 //   [Skin],dsm_xpad_<n>       X-PAD: while held, the BEAT FX effect
@@ -104,6 +105,7 @@ DecksmithSkin.connectAll = function() {
     Object.keys(this.SECTION).forEach(function(name) {
         DecksmithSkin.watch("active_" + DecksmithSkin.SECTION[name], update, "[Library]");
     });
+    this.watch("active_tracks", update, "[Library]");
     this.retryPending();
 };
 
@@ -129,19 +131,24 @@ DecksmithSkin.retryPending = function() {
 
 // --- Navigation --------------------------------------------------------------
 
-// Library sections by key ([Library],show_<key>, Mixxx patch 0015)
+// Library sections by key ([Library],show_<key>, Mixxx patch 0015) of the
+// buttons that have one section of their own
 DecksmithSkin.SECTION = {
     playlist: "playlist",
     autodj: "autodj",
-    search: "tracks",
 };
+// BROWSE always opens Tracks (all music); BROWSE stays lit in the other
+// lists of the sidebar (crates, history, ...) opened from there.
+// Tracks is both BROWSE and SEARCH: lit is the one that opened it last
+DecksmithSkin.tracksOwner = "browse";
 
 DecksmithSkin.libraryShown = function() {
     return engine.getValue("[Skin]", "show_maximized_library") > 0;
 };
 
-// The button that is lit: the active section's, or BROWSE for any other
-// section; none on the main page
+// The button that is lit: PLAYLIST or AUTO DJ for their sections, SEARCH or
+// BROWSE (whichever opened it) for Tracks, BROWSE for any other section;
+// none on the main page
 DecksmithSkin.litButton = function() {
     if (!this.libraryShown()) {
         return null;
@@ -151,6 +158,9 @@ DecksmithSkin.litButton = function() {
         if (engine.getValue("[Library]", "active_" + this.SECTION[names[i]]) > 0) {
             return names[i];
         }
+    }
+    if (engine.getValue("[Library]", "active_tracks") > 0) {
+        return this.tracksOwner;
     }
     return "browse";
 };
@@ -170,34 +180,37 @@ DecksmithSkin.closeLibrary = function() {
     engine.setValue("[Skin]", "show_maximized_library", 0);
 };
 
+DecksmithSkin.showSection = function(key) {
+    engine.setValue("[Library]", "show_" + key, 1);
+    engine.setValue("[Library]", "show_" + key, 0);
+};
+
+// Each button opens its section, from the main page or from any other
+// section; tapping the lit button again closes the library page
 DecksmithSkin.navigate = function(name) {
-    if (name === "browse" && this.libraryShown()) {
-        // BROWSE opens or closes the library page, whatever section is shown
-        this.closeLibrary();
-        return;
-    }
     if (this.litButton() === name) {
         this.closeLibrary(); // second tap
         return;
     }
     engine.setValue("[Skin]", "show_maximized_library", 1);
-    var section = this.SECTION[name];
-    if (section === undefined) {
-        this.updateLit();
-        return; // BROWSE: the library page as it was left
-    }
     if (name !== "search") {
         // the section's lists are in the sidebar
         engine.setValue("[Sidebar]", "sidebar_visible", 1);
     }
-    engine.setValue("[Library]", "show_" + section, 1);
-    engine.setValue("[Library]", "show_" + section, 0);
-    if (name === "search") {
+    if (name === "browse") {
+        this.tracksOwner = "browse";
+        this.showSection("tracks");
+    } else if (name === "search") {
+        this.tracksOwner = "search";
+        this.showSection("tracks");
         // after the view switch has been handled
         engine.beginTimer(100, function() {
             engine.setValue("[Library]", "focused_widget", 1); // search box
         }, true);
+    } else {
+        this.showSection(this.SECTION[name]);
     }
+    this.updateLit();
 };
 
 // --- X-PAD -------------------------------------------------------------------
