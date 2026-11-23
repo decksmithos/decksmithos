@@ -232,10 +232,10 @@ index 0289a6e2..3fbc633c 100644
      parented_ptr<QAction> m_pCreateImportPlaylistAction;
      parented_ptr<QAction> m_pExportPlaylistAction;
 diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
-index 5d9b05c2..af086d07 100644
+index 44304d63..959b57be 100644
 --- a/src/test/autodjprocessor_test.cpp
 +++ b/src/test/autodjprocessor_test.cpp
-@@ -2057,3 +2057,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
+@@ -2059,3 +2059,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
      EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
      EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
  }

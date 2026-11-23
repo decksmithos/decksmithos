@@ -39,6 +39,11 @@
 // (echo, loop, riser, brake). Loop and brake stop the outgoing track from
 // reaching that point, so they cut with [AutoDJ],fade_now.
 //
+// PLAY on the waiting deck (any controller) while Auto DJ runs starts the
+// transition now, like FADE NOW. Moving the crossfader all the way to the
+// waiting deck is a transition by hand (Mixxx's Auto DJ plays that deck and
+// stops the other); this script leaves it alone.
+//
 // For every transition: if the tempos can be matched, the incoming track
 // takes the playing track's tempo and phase, with keylock, and afterwards
 // slowly returns to its own tempo. The outgoing deck gets its EQ, filter,
@@ -83,6 +88,7 @@ DecksmithAutoDJ.TRANSITIONS = {
 };
 
 DecksmithAutoDJ.DECKS = ["[Channel1]", "[Channel2]"];
+DecksmithAutoDJ.FADE_REQUEST_MS = 2000;
 DecksmithAutoDJ.STEP_MS = 50;
 
 DecksmithAutoDJ.init = function(id, debugging) {
@@ -145,6 +151,13 @@ DecksmithAutoDJ.init = function(id, debugging) {
     this.transition = null;
     this.history = [];
     this.timers = {};
+    // fade_now asked for (by this script or the FADE NOW button), in ms
+    this.fadeRequestedAt = 0;
+    this.connections.push(engine.makeConnection("[AutoDJ]", "fade_now", function(value) {
+        if (value > 0) {
+            DecksmithAutoDJ.fadeRequestedAt = Date.now();
+        }
+    }));
     this.log("ready");
     // Reloaded while Auto DJ runs (a controller plugged in sets up the
     // controllers again): plan the next transition again
@@ -449,18 +462,54 @@ DecksmithAutoDJ.cutNow = function(group) {
         engine.setValue(group, "reloop_toggle", 1);
     }
     engine.setValue("[AutoDJ]", "next_transition_beats", 0);
-    engine.setValue("[AutoDJ]", "fade_now", 1);
-    engine.setValue("[AutoDJ]", "fade_now", 0);
+    this.fadeNow();
 };
 
 // --- The transition -----------------------------------------------------------
+
+// PLAY pressed (on any controller, or the keyboard) on the waiting deck while
+// Auto DJ runs: start the transition now (FADE NOW) instead of playing the
+// track under the one on air (not tied to the headphone cue: the waiting
+// deck has it on while Auto DJ runs).
+// Auto DJ itself sets next_transition_beats back to -1 just before it
+// starts the waiting deck; a transition still a while away (and no fade_now
+// just asked for) means the press came from a DJ.
+DecksmithAutoDJ.manualStart = function(group) {
+    if (Date.now() - this.fadeRequestedAt < this.FADE_REQUEST_MS) {
+        return false;
+    }
+    return engine.getValue("[AutoDJ]", "next_transition_beats") >= 0 ||
+        engine.getValue("[AutoDJ]", "seconds_to_transition") > 0.5;
+};
+
+DecksmithAutoDJ.fadeNow = function() {
+    this.fadeRequestedAt = Date.now();
+    engine.setValue("[AutoDJ]", "fade_now", 1);
+    engine.setValue("[AutoDJ]", "fade_now", 0);
+};
 
 DecksmithAutoDJ.onPlay = function(group, value) {
     if (!engine.getValue("[AutoDJ]", "enabled")) {
         return;
     }
     var other = this.other(group);
-    if (value > 0 && engine.getValue(other, "play") > 0 && !this.transition) {
+    if (value > 0 && !engine.getValue(other, "play") && !this.plan && !this.transition &&
+            engine.getValue(other, "track_loaded") > 0) {
+        // Auto DJ started: the next track was loaded before this one played
+        this.onTrackLoaded(other);
+        return;
+    }
+    if (value > 0 && engine.getValue(other, "play") > 0 && !this.transition &&
+            this.manualStart(group)) {
+        if (this.crossfaderTowards(engine.getValue("[Master]", "crossfader"), group) >= 0.99) {
+            // The crossfader moved all the way to this deck by hand: Mixxx's
+            // Auto DJ plays it and stops the other one (a transition by hand)
+            return;
+        }
+        this.log("PLAY on " + group + ": fade now");
+        engine.setValue(group, "play", 0);
+        this.fadeNow();
+    } else if (value > 0 && engine.getValue(other, "play") > 0 && !this.transition) {
         this.startTransition(other, group);
     } else if (value === 0 && this.transition && this.transition.from === group) {
         this.endTransition();

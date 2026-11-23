@@ -364,7 +364,7 @@ index bd0d97a4..aa17ce29 100644
      DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
  };
 diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
-index 9b85871e..5d9b05c2 100644
+index 9b85871e..44304d63 100644
 --- a/src/test/autodjprocessor_test.cpp
 +++ b/src/test/autodjprocessor_test.cpp
 @@ -8,6 +8,7 @@
@@ -375,7 +375,7 @@ index 9b85871e..5d9b05c2 100644
  #include "control/controlpotmeter.h"
  #include "control/controlpushbutton.h"
  #include "engine/engine.h"
-@@ -1864,3 +1865,195 @@ TEST_F(AutoDJProcessorTest, Request) {
+@@ -1864,3 +1865,197 @@ TEST_F(AutoDJProcessorTest, Request) {
      }
      EXPECT_EQ(lastEarlierRequest + 1, ordered.indexOf(id(6)));
  }
@@ -475,13 +475,15 @@ index 9b85871e..5d9b05c2 100644
 +    ControlProxy nextBeats(QStringLiteral("[AutoDJ]"), QStringLiteral("next_transition_beats"));
 +    ControlProxy secondsTo(QStringLiteral("[AutoDJ]"), QStringLiteral("seconds_to_transition"));
 +
-+    // 10 s before the last sound (11 s): the phrase start at 8 s
++    // 8 beats (2 s) ending by the last sound (21 s): the phrase start at
++    // 16 s, not the one at 24 s in the silence after it
 +    deck1.playposition.set(7.5 / duration);
++    nextBeats.set(8);
++    deck1.playposition.set(15.5 / duration);
 +    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
 +    EXPECT_NEAR(0.5, secondsTo.get(), 0.01);
 +
-+    // A cut: on the last phrase start before the last sound (16 s), not on
-+    // the one in the silence (24 s)
++    // A cut: on the last phrase start before the last sound (16 s) too
 +    nextBeats.set(0);
 +    deck1.playposition.set(15.9 / duration);
 +    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
