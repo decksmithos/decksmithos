@@ -265,10 +265,10 @@
                       <ObjectName>AdjTypeBtn</ObjectName>
                       <NumberStates>2</NumberStates>
                       <Size>me,55f</Size>
-                      <State><Number>0</Number><Text>CUT</Text></State>
-                      <State><Number>1</Number><Text>CUT</Text></State>
+                      <State><Number>0</Number><Text>FADE</Text></State>
+                      <State><Number>1</Number><Text>FADE</Text></State>
                       <Connection>
-                        <ConfigKey>[Skin],dsm_adj_use_cut</ConfigKey>
+                        <ConfigKey>[Skin],dsm_adj_use_fade</ConfigKey>
                       </Connection>
                     </PushButton>
                     <WidgetGroup><Size>6f,55f</Size></WidgetGroup>

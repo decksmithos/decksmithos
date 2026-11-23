@@ -51,13 +51,24 @@
         <SetVariable name="objname">TopNavBtn</SetVariable>
         <SetVariable name="push">true</SetVariable>
       </Template>
-      <Template src="skin:topnav_button.xml">
-        <SetVariable name="label">MENU</SetVariable>
-        <SetVariable name="key">[Tab],shortcut</SetVariable>
-        <SetVariable name="lit">[Tab],shortcut</SetVariable>
-        <SetVariable name="objname">TopNavBtn</SetVariable>
-        <SetVariable name="push">false</SetVariable>
-      </Template>
+      <!-- MENU: a plain on/off toggle (the template's four states would
+           take four taps to come back to off) -->
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Size>116f,48f</Size>
+        <Children>
+          <PushButton>
+            <ObjectName>TopNavBtn</ObjectName>
+            <Size>110f,38f</Size>
+            <NumberStates>2</NumberStates>
+            <State><Number>0</Number><Text>MENU</Text></State>
+            <State><Number>1</Number><Text>MENU</Text></State>
+            <Connection>
+              <ConfigKey>[Tab],shortcut</ConfigKey>
+            </Connection>
+          </PushButton>
+        </Children>
+      </WidgetGroup>
 
       <WidgetGroup><Size>0me,48f</Size></WidgetGroup>
 

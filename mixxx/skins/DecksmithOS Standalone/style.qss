@@ -1125,8 +1125,11 @@ font-size:25px;
 #LibLoadBtn[value="1"] { background-color: #4b93ff; color: #fff; }
 #LibRequestBtn { font-size: 18px; color: #000; background-color: #f0a020; border: 1px solid #fff; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibRequestBtn[value="1"] { background-color: #ffd27a; }
-#LibActionBtn, #LibAdjToggleBtn { font-size: 18px; color: #e8e8ec; background-color: #1d1d22; border: 1px solid #45454d; border-radius: 3px; margin: 2px 0px; padding: 0px; }
+#LibActionBtn, #LibAdjToggleBtn, #LibAdjNextBtn { font-size: 18px; color: #e8e8ec; background-color: #1d1d22; border: 1px solid #45454d; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibActionBtn:pressed, #LibActionBtn[value="1"] { background-color: #4b93ff; color: #fff; }
+#LibAdjNextBtn { color: #8fc1ff; border-color: #1e6fd9; }
+#LibAdjNextBtn[value="0"] { color: #6a6a72; border-color: #45454d; }
+#LibAdjNextBtn:pressed { background-color: #2d2d35; }
 #LibAdjToggleBtn[value="1"] { color: #000; background-color: #2fbf71; border-color: #6fe0a0; }
 #LibEjectBtn { font-size: 18px; color: #fff; background-color: #2a2a30; border: 1px solid #8a8a92; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibEjectBtn:pressed { background-color: #4b93ff; }

@@ -21,11 +21,12 @@
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_blend">1</attribute>
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_filter">1</attribute>
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_echo">1</attribute>
-			<attribute persist="true" config_key="[Skin],dsm_adj_use_cut">1</attribute>
+			<attribute persist="true" config_key="[Skin],dsm_adj_use_fade">1</attribute>
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_loop">1</attribute>
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_riser">1</attribute>
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_reverb">1</attribute>
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_brake">1</attribute>
+			<attribute config_key="[Skin],dsm_adj_next">0</attribute>
 		</attributes>
 	</manifest>
 

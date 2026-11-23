@@ -141,7 +141,7 @@
             </Children>
           </WidgetGroup>
           <!-- Auto DJ row. In the Auto DJ section: Auto DJ on/off, fade to
-               the next track now, skip the next track, order the queue by key
+               the next track now, the planned transition, skip the next track, order the queue by key
                (patch 0006), add a random track, keep the queue filled with
                random tracks from the source crates (or the whole library;
                patch 0022). Elsewhere: the selected track to the end of the
@@ -177,6 +177,26 @@
                     <State><Number>1</Number><Text>FADE NOW</Text></State>
                     <Connection>
                       <ConfigKey>[AutoDJ],fade_now</ConfigKey>
+                    </Connection>
+                  </PushButton>
+                  <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+                  <!-- The planned transition (DecksmithOS-AutoDJ.js); a tap
+                       picks the next one that suits the two tracks -->
+                  <PushButton>
+                    <ObjectName>LibAdjNextBtn</ObjectName>
+                    <Size>0me,44f</Size>
+                    <NumberStates>9</NumberStates>
+                    <State><Number>0</Number><Text>NEXT: -</Text></State>
+                    <State><Number>1</Number><Text>NEXT: BLEND</Text></State>
+                    <State><Number>2</Number><Text>NEXT: FILTER</Text></State>
+                    <State><Number>3</Number><Text>NEXT: ECHO</Text></State>
+                    <State><Number>4</Number><Text>NEXT: REVERB</Text></State>
+                    <State><Number>5</Number><Text>NEXT: FADE</Text></State>
+                    <State><Number>6</Number><Text>NEXT: LOOP</Text></State>
+                    <State><Number>7</Number><Text>NEXT: RISER</Text></State>
+                    <State><Number>8</Number><Text>NEXT: BRAKE</Text></State>
+                    <Connection>
+                      <ConfigKey>[Skin],dsm_adj_next</ConfigKey>
                     </Connection>
                   </PushButton>
                   <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
