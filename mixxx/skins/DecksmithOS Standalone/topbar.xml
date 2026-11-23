@@ -7,8 +7,7 @@
      shown lights up ([Skin],dsm_lit_<name>); tapping it again closes the
      library page, like the browse buttons of a standalone player.
        PLAYLIST  Playlists
-       BROWSE    the library page as it was left; tapped again (in any
-                 section) it closes it
+       BROWSE    Tracks (all music); lit in the other sidebar lists too
        AUTO DJ   the Auto DJ queue
        SEARCH    Tracks (all music), focus on the search box
        MENU      skin settings page ([Tab],shortcut); tapped again, back to

@@ -23,6 +23,8 @@ Settings written to mixxx.cfg:
                          crates are in Playlists, patch 0016)
   [Library] ShowITunesLibrary 0
                          no iTunes section (no iTunes on the device)
+  [Auto DJ] RandomQueueMinimumAllowed 10
+                         AUTO FILL keeps 10 tracks queued (Mixxx: 5)
   [Config] ResizableSkin  a skin chosen in the system menu
                          (decksmithos-mixxx-ui set-skin leaves it in
                          decksmithos-pending-skin; applied here because Mixxx
@@ -66,7 +68,12 @@ AUTODJ_DEVICE = "VirMIDI_7-0"
 AUTODJ_MAPPING = "/usr/share/mixxx/controllers/DecksmithOS-AutoDJ.midi.xml"
 # Values Mixxx writes by itself (its defaults), so they were not chosen by the
 # user when DecksmithOS has not set them yet
-MIXXX_WRITTEN = {"[Preferences]geometry": None, "[Library]ShowITunesLibrary": "1"}
+# Mixxx's own default, written when its preferences are saved
+MIXXX_WRITTEN = {"[Preferences]geometry": None, "[Library]ShowITunesLibrary": "1",
+                 "[Auto DJ]RandomQueueMinimumAllowed": "5"}
+# AUTO FILL keeps at least this many tracks queued (Mixxx: 5), so that the
+# harmonic fill (Mixxx patch 0022) has more to choose places from
+AUTODJ_FILL_MINIMUM = "10"
 
 
 def written_by_mixxx(name, value):
@@ -238,6 +245,7 @@ def main():
     wanted[("[Library]", "SidebarOrder")] = SIDEBAR_ORDER
     wanted[("[Library]", "SidebarHidden")] = SIDEBAR_HIDDEN
     wanted[("[Library]", "ShowITunesLibrary")] = "0"
+    wanted[("[Auto DJ]", "RandomQueueMinimumAllowed")] = AUTODJ_FILL_MINIMUM
     if ppmm:
         row = max(ROW_MIN, min(ROW_MAX, round(ROW_MM * ppmm)))
         wanted[("[Library]", "RowHeight")] = str(row)

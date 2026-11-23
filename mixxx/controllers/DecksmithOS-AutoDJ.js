@@ -40,9 +40,8 @@
 // reaching that point, so they cut with [AutoDJ],fade_now.
 //
 // PLAY on the waiting deck (any controller) while Auto DJ runs starts the
-// transition now, like FADE NOW. Moving the crossfader all the way to the
-// waiting deck is a transition by hand (Mixxx's Auto DJ plays that deck and
-// stops the other); this script leaves it alone.
+// transition now, like FADE NOW. So does a controller's crossfader moved
+// all the way to the waiting deck (Mixxx patch 0021; stock Mixxx cuts).
 //
 // For every transition: if the tempos can be matched, the incoming track
 // takes the playing track's tempo and phase, with keylock, and afterwards
@@ -159,6 +158,7 @@ DecksmithAutoDJ.init = function(id, debugging) {
         }
     }));
     this.log("ready");
+    this.watchAudio();
     // Reloaded while Auto DJ runs (a controller plugged in sets up the
     // controllers again): plan the next transition again
     this.startTimer("resume", 1000, function() {
@@ -175,6 +175,27 @@ DecksmithAutoDJ.shutdown = function() {
     this.reset();
     this.connections.forEach(function(c) {
         c.disconnect();
+    });
+};
+
+// Audio dropouts (xruns): Mixxx counts the audio callbacks that came too
+// late ([App],audio_latency_overload_count) but does not log them. Logged
+// when the count grows (checked every minute), and every 15 minutes anyway.
+DecksmithAutoDJ.AUDIO_CHECK_MS = 60000;
+DecksmithAutoDJ.AUDIO_REPORT_EVERY = 15;
+DecksmithAutoDJ.watchAudio = function() {
+    var last = engine.getValue("[App]", "audio_latency_overload_count");
+    var minutes = 0;
+    this.log("audio overloads: " + last);
+    engine.beginTimer(this.AUDIO_CHECK_MS, function() {
+        var count = engine.getValue("[App]", "audio_latency_overload_count");
+        minutes++;
+        if (count !== last || minutes % DecksmithAutoDJ.AUDIO_REPORT_EVERY === 0) {
+            DecksmithAutoDJ.log("audio overloads: " + count + " (+" + (count - last) +
+                ", " + minutes + " min), latency usage " +
+                Math.round(engine.getValue("[App]", "audio_latency_usage") * 100) + " %");
+            last = count;
+        }
     });
 };
 
@@ -501,11 +522,6 @@ DecksmithAutoDJ.onPlay = function(group, value) {
     }
     if (value > 0 && engine.getValue(other, "play") > 0 && !this.transition &&
             this.manualStart(group)) {
-        if (this.crossfaderTowards(engine.getValue("[Master]", "crossfader"), group) >= 0.99) {
-            // The crossfader moved all the way to this deck by hand: Mixxx's
-            // Auto DJ plays it and stops the other one (a transition by hand)
-            return;
-        }
         this.log("PLAY on " + group + ": fade now");
         engine.setValue(group, "play", 0);
         this.fadeNow();

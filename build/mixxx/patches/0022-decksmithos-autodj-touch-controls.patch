@@ -7,12 +7,86 @@ Description: Auto DJ queue and sources from a touch screen
    settable).
  - [AutoDJ],random_fill: the preference "Enable random track addition to
    queue" ([Auto DJ] EnableRandomQueue).
+ Random tracks for the queue (random fill, "Add random") fit the queue: of 8
+ random tracks from the Auto DJ sources, the one that fits best (key on the
+ Camelot wheel, then tempo; harmonicTransitionCost of patch 0006) is
+ queued where it fits best, after the cued track and the requests (patch
+ 0010), at the end unless clearly better earlier. The minimum queue length
+ for random fill defaults to 10 (stock Mixxx: 5).
 Author: DecksmithOS
 Forwarded: no
 Last-Update: 2026-11-23
 ---
+diff --git a/src/library/autodj/autodjfeature.cpp b/src/library/autodj/autodjfeature.cpp
+index aadc3045..604e8bbd 100644
+--- a/src/library/autodj/autodjfeature.cpp
++++ b/src/library/autodj/autodjfeature.cpp
+@@ -285,11 +285,15 @@ void AutoDJFeature::slotCrateChanged(CrateId crateId) {
+ }
+ 
+ void AutoDJFeature::slotAddRandomTrack() {
++    // DecksmithOS: a few random tracks, of which Auto DJ queues the one that
++    // fits best where it fits best (key, then tempo)
++    constexpr int kRandomCandidates = 8;
+     if (m_iAutoDJPlaylistId >= 0) {
+-        TrackPointer pRandomTrack;
+-        for (int failedRetrieveAttempts = 0;
+-                !pRandomTrack && (failedRetrieveAttempts < 2 * kMaxRetrieveAttempts); // 2 rounds
+-                ++failedRetrieveAttempts) {
++        QList<TrackPointer> candidates;
++        QSet<TrackId> seen;
++        for (int attempts = 0; candidates.size() < kRandomCandidates &&
++                attempts < 2 * kMaxRetrieveAttempts + 2 * kRandomCandidates;
++                ++attempts) {
+             TrackId randomTrackId;
+             if (m_crateList.isEmpty()) {
+                 // Fetch Track from Library since we have no assigned crates
+@@ -301,25 +305,26 @@ void AutoDJFeature::slotAddRandomTrack() {
+                 // may add banned tracks
+                 randomTrackId = m_autoDjCratesDao.getRandomTrackId();
+             }
+-
+-            if (randomTrackId.isValid()) {
+-                pRandomTrack = m_pLibrary->trackCollectionManager()->getTrackById(randomTrackId);
+-                VERIFY_OR_DEBUG_ASSERT(pRandomTrack) {
+-                    qWarning() << "Track does not exist:"
+-                            << randomTrackId;
+-                    continue;
+-                }
+-                if (!pRandomTrack->getFileInfo().checkFileExists()) {
+-                    qWarning() << "Track does not exist:"
+-                               << pRandomTrack->getInfo()
+-                               << pRandomTrack->getLocation();
+-                    pRandomTrack.reset();
+-                }
++            if (!randomTrackId.isValid() || seen.contains(randomTrackId)) {
++                continue;
++            }
++            seen.insert(randomTrackId);
++            TrackPointer pRandomTrack =
++                    m_pLibrary->trackCollectionManager()->getTrackById(randomTrackId);
++            VERIFY_OR_DEBUG_ASSERT(pRandomTrack) {
++                qWarning() << "Track does not exist:"
++                           << randomTrackId;
++                continue;
++            }
++            if (!pRandomTrack->getFileInfo().checkFileExists()) {
++                qWarning() << "Track does not exist:"
++                           << pRandomTrack->getInfo()
++                           << pRandomTrack->getLocation();
++                continue;
+             }
++            candidates.append(pRandomTrack);
+         }
+-        if (pRandomTrack) {
+-            m_pTrackCollection->getPlaylistDAO().appendTrackToPlaylist(
+-                    pRandomTrack->getId(), m_iAutoDJPlaylistId);
++        if (m_pAutoDJProcessor->addRandomTrack(candidates)) {
+             m_pAutoDJView->onShow();
+             return; // success
+         }
 diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
-index cb071296..2c6e3962 100644
+index 8c2be411..6ae530db 100644
 --- a/src/library/autodj/autodjprocessor.cpp
 +++ b/src/library/autodj/autodjprocessor.cpp
 @@ -145,7 +145,8 @@ AutoDJProcessor::AutoDJProcessor(
@@ -51,11 +125,95 @@ index cb071296..2c6e3962 100644
      m_enabledAutoDJ.connectValueChangeRequest(this,
              &AutoDJProcessor::controlEnableChangeRequest);
  
+@@ -307,6 +327,71 @@ AutoDJProcessor::AutoDJError AutoDJProcessor::sortPlaylistHarmonic(
+     return ADJ_OK;
+ }
+ 
++bool AutoDJProcessor::addRandomTrack(const QList<TrackPointer>& candidates) {
++    const auto harmonicTrack = [](const TrackPointer& pTrack) {
++        mixxx::autodj::HarmonicTrack track;
++        if (pTrack) {
++            track.bpm = pTrack->getBpm();
++            track.key = pTrack->getKey();
++        }
++        return track;
++    };
++    if (candidates.isEmpty()) {
++        return false;
++    }
++    m_pAutoDJTableModel->select();
++    const int rowCount = m_pAutoDJTableModel->rowCount();
++    // A running Auto DJ has the first queued track cued already: it stays
++    // first. Requests stay ahead of random tracks.
++    const int head = (m_eState != ADJ_DISABLED && rowCount > 0) ? 1 : 0;
++    QList<mixxx::autodj::HarmonicTrack> queue;
++    int first = 0;
++    for (int row = head; row < rowCount; ++row) {
++        const QModelIndex index = m_pAutoDJTableModel->index(row, 0);
++        if (m_requestedTracks.contains(m_pAutoDJTableModel->getTrackId(index))) {
++            first = row - head + 1;
++        }
++        queue.append(harmonicTrack(m_pAutoDJTableModel->getTrack(index)));
++    }
++    std::optional<mixxx::autodj::HarmonicTrack> previous;
++    if (head > 0) {
++        previous = harmonicTrack(m_pAutoDJTableModel->getTrack(m_pAutoDJTableModel->index(0, 0)));
++    } else {
++        for (const auto& pDeck : m_decks) {
++            if (pDeck->isPlaying()) {
++                previous = harmonicTrack(pDeck->getLoadedTrack());
++                break;
++            }
++        }
++    }
++    const int last = static_cast<int>(queue.size());
++    TrackPointer pBest;
++    mixxx::autodj::HarmonicFill bestFill;
++    for (const auto& pCandidate : candidates) {
++        if (!pCandidate) {
++            continue;
++        }
++        const auto fill = mixxx::autodj::harmonicFillSlot(
++                queue, harmonicTrack(pCandidate), previous, first, last);
++        if (!pBest || fill.cost < bestFill.cost) {
++            pBest = pCandidate;
++            bestFill = fill;
++        }
++    }
++    if (!pBest) {
++        return false;
++    }
++    // An invalid index appends
++    const QModelIndex before = bestFill.slot < last
++            ? m_pAutoDJTableModel->index(head + bestFill.slot, 0)
++            : QModelIndex();
++    if (m_pAutoDJTableModel->addTracksWithTrackIds(before, {pBest->getId()}, nullptr) < 1) {
++        return false;
++    }
++    m_pAutoDJTableModel->select();
++    return true;
++}
++
+ AutoDJProcessor::AutoDJError AutoDJProcessor::requestTracks(const QList<TrackId>& trackIds) {
+     const int positions = std::max(1,
+             m_pConfig->getValue(ConfigKey(kPreferenceGroup, QStringLiteral("RequestPositions")),
 diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
-index aa17ce29..edad2e24 100644
+index aa17ce29..5bbc3d2f 100644
 --- a/src/library/autodj/autodjprocessor.h
 +++ b/src/library/autodj/autodjprocessor.h
-@@ -344,6 +344,7 @@ class AutoDJProcessor : public QObject {
+@@ -215,6 +215,11 @@ class AutoDJProcessor : public QObject {
+     /// a request goes after the earlier ones. Requests are highlighted in the
+     /// queue until they leave it.
+     AutoDJError requestTracks(const QList<TrackId>& trackIds);
++    /// DecksmithOS: queues the one of `candidates` (random tracks) that fits
++    /// best (key, then tempo), where it fits best: after the cued track and
++    /// the requests, at the end unless clearly better earlier. False if none
++    /// could be queued.
++    bool addRandomTrack(const QList<TrackPointer>& candidates);
+     const QSet<TrackId>& requestedTracks() const {
+         return m_requestedTracks;
+     }
+@@ -344,6 +349,7 @@ class AutoDJProcessor : public QObject {
      ControlObject m_nextTransitionBeats;
      ControlPushButton m_phraseAlign;
      ControlObject m_secondsToTransition;
@@ -63,6 +221,56 @@ index aa17ce29..edad2e24 100644
  
      DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
  };
+diff --git a/src/library/autodj/harmonicorder.h b/src/library/autodj/harmonicorder.h
+index 40cbb3fb..55bc2009 100644
+--- a/src/library/autodj/harmonicorder.h
++++ b/src/library/autodj/harmonicorder.h
+@@ -157,5 +157,45 @@ inline int harmonicRequestSlot(const QList<HarmonicTrack>& queue,
+     return bestSlot;
+ }
+ 
++/// DecksmithOS: where a random track (AUTO FILL, "Add random") fits best
++/// in `queue`, at slots first..last (slot 0: after `previous`), and the cost
++/// there: the change in transition cost, plus `slotCost` for each slot before
++/// `last`, so that it goes to the end unless it fits clearly better earlier.
++struct HarmonicFill {
++    int slot = 0;
++    double cost = 0.0;
++};
++
++inline HarmonicFill harmonicFillSlot(const QList<HarmonicTrack>& queue,
++        const HarmonicTrack& track,
++        const std::optional<HarmonicTrack>& previous,
++        int first,
++        int last,
++        double slotCost = 1.0) {
++    last = std::clamp(last, 0, static_cast<int>(queue.size()));
++    first = std::clamp(first, 0, last);
++    HarmonicFill best;
++    for (int slot = last; slot >= first; --slot) {
++        const HarmonicTrack* pBefore = slot > 0 ? &queue[slot - 1]
++                                                : (previous ? &*previous : nullptr);
++        const HarmonicTrack* pAfter = slot < queue.size() ? &queue[slot] : nullptr;
++        double cost = slotCost * (last - slot);
++        if (pBefore) {
++            cost += harmonicTransitionCost(*pBefore, track);
++        }
++        if (pAfter) {
++            cost += harmonicTransitionCost(track, *pAfter);
++        }
++        if (pBefore && pAfter) {
++            cost -= harmonicTransitionCost(*pBefore, *pAfter);
++        }
++        if (slot == last || cost < best.cost) {
++            best.slot = slot;
++            best.cost = cost;
++        }
++    }
++    return best;
++}
++
+ } // namespace autodj
+ } // namespace mixxx
 diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
 index 3acb98eb..4c301ee9 100644
 --- a/src/library/librarycontrol.cpp
@@ -231,11 +439,73 @@ index 0289a6e2..3fbc633c 100644
      parented_ptr<QAction> m_pImportPlaylistAction;
      parented_ptr<QAction> m_pCreateImportPlaylistAction;
      parented_ptr<QAction> m_pExportPlaylistAction;
+diff --git a/src/preferences/dialog/dlgprefautodj.cpp b/src/preferences/dialog/dlgprefautodj.cpp
+index a82898a2..87b7058f 100644
+--- a/src/preferences/dialog/dlgprefautodj.cpp
++++ b/src/preferences/dialog/dlgprefautodj.cpp
+@@ -57,7 +57,7 @@ DlgPrefAutoDJ::DlgPrefAutoDJ(QWidget* pParent,
+     // 5-arbitrary
+     RandomQueueMinimumSpinBox->setValue(
+             m_pConfig->getValue(
+-                    ConfigKey("[Auto DJ]", "RandomQueueMinimumAllowed"), 5));
++                    ConfigKey("[Auto DJ]", "RandomQueueMinimumAllowed"), 10));
+     // "[Auto DJ], Requeue" is set by 'Repeat Playlist' toggle in DlgAutoDj GUI.
+     // If it's checked un-check 'Random Queue'
+     slotConsiderRepeatPlaylistState(
+@@ -108,7 +108,7 @@ void DlgPrefAutoDJ::slotApply() {
+ 
+     m_pConfig->setValue(ConfigKey("[Auto DJ]", "RandomQueueMinimumAllowed"),
+             m_pConfig->getValue(
+-                    ConfigKey("[Auto DJ]", "RandomQueueMinimumAllowedBuff"), 5));
++                    ConfigKey("[Auto DJ]", "RandomQueueMinimumAllowedBuff"), 10));
+     m_pConfig->setValue(ConfigKey("[Auto DJ]", "EnableRandomQueue"),
+             m_pConfig->getValue(
+                     ConfigKey("[Auto DJ]", "EnableRandomQueueBuff"), false));
+@@ -145,7 +145,7 @@ void DlgPrefAutoDJ::slotCancel() {
+ 
+     RandomQueueMinimumSpinBox->setValue(
+             m_pConfig->getValue(
+-                    ConfigKey("[Auto DJ]", "RandomQueueMinimumAllowed"), 5));
++                    ConfigKey("[Auto DJ]", "RandomQueueMinimumAllowed"), 10));
+     RandomQueueCheckBox->setChecked(
+             m_pConfig->getValue(
+                     ConfigKey("[Auto DJ]", "EnableRandomQueue"), false));
 diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
-index 44304d63..959b57be 100644
+index e1aaca69..d5f89975 100644
 --- a/src/test/autodjprocessor_test.cpp
 +++ b/src/test/autodjprocessor_test.cpp
-@@ -2059,3 +2059,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
+@@ -1801,6 +1801,30 @@ TEST(AutoDJHarmonicOrderTest, RequestSlot) {
+     EXPECT_EQ(0, harmonicRequestSlot({}, {120.0, key::C_MAJOR}, previous, 0, 4));
+ }
+ 
++TEST(AutoDJHarmonicOrderTest, FillSlot) {
++    using mixxx::autodj::harmonicFillSlot;
++    const QList<HarmonicTrack> queue = {
++            {124.0, key::A_MINOR},       // 0
++            {128.0, key::F_SHARP_MAJOR}, // 1: far key
++            {124.0, key::G_MAJOR},       // 2
++            {126.0, key::E_MINOR},       // 3
++    };
++    const HarmonicTrack previous{120.0, key::C_MAJOR};
++    // Fits after the last track: at the end
++    const auto end = harmonicFillSlot(queue, {126.0, key::E_MINOR}, previous, 0, 4);
++    EXPECT_EQ(4, end.slot);
++    EXPECT_DOUBLE_EQ(0.0, end.cost);
++    // Fits only next to the other F# major track: there, although earlier
++    EXPECT_EQ(2, harmonicFillSlot(queue, {128.0, key::F_SHARP_MAJOR}, previous, 0, 4).slot);
++    // ...but not before the first allowed slot (requests stay ahead)
++    EXPECT_EQ(4, harmonicFillSlot(queue, {128.0, key::F_SHARP_MAJOR}, previous, 3, 4).slot);
++    // Nothing known: the end
++    EXPECT_EQ(4, harmonicFillSlot(QList<HarmonicTrack>(4), {}, std::nullopt, 0, 4).slot);
++    // A better fitting track costs less (the candidate chosen)
++    EXPECT_LT(end.cost,
++            harmonicFillSlot(queue, {100.0, key::D_FLAT_MAJOR}, previous, 0, 4).cost);
++}
++
+ TEST_F(AutoDJProcessorTest, Request) {
+     PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
+     const QList<std::pair<QString, std::pair<double, key::ChromaticKey>>> files = {
+@@ -2108,3 +2132,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
      EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
      EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
  }

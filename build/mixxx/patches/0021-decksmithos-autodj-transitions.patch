@@ -21,12 +21,17 @@ Description: Auto DJ: transition length per transition and phrase alignment
  track or the start of the incoming one before its first sound (the -60 dB
  points of AnalyzerSilence that the intro/outro modes use), so that the
  silence at the end and start of tracks is skipped.
+ .
+ A crossfader moved all the way to the waiting deck (by a controller)
+ while Auto DJ waits for the next transition starts that transition now,
+ as planned, like "Fade now", instead of stock Mixxx's hard cut (the
+ crossfader goes back to the playing deck and the transition moves it).
 Author: DecksmithOS
 Forwarded: no
 Last-Update: 2026-11-23
 ---
 diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
-index 00054d9d..cb071296 100644
+index 00054d9d..8c2be411 100644
 --- a/src/library/autodj/autodjprocessor.cpp
 +++ b/src/library/autodj/autodjprocessor.cpp
 @@ -24,6 +24,15 @@ constexpr int kRequestPositionsDefault = 5;
@@ -103,7 +108,25 @@ index 00054d9d..cb071296 100644
      pFromDeck->fadeEndPos = fromDeckCurrentSecond + fadeTime;
  
      // These are expected to be a fraction of the track length.
-@@ -880,6 +924,7 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+@@ -850,6 +894,17 @@ void AutoDJProcessor::crossfaderChanged(double value) {
+         double crossfaderPosition = value * (m_coCrossfaderReverse.toBool() ? -1 : 1);
+         if ((crossfaderPosition == 1.0 && pFromDeck->isLeft()) ||       // crossfader right
+                 (crossfaderPosition == -1.0 && pFromDeck->isRight())) { // crossfader left
++            if (!pToDeck->isPlaying() && getEndSecond(pToDeck) >= kMinimumTrackDurationSec) {
++                // DecksmithOS: a crossfader (on a controller) moved all the
++                // way to the waiting deck asks for the next transition now,
++                // as planned (length, phrase, the script's effects and
++                // tempo match), like "Fade now", instead of a hard cut. The
++                // crossfader goes back to the playing deck; the transition
++                // moves it.
++                setCrossfader(pFromDeck->isLeft() ? -1.0 : 1.0);
++                fadeNow();
++                return;
++            }
+             if (!pToDeck->isPlaying()) {
+                 if (getEndSecond(pToDeck) >= kMinimumTrackDurationSec) {
+                     // Re-cue the track if the user has seeked it to the very end
+@@ -880,6 +935,7 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
          // nothing to do
          return;
      }
@@ -111,17 +134,18 @@ index 00054d9d..cb071296 100644
  
      DeckAttributes* thisDeck = pAttributes;
      DeckAttributes* otherDeck = getOtherDeck(thisDeck);
-@@ -1013,6 +1058,9 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+@@ -1013,6 +1069,10 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
                  m_eState = thisDeck->isLeft() ? ADJ_LEFT_FADING : ADJ_RIGHT_FADING;
                  m_transitionProgress = 0.0;
                  emitAutoDJStateChanged(m_eState);
 +                // DecksmithOS: a script sets the length of the next
 +                // transition again when the next track is loaded
 +                m_nextTransitionBeats.set(-1);
++                m_secondsToTransition.forceSet(0);
  
                  const double toDeckFadeDistance =
                          (thisDeck->fadeEndPos - thisDeck->fadeBeginPos) *
-@@ -1706,6 +1754,8 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
+@@ -1706,6 +1766,8 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
          }
      }
  
@@ -130,7 +154,7 @@ index 00054d9d..cb071296 100644
      // These are expected to be a fraction of the track length.
      pFromDeck->fadeBeginPos /= fromDeckDuration;
      pFromDeck->fadeEndPos /= fromDeckDuration;
-@@ -1727,6 +1777,189 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
+@@ -1727,6 +1789,189 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
      }
  }
  
@@ -364,7 +388,7 @@ index bd0d97a4..aa17ce29 100644
      DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
  };
 diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
-index 9b85871e..44304d63 100644
+index 9b85871e..e1aaca69 100644
 --- a/src/test/autodjprocessor_test.cpp
 +++ b/src/test/autodjprocessor_test.cpp
 @@ -8,6 +8,7 @@
@@ -375,7 +399,7 @@ index 9b85871e..44304d63 100644
  #include "control/controlpotmeter.h"
  #include "control/controlpushbutton.h"
  #include "engine/engine.h"
-@@ -1864,3 +1865,197 @@ TEST_F(AutoDJProcessorTest, Request) {
+@@ -1864,3 +1865,246 @@ TEST_F(AutoDJProcessorTest, Request) {
      }
      EXPECT_EQ(lastEarlierRequest + 1, ordered.indexOf(id(6)));
  }
@@ -535,6 +559,55 @@ index 9b85871e..44304d63 100644
 +
 +// DecksmithOS: a script cuts to the next track itself (after a loop roll or a
 +// brake) with next_transition_beats = 0 and fade_now
++TEST_F(AutoDJProcessorTest, CrossfaderStartsPlannedTransition) {
++    pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FixedFullTrack);
++    pProcessor->setTransitionTime(10);
++
++    TrackId testId = addTrackToCollection(kTrackLocationTest);
++    ASSERT_TRUE(testId.isValid());
++
++    mixer.crossfader.set(-1.0);
++    TrackPointer pTrack = newTestTrack();
++    ASSERT_TRUE(pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
++            pTrack->getSampleRate(), mixxx::audio::kStartFramePos, mixxx::Bpm(240))));
++    const double duration = pTrack->getDuration();
++    deck1.slotLoadTrack(pTrack, true);
++    deck1.fakeTrackLoadedEvent(pTrack);
++
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    pAutoDJTableModel->appendTrack(testId);
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_IDLE));
++    EXPECT_CALL(*pProcessor, emitLoadTrackToPlayer(_, QString("[Channel2]"), false));
++    EXPECT_EQ(AutoDJProcessor::ADJ_OK, pProcessor->toggleAutoDJ(true));
++    deck2.slotLoadTrack(pTrack, false);
++    deck2.fakeTrackLoadedEvent(pTrack);
++
++    deck1.playposition.set(5.0 / duration);
++    ControlProxy nextBeats(QStringLiteral("[AutoDJ]"), QStringLiteral("next_transition_beats"));
++    ControlProxy secondsTo(QStringLiteral("[AutoDJ]"), QStringLiteral("seconds_to_transition"));
++    nextBeats.set(8);
++
++    // A controller's crossfader all the way to deck 2: no hard cut; the
++    // crossfader goes back and the planned transition (8 beats) starts now
++    mixer.crossfader.set(1.0);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++    EXPECT_DOUBLE_EQ(-1.0, mixer.crossfader.get());
++    EXPECT_DOUBLE_EQ(1.0, deck1.play.get());
++    EXPECT_DOUBLE_EQ(0.0, deck2.play.get());
++
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_LEFT_FADING));
++    deck1.playposition.set(5.01 / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_LEFT_FADING, pProcessor->getState());
++    EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
++    const double crossfaderAtStart = mixer.crossfader.get();
++    EXPECT_LT(crossfaderAtStart, 0.0);
++    EXPECT_DOUBLE_EQ(0.0, secondsTo.get());
++
++    // the transition moves the crossfader towards deck 2
++    deck1.playposition.set(6.0 / duration);
++    EXPECT_GT(mixer.crossfader.get(), crossfaderAtStart);
++}
++
 +TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
 +    pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FixedFullTrack);
 +    pProcessor->setTransitionTime(10);
