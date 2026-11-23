@@ -26,12 +26,15 @@ Description: Auto DJ: transition length per transition and phrase alignment
  while Auto DJ waits for the next transition starts that transition now,
  as planned, like "Fade now", instead of stock Mixxx's hard cut (the
  crossfader goes back to the playing deck and the transition moves it).
+ When a script sets [AutoDJ],fade_by_script, the crossfader instead counts
+ [AutoDJ],fade_request up and the script starts the transition (with what
+ comes before it: echo, loop roll, filter sweep, brake).
 Author: DecksmithOS
 Forwarded: no
 Last-Update: 2026-11-23
 ---
 diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
-index 00054d9d..8c2be411 100644
+index 00054d9d..64feaebe 100644
 --- a/src/library/autodj/autodjprocessor.cpp
 +++ b/src/library/autodj/autodjprocessor.cpp
 @@ -24,6 +24,15 @@ constexpr int kRequestPositionsDefault = 5;
@@ -50,7 +53,7 @@ index 00054d9d..8c2be411 100644
  constexpr bool sDebug = false;
  } // anonymous namespace
  
-@@ -133,7 +142,10 @@ AutoDJProcessor::AutoDJProcessor(
+@@ -133,7 +142,12 @@ AutoDJProcessor::AutoDJProcessor(
            m_skipNext(ConfigKey(kControlGroup, QStringLiteral("skip_next"))),
            m_addRandomTrack(ConfigKey(kControlGroup, QStringLiteral("add_random_track"))),
            m_fadeNow(ConfigKey(kControlGroup, QStringLiteral("fade_now"))),
@@ -58,11 +61,13 @@ index 00054d9d..8c2be411 100644
 +          m_enabledAutoDJ(ConfigKey(kControlGroup, QStringLiteral("enabled"))),
 +          m_nextTransitionBeats(ConfigKey(kControlGroup, QStringLiteral("next_transition_beats"))),
 +          m_phraseAlign(ConfigKey(kControlGroup, QStringLiteral("phrase_align"))),
-+          m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))) {
++          m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))),
++          m_fadeByScript(ConfigKey(kControlGroup, QStringLiteral("fade_by_script"))),
++          m_fadeRequest(ConfigKey(kControlGroup, QStringLiteral("fade_request"))) {
      m_pAutoDJTableModel = make_parented<PlaylistTableModel>(
              this, pTrackCollectionManager, "mixxx.db.model.autodj");
      m_pAutoDJTableModel->selectPlaylist(iAutoDJPlaylistId);
-@@ -154,6 +166,28 @@ AutoDJProcessor::AutoDJProcessor(
+@@ -154,6 +168,33 @@ AutoDJProcessor::AutoDJProcessor(
              &AutoDJProcessor::controlAddRandomTrack);
      connect(&m_fadeNow, &ControlObject::valueChanged, this, &AutoDJProcessor::controlFadeNow);
      m_enabledAutoDJ.setButtonMode(ControlPushButton::TOGGLE);
@@ -88,10 +93,15 @@ index 00054d9d..8c2be411 100644
 +            });
 +    m_secondsToTransition.setReadOnly();
 +    m_secondsToTransition.forceSet(-1);
++    // DecksmithOS: a script that plays what comes before a transition sets
++    // fade_by_script; a crossfader moved to the waiting deck then counts
++    // fade_request up (the script starts the transition) instead of fading
++    // now.
++    m_fadeRequest.setReadOnly();
      m_enabledAutoDJ.connectValueChangeRequest(this,
              &AutoDJProcessor::controlEnableChangeRequest);
  
-@@ -515,6 +549,16 @@ void AutoDJProcessor::fadeNow() {
+@@ -515,6 +556,16 @@ void AutoDJProcessor::fadeNow() {
      fadeTime = math_min(fadeTime,
              (toDeckEndSecond - toDeckCurrentSecond) / 2); // for fade in and out
  
@@ -108,7 +118,7 @@ index 00054d9d..8c2be411 100644
      pFromDeck->fadeEndPos = fromDeckCurrentSecond + fadeTime;
  
      // These are expected to be a fraction of the track length.
-@@ -850,6 +894,17 @@ void AutoDJProcessor::crossfaderChanged(double value) {
+@@ -850,6 +901,21 @@ void AutoDJProcessor::crossfaderChanged(double value) {
          double crossfaderPosition = value * (m_coCrossfaderReverse.toBool() ? -1 : 1);
          if ((crossfaderPosition == 1.0 && pFromDeck->isLeft()) ||       // crossfader right
                  (crossfaderPosition == -1.0 && pFromDeck->isRight())) { // crossfader left
@@ -120,13 +130,17 @@ index 00054d9d..8c2be411 100644
 +                // crossfader goes back to the playing deck; the transition
 +                // moves it.
 +                setCrossfader(pFromDeck->isLeft() ? -1.0 : 1.0);
-+                fadeNow();
++                if (m_fadeByScript.toBool()) {
++                    m_fadeRequest.forceSet(m_fadeRequest.get() + 1);
++                } else {
++                    fadeNow();
++                }
 +                return;
 +            }
              if (!pToDeck->isPlaying()) {
                  if (getEndSecond(pToDeck) >= kMinimumTrackDurationSec) {
                      // Re-cue the track if the user has seeked it to the very end
-@@ -880,6 +935,7 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+@@ -880,6 +946,7 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
          // nothing to do
          return;
      }
@@ -134,7 +148,7 @@ index 00054d9d..8c2be411 100644
  
      DeckAttributes* thisDeck = pAttributes;
      DeckAttributes* otherDeck = getOtherDeck(thisDeck);
-@@ -1013,6 +1069,10 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+@@ -1013,6 +1080,10 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
                  m_eState = thisDeck->isLeft() ? ADJ_LEFT_FADING : ADJ_RIGHT_FADING;
                  m_transitionProgress = 0.0;
                  emitAutoDJStateChanged(m_eState);
@@ -145,7 +159,7 @@ index 00054d9d..8c2be411 100644
  
                  const double toDeckFadeDistance =
                          (thisDeck->fadeEndPos - thisDeck->fadeBeginPos) *
-@@ -1706,6 +1766,8 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
+@@ -1706,6 +1777,8 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
          }
      }
  
@@ -154,7 +168,7 @@ index 00054d9d..8c2be411 100644
      // These are expected to be a fraction of the track length.
      pFromDeck->fadeBeginPos /= fromDeckDuration;
      pFromDeck->fadeEndPos /= fromDeckDuration;
-@@ -1727,6 +1789,189 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
+@@ -1727,6 +1800,189 @@ void AutoDJProcessor::calculateTransition(DeckAttributes* pFromDeck,
      }
  }
  
@@ -345,7 +359,7 @@ index 00054d9d..8c2be411 100644
          DeckAttributes* pFromDeck,
          DeckAttributes* pToDeck,
 diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
-index bd0d97a4..aa17ce29 100644
+index bd0d97a4..b0556d6b 100644
 --- a/src/library/autodj/autodjprocessor.h
 +++ b/src/library/autodj/autodjprocessor.h
 @@ -7,6 +7,7 @@
@@ -376,7 +390,7 @@ index bd0d97a4..aa17ce29 100644
      void useFixedFadeTime(
              DeckAttributes* pFromDeck,
              DeckAttributes* pToDeck,
-@@ -326,6 +340,10 @@ class AutoDJProcessor : public QObject {
+@@ -326,6 +340,12 @@ class AutoDJProcessor : public QObject {
      ControlPushButton m_addRandomTrack;
      ControlPushButton m_fadeNow;
      ControlPushButton m_enabledAutoDJ;
@@ -384,11 +398,13 @@ index bd0d97a4..aa17ce29 100644
 +    ControlObject m_nextTransitionBeats;
 +    ControlPushButton m_phraseAlign;
 +    ControlObject m_secondsToTransition;
++    ControlObject m_fadeByScript;
++    ControlObject m_fadeRequest;
  
      DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
  };
 diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
-index 9b85871e..e1aaca69 100644
+index 9b85871e..86ffcbdc 100644
 --- a/src/test/autodjprocessor_test.cpp
 +++ b/src/test/autodjprocessor_test.cpp
 @@ -8,6 +8,7 @@
@@ -399,7 +415,7 @@ index 9b85871e..e1aaca69 100644
  #include "control/controlpotmeter.h"
  #include "control/controlpushbutton.h"
  #include "engine/engine.h"
-@@ -1864,3 +1865,246 @@ TEST_F(AutoDJProcessorTest, Request) {
+@@ -1864,3 +1865,284 @@ TEST_F(AutoDJProcessorTest, Request) {
      }
      EXPECT_EQ(lastEarlierRequest + 1, ordered.indexOf(id(6)));
  }
@@ -606,6 +622,44 @@ index 9b85871e..e1aaca69 100644
 +    // the transition moves the crossfader towards deck 2
 +    deck1.playposition.set(6.0 / duration);
 +    EXPECT_GT(mixer.crossfader.get(), crossfaderAtStart);
++}
++
++TEST_F(AutoDJProcessorTest, CrossfaderAsksScriptForTransition) {
++    pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FixedFullTrack);
++    pProcessor->setTransitionTime(10);
++
++    TrackId testId = addTrackToCollection(kTrackLocationTest);
++    ASSERT_TRUE(testId.isValid());
++
++    mixer.crossfader.set(-1.0);
++    TrackPointer pTrack = newTestTrack();
++    const double duration = pTrack->getDuration();
++    deck1.slotLoadTrack(pTrack, true);
++    deck1.fakeTrackLoadedEvent(pTrack);
++
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    pAutoDJTableModel->appendTrack(testId);
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_IDLE));
++    EXPECT_CALL(*pProcessor, emitLoadTrackToPlayer(_, QString("[Channel2]"), false));
++    EXPECT_EQ(AutoDJProcessor::ADJ_OK, pProcessor->toggleAutoDJ(true));
++    deck2.slotLoadTrack(pTrack, false);
++    deck2.fakeTrackLoadedEvent(pTrack);
++
++    deck1.playposition.set(5.0 / duration);
++    ControlProxy byScript(QStringLiteral("[AutoDJ]"), QStringLiteral("fade_by_script"));
++    ControlProxy request(QStringLiteral("[AutoDJ]"), QStringLiteral("fade_request"));
++    byScript.set(1);
++    const double requests = request.get();
++
++    // With a script handling transitions: the crossfader goes back, the
++    // request is counted, and nothing starts until the script asks for it
++    mixer.crossfader.set(1.0);
++    EXPECT_DOUBLE_EQ(-1.0, mixer.crossfader.get());
++    EXPECT_DOUBLE_EQ(requests + 1, request.get());
++    deck1.playposition.set(5.01 / duration);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++    EXPECT_DOUBLE_EQ(0.0, deck2.play.get());
++    byScript.set(0);
 +}
 +
 +TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {

@@ -86,23 +86,23 @@ index aadc3045..604e8bbd 100644
              return; // success
          }
 diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
-index 8c2be411..6ae530db 100644
+index 64feaebe..8da4235a 100644
 --- a/src/library/autodj/autodjprocessor.cpp
 +++ b/src/library/autodj/autodjprocessor.cpp
-@@ -145,7 +145,8 @@ AutoDJProcessor::AutoDJProcessor(
-           m_enabledAutoDJ(ConfigKey(kControlGroup, QStringLiteral("enabled"))),
-           m_nextTransitionBeats(ConfigKey(kControlGroup, QStringLiteral("next_transition_beats"))),
+@@ -147,7 +147,8 @@ AutoDJProcessor::AutoDJProcessor(
            m_phraseAlign(ConfigKey(kControlGroup, QStringLiteral("phrase_align"))),
--          m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))) {
-+          m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))),
+           m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))),
+           m_fadeByScript(ConfigKey(kControlGroup, QStringLiteral("fade_by_script"))),
+-          m_fadeRequest(ConfigKey(kControlGroup, QStringLiteral("fade_request"))) {
++          m_fadeRequest(ConfigKey(kControlGroup, QStringLiteral("fade_request"))),
 +          m_randomFill(ConfigKey(kControlGroup, QStringLiteral("random_fill"))) {
      m_pAutoDJTableModel = make_parented<PlaylistTableModel>(
              this, pTrackCollectionManager, "mixxx.db.model.autodj");
      m_pAutoDJTableModel->selectPlaylist(iAutoDJPlaylistId);
-@@ -188,6 +189,25 @@ AutoDJProcessor::AutoDJProcessor(
-             });
-     m_secondsToTransition.setReadOnly();
-     m_secondsToTransition.forceSet(-1);
+@@ -195,6 +196,25 @@ AutoDJProcessor::AutoDJProcessor(
+     // fade_request up (the script starts the transition) instead of fading
+     // now.
+     m_fadeRequest.setReadOnly();
 +
 +    // DecksmithOS: [AutoDJ],random_fill switches the preference "Enable
 +    // random track addition to queue" (random tracks from the Auto DJ
@@ -125,7 +125,7 @@ index 8c2be411..6ae530db 100644
      m_enabledAutoDJ.connectValueChangeRequest(this,
              &AutoDJProcessor::controlEnableChangeRequest);
  
-@@ -307,6 +327,71 @@ AutoDJProcessor::AutoDJError AutoDJProcessor::sortPlaylistHarmonic(
+@@ -314,6 +334,71 @@ AutoDJProcessor::AutoDJError AutoDJProcessor::sortPlaylistHarmonic(
      return ADJ_OK;
  }
  
@@ -198,7 +198,7 @@ index 8c2be411..6ae530db 100644
      const int positions = std::max(1,
              m_pConfig->getValue(ConfigKey(kPreferenceGroup, QStringLiteral("RequestPositions")),
 diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
-index aa17ce29..5bbc3d2f 100644
+index b0556d6b..ec8af9f0 100644
 --- a/src/library/autodj/autodjprocessor.h
 +++ b/src/library/autodj/autodjprocessor.h
 @@ -215,6 +215,11 @@ class AutoDJProcessor : public QObject {
@@ -213,10 +213,10 @@ index aa17ce29..5bbc3d2f 100644
      const QSet<TrackId>& requestedTracks() const {
          return m_requestedTracks;
      }
-@@ -344,6 +349,7 @@ class AutoDJProcessor : public QObject {
-     ControlObject m_nextTransitionBeats;
-     ControlPushButton m_phraseAlign;
+@@ -346,6 +351,7 @@ class AutoDJProcessor : public QObject {
      ControlObject m_secondsToTransition;
+     ControlObject m_fadeByScript;
+     ControlObject m_fadeRequest;
 +    ControlPushButton m_randomFill;
  
      DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
@@ -471,7 +471,7 @@ index a82898a2..87b7058f 100644
              m_pConfig->getValue(
                      ConfigKey("[Auto DJ]", "EnableRandomQueue"), false));
 diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
-index e1aaca69..d5f89975 100644
+index 86ffcbdc..0d00164f 100644
 --- a/src/test/autodjprocessor_test.cpp
 +++ b/src/test/autodjprocessor_test.cpp
 @@ -1801,6 +1801,30 @@ TEST(AutoDJHarmonicOrderTest, RequestSlot) {
@@ -505,7 +505,7 @@ index e1aaca69..d5f89975 100644
  TEST_F(AutoDJProcessorTest, Request) {
      PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
      const QList<std::pair<QString, std::pair<double, key::ChromaticKey>>> files = {
-@@ -2108,3 +2132,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
+@@ -2146,3 +2170,14 @@ TEST_F(AutoDJProcessorTest, FadeNowWithTransitionBeats) {
      EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
      EXPECT_DOUBLE_EQ(1.0, deck2.play.get());
  }

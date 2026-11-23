@@ -141,7 +141,8 @@
             </Children>
           </WidgetGroup>
           <!-- Auto DJ row. In the Auto DJ section: Auto DJ on/off, fade to
-               the next track now, the planned transition, skip the next track, order the queue by key
+               the next track now (through DecksmithOS-AutoDJ.js, which plays
+               what comes before the planned transition first), the planned transition, skip the next track, order the queue by key
                (patch 0006), add a random track, keep the queue filled with
                random tracks from the source crates (or the whole library;
                patch 0022). Elsewhere: the selected track to the end of the
@@ -176,7 +177,7 @@
                     <State><Number>0</Number><Text>FADE NOW</Text></State>
                     <State><Number>1</Number><Text>FADE NOW</Text></State>
                     <Connection>
-                      <ConfigKey>[AutoDJ],fade_now</ConfigKey>
+                      <ConfigKey>[Skin],dsm_adj_fade_now</ConfigKey>
                     </Connection>
                   </PushButton>
                   <WidgetGroup><Size>8f,44f</Size></WidgetGroup>

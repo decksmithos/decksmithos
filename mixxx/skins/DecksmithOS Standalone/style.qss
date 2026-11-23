@@ -1177,3 +1177,8 @@ font-size:25px;
 #PadModeBtn { font-size: 16px; color: #c8c8cc; border: 1px solid #45454d; background-color: #000; margin: 0px 6px; padding: 0px; }
 #PadModeBtn[value="1"] { color: #fff; background-color: #3a3a42; border-color: #e8e8ec; }
 #LibraryWrapper WLibrarySidebar::item { min-height: 44px; }
+
+/* Mixxx's own "Fade" button of the Auto DJ table header: hidden; the skin's
+   FADE NOW goes through the DecksmithOS Auto DJ script, which plays what
+   comes before the planned transition (echo, loop roll, sweep, brake). */
+#pushButtonFadeNow { min-width: 0px; max-width: 0px; min-height: 0px; max-height: 0px; padding: 0px; margin: 0px; border: none; }

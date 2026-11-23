@@ -27,6 +27,7 @@
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_reverb">1</attribute>
 			<attribute persist="true" config_key="[Skin],dsm_adj_use_brake">1</attribute>
 			<attribute config_key="[Skin],dsm_adj_next">0</attribute>
+			<attribute config_key="[Skin],dsm_adj_fade_now">0</attribute>
 		</attributes>
 	</manifest>
 
