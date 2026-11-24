@@ -1,0 +1,573 @@
+Description: How much of a track was heard; history, Auto DJ requeue, move buttons
+ - ListenTracker: [ChannelN],listened (read only, 0..1), the share of the
+   loaded track listened to (the play position's progress while playing at
+   up to twice normal speed; jumps and seeks are not counted); reset when a
+   track is loaded.
+ - History and play count: a playing track counts as played only once
+   [Library] HistoryMinListenedPercent (default 10) of it was listened to;
+   unloaded before, it is not played. 0: at once (Mixxx's behaviour).
+ - Auto DJ: a track the deck got from the queue that is replaced by another
+   one before [Auto DJ] RequeuePercent (default 5) of it was heard goes back
+   to the top of the queue (below a track waiting in a deck). 0: never.
+ - [Library],move_selected_up / move_selected_down: the selected tracks one
+   place up or down in a playlist or the Auto DJ queue (the view's
+   Alt+Up/Down), for a touch screen without drag and drop.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-24
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 246d7996..b83b4a5b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1059,6 +1059,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/mixer/playerinfo.cpp
+   src/mixer/playermanager.cpp
+   src/mixer/removabledrives.cpp
++  src/mixer/listentracker.cpp
+   src/mixer/previewdeck.cpp
+   src/mixer/sampler.cpp
+   src/mixer/samplerbank.cpp
+diff --git a/src/coreservices.cpp b/src/coreservices.cpp
+index b26a0576..21cabd91 100644
+--- a/src/coreservices.cpp
++++ b/src/coreservices.cpp
+@@ -1,5 +1,6 @@
+ #include "coreservices.h"
+ 
++#include "mixer/listentracker.h"
+ #include "mixer/removabledrives.h"
+ 
+ #include <QApplication>
+@@ -548,6 +549,8 @@ void CoreServices::initialize(QApplication* pApp) {
+     if (RemovableDrives::isEnabled()) {
+         m_pRemovableDrives = std::make_unique<RemovableDrives>(nullptr, m_pPlayerManager.get());
+     }
++    // DecksmithOS: [ChannelN],listened (history threshold, Auto DJ requeue)
++    m_pListenTracker = std::make_unique<ListenTracker>(nullptr, m_pPlayerManager.get());
+ 
+     m_pEffectsManager->setup();
+ 
+@@ -818,6 +821,7 @@ void CoreServices::finalize() {
+ 
+     // Uses the players: gone before them
+     m_pRemovableDrives.reset();
++    m_pListenTracker.reset();
+ 
+     // Stop all pending library operations
+     qDebug() << t.elapsed(false).debugMillisWithUnit() << "stopping pending Library tasks";
+diff --git a/src/coreservices.h b/src/coreservices.h
+index 323e2013..34c55e4d 100644
+--- a/src/coreservices.h
++++ b/src/coreservices.h
+@@ -24,6 +24,7 @@ class SkinControls;
+ class ControlPushButton;
+ 
+ class RemovableDrives;
++class ListenTracker;
+ 
+ namespace mixxx {
+ 
+@@ -129,6 +130,8 @@ class CoreServices : public QObject {
+     std::shared_ptr<PlayerManager> m_pPlayerManager;
+     /// DecksmithOS: drives with eject buttons (DECKSMITHOS_DRIVES)
+     std::unique_ptr<RemovableDrives> m_pRemovableDrives;
++    /// DecksmithOS: [ChannelN],listened
++    std::unique_ptr<ListenTracker> m_pListenTracker;
+     std::shared_ptr<RecordingManager> m_pRecordingManager;
+ #ifdef __BROADCAST__
+     std::shared_ptr<BroadcastManager> m_pBroadcastManager;
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 8e9612d9..280e6003 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -1023,19 +1023,19 @@ AutoDJProcessor::AutoDJError AutoDJProcessor::toggleAutoDJ(bool enable) {
+             // Load track into the left deck and play. Once it starts playing,
+             // we will receive a playerPositionChanged update for deck 1 which
+             // will load a track into the right deck and switch to IDLE mode.
+-            emitLoadTrackToPlayer(nextTrack, pLeftDeck->group, true);
++            loadFromQueue(nextTrack, pLeftDeck->group, true);
+         } else {
+             // One of the two decks is playing. Switch into IDLE mode and wait
+             // until the playing deck crosses posThreshold to start fading.
+             m_eState = ADJ_IDLE;
+             if (leftDeckPlaying) {
+                 // Load track into the right deck.
+-                emitLoadTrackToPlayer(nextTrack, pRightDeck->group, false);
++                loadFromQueue(nextTrack, pRightDeck->group, false);
+                 // Move crossfader to the left.
+                 setCrossfader(-1.0);
+             } else {
+                 // Load track into the left deck.
+-                emitLoadTrackToPlayer(nextTrack, pLeftDeck->group, false);
++                loadFromQueue(nextTrack, pLeftDeck->group, false);
+                 // Move crossfader to the right.
+                 setCrossfader(1.0);
+             }
+@@ -1431,11 +1431,11 @@ bool AutoDJProcessor::loadNextTrackFromQueue(const DeckAttributes& deck, bool pl
+         toggleAutoDJ(false);
+ 
+         // And eject track (nextTrack is null) as "End of auto DJ warning"
+-        emitLoadTrackToPlayer(nextTrack, deck.group, false);
++        loadFromQueue(nextTrack, deck.group, false);
+         return false;
+     }
+ 
+-    emitLoadTrackToPlayer(nextTrack, deck.group, play);
++    loadFromQueue(nextTrack, deck.group, play);
+     return true;
+ }
+ 
+@@ -2348,6 +2348,7 @@ void AutoDJProcessor::playerLoadingTrack(DeckAttributes* pDeck,
+     }
+ 
+     pDeck->loading = true;
++    maybeRequeue(pDeck, pOldTrack);
+ 
+     // The Deck is loading an new track
+ 
+@@ -2369,6 +2370,43 @@ void AutoDJProcessor::playerLoadingTrack(DeckAttributes* pDeck,
+     }
+ }
+ 
++void AutoDJProcessor::maybeRequeue(DeckAttributes* pDeck, const TrackPointer& pOldTrack) {
++    if (!pOldTrack || !pOldTrack->getId().isValid() ||
++            m_queueTracks.value(pDeck->group) != pOldTrack->getId()) {
++        return; // not from the queue (or Auto DJ itself loads the next one)
++    }
++    m_queueTracks.remove(pDeck->group);
++    const int percent = m_pConfig->getValue(
++            ConfigKey(kPreferenceGroup, QStringLiteral("RequeuePercent")), 5);
++    const double listened = ControlObject::get(ConfigKey(pDeck->group, QStringLiteral("listened")));
++    if (percent <= 0 || listened * 100 >= percent) {
++        return;
++    }
++    // Back to the top of the queue; below a track that waits in a deck
++    m_pAutoDJTableModel->select();
++    int row = 0;
++    if (m_pAutoDJTableModel->rowCount() > 0) {
++        const TrackId first = m_pAutoDJTableModel->getTrackId(m_pAutoDJTableModel->index(0, 0));
++        if (first == pOldTrack->getId()) {
++            return; // still queued
++        }
++        for (const auto& pOther : m_decks) {
++            if (pOther.get() != pDeck && pOther->getLoadedTrack() &&
++                    pOther->getLoadedTrack()->getId() == first) {
++                row = 1;
++                break;
++            }
++        }
++    }
++    const QModelIndex before = row < m_pAutoDJTableModel->rowCount()
++            ? m_pAutoDJTableModel->index(row, 0)
++            : QModelIndex();
++    m_pAutoDJTableModel->addTracksWithTrackIds(before, {pOldTrack->getId()}, nullptr);
++    m_pAutoDJTableModel->select();
++    qInfo() << "Auto DJ:" << pOldTrack->getLocation() << "was replaced after"
++            << qRound(listened * 100) << "%: back to the queue";
++}
++
+ void AutoDJProcessor::playerEmpty(DeckAttributes* pDeck) {
+     if constexpr (sDebug) {
+         qDebug() << this << "playerEmpty()" << pDeck->group;
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index 26d87bfe..23bfd60d 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <QElapsedTimer>
++#include <QHash>
+ #include <QObject>
+ #include <QTimer>
+ #include <QSet>
+@@ -17,6 +18,7 @@
+ #include "library/playlisttablemodel.h"
+ #include "preferences/usersettings.h"
+ #include "track/beats.h"
++#include "track/track.h"
+ #include "track/track_decl.h"
+ #include "util/class.h"
+ #include "util/parented_ptr.h"
+@@ -264,6 +266,11 @@ class AutoDJProcessor : public QObject {
+     virtual void emitLoadTrackToPlayer(TrackPointer pTrack, const QString& group, bool play) {
+         emit loadTrackToPlayer(pTrack, group, play);
+     }
++    /// DecksmithOS: a track from the queue, remembered per deck
++    void loadFromQueue(TrackPointer pTrack, const QString& group, bool play) {
++        m_queueTracks.insert(group, pTrack ? pTrack->getId() : TrackId());
++        emitLoadTrackToPlayer(pTrack, group, play);
++    }
+     virtual void emitAutoDJStateChanged(AutoDJProcessor::AutoDJState state) {
+         emit autoDJStateChanged(state);
+     }
+@@ -375,6 +382,10 @@ class AutoDJProcessor : public QObject {
+         int beats = 0;
+     };
+     std::vector<BarCount> m_barCounts;
++    /// The track each deck got from the queue (a track replaced before
++    /// [Auto DJ] RequeuePercent of it was heard goes back to the queue)
++    QHash<QString, TrackId> m_queueTracks;
++    void maybeRequeue(DeckAttributes* pDeck, const TrackPointer& pOldTrack);
+     void updateBeatsToBar(DeckAttributes* pDeck, double playPosition);
+ 
+     DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
+diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
+index e0c370a6..21b6ab3b 100644
+--- a/src/library/librarycontrol.cpp
++++ b/src/library/librarycontrol.cpp
+@@ -356,6 +356,32 @@ LibraryControl::LibraryControl(Library* pLibrary)
+                 &LibraryControl::slotCopySelected);
+     }
+ 
++    // DecksmithOS: the selected tracks one place up or down in a playlist or
++    // the Auto DJ queue (as Alt+Up/Down), for a touch screen without drag
++    // and drop
++    m_pMoveSelectedUp = std::make_unique<ControlPushButton>(
++            ConfigKey("[Library]", "move_selected_up"));
++    m_pMoveSelectedDown = std::make_unique<ControlPushButton>(
++            ConfigKey("[Library]", "move_selected_down"));
++#ifdef MIXXX_USE_QML
++    if (!CmdlineArgs::Instance().isQml())
++#endif
++    {
++        connect(m_pMoveSelectedUp.get(), &ControlPushButton::valueChanged, this, [this](double v) {
++            if (v > 0) {
++                moveSelected(Qt::Key_Up);
++            }
++        });
++        connect(m_pMoveSelectedDown.get(),
++                &ControlPushButton::valueChanged,
++                this,
++                [this](double v) {
++                    if (v > 0) {
++                        moveSelected(Qt::Key_Down);
++                    }
++                });
++    }
++
+     // Sort controls
+     m_pSortColumn = std::make_unique<ControlEncoder>(ConfigKey("[Library]", "sort_column"));
+     m_pSortOrder = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "sort_order"));
+@@ -755,6 +781,19 @@ void LibraryControl::slotAutoDjAddAllBottom(double v) {
+     }
+ }
+ 
++void LibraryControl::moveSelected(int key) {
++    if (!m_pLibraryWidget) {
++        return;
++    }
++    WTrackTableView* pTrackTableView = m_pLibraryWidget->getCurrentTrackTableView();
++    if (!pTrackTableView) {
++        return;
++    }
++    // The view's own Alt+Up/Down (playlists and the Auto DJ queue only)
++    QKeyEvent event(QEvent::KeyPress, key, Qt::AltModifier);
++    QApplication::sendEvent(pTrackTableView, &event);
++}
++
+ void LibraryControl::slotCopySelected(double v) {
+     if (!m_pLibraryWidget || v <= 0 || !CopyTracksDialog::isEnabled()) {
+         return;
+diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
+index c116ac34..f34775a1 100644
+--- a/src/library/librarycontrol.h
++++ b/src/library/librarycontrol.h
+@@ -108,6 +108,7 @@ class LibraryControl : public QObject {
+     void slotAutoDjAddAllBottom(double v);
+     void slotRemoveSelected(double v);
+     void slotCopySelected(double v);
++    void moveSelected(int key);
+ 
+     void maybeCreateGroupController(const QString& group);
+     void slotNumDecksChanged(double v);
+@@ -175,6 +176,8 @@ class LibraryControl : public QObject {
+     std::unique_ptr<ControlObject> m_pRemoveSelected;
+     std::unique_ptr<ControlObject> m_pSelectionChanges;
+     std::unique_ptr<ControlObject> m_pCopySelected;
++    std::unique_ptr<ControlObject> m_pMoveSelectedUp;
++    std::unique_ptr<ControlObject> m_pMoveSelectedDown;
+ 
+     // Controls to sort the track view
+     std::unique_ptr<ControlEncoder> m_pSortColumn;
+diff --git a/src/library/trackset/setlogfeature.cpp b/src/library/trackset/setlogfeature.cpp
+index c4cbdb17..65ffdedb 100644
+--- a/src/library/trackset/setlogfeature.cpp
++++ b/src/library/trackset/setlogfeature.cpp
+@@ -11,7 +11,10 @@
+ #include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+ #include "library/treeitem.h"
++#include "mixer/listentracker.h"
+ #include "mixer/playerinfo.h"
++#include "mixer/playermanager.h"
++#include "control/controlobject.h"
+ #include "moc_setlogfeature.cpp"
+ #include "track/track.h"
+ #include "util/make_const_iterator.h"
+@@ -128,6 +131,11 @@ void SetlogFeature::bindLibraryWidget(
+             &PlayerInfo::currentPlayingTrackChanged,
+             this,
+             &SetlogFeature::slotPlayingTrackChanged);
++    connect(&m_pendingTimer,
++            &QTimer::timeout,
++            this,
++            &SetlogFeature::slotCheckPendingPlayed,
++            Qt::UniqueConnection);
+     m_pLibraryWidget = QPointer(pLibraryWidget);
+ }
+ 
+@@ -587,10 +595,76 @@ void SetlogFeature::slotDeleteAllUnlockedChildPlaylists() {
+     m_playlistDao.deleteUnlockedPlaylists(std::move(ids));
+ }
+ 
++namespace {
++const ConfigKey kHistoryMinListenedKey(
++        QStringLiteral("[Library]"), QStringLiteral("HistoryMinListenedPercent"));
++constexpr int kHistoryMinListenedDefault = 10;
++} // namespace
++
++// DecksmithOS: a track counts as played (history, play count) only once
++// [Library] HistoryMinListenedPercent of it has been listened to
++// ([ChannelN],listened, ListenTracker); 0: at once, as before
+ void SetlogFeature::slotPlayingTrackChanged(TrackPointer currentPlayingTrack) {
+     if (!currentPlayingTrack) {
+         return;
+     }
++    const int minPercent = m_pConfig->getValue(kHistoryMinListenedKey, kHistoryMinListenedDefault);
++    if (minPercent <= 0) {
++        markPlayed(currentPlayingTrack);
++        return;
++    }
++    for (const auto& pPending : std::as_const(m_pendingPlayed)) {
++        if (pPending.lock() == currentPlayingTrack) {
++            return;
++        }
++    }
++    m_pendingPlayed.append(currentPlayingTrack);
++    if (!m_pendingTimer.isActive()) {
++        m_pendingTimer.start(1000);
++    }
++    slotCheckPendingPlayed();
++}
++
++void SetlogFeature::slotCheckPendingPlayed() {
++    const double minShare =
++            m_pConfig->getValue(kHistoryMinListenedKey, kHistoryMinListenedDefault) / 100.0;
++    const int decks = static_cast<int>(
++            ControlObject::get(ConfigKey(QStringLiteral("[App]"), QStringLiteral("num_decks"))));
++    QList<TrackPointer> played;
++    for (auto it = m_pendingPlayed.begin(); it != m_pendingPlayed.end();) {
++        const TrackPointer pTrack = it->lock();
++        QString group;
++        for (int i = 0; pTrack && i < decks; ++i) {
++            const QString deck = PlayerManager::groupForDeck(i);
++            if (PlayerInfo::instance().getTrackInfo(deck) == pTrack) {
++                group = deck;
++                break;
++            }
++        }
++        if (group.isEmpty()) {
++            // unloaded before enough of it was heard: not played
++            it = m_pendingPlayed.erase(it);
++            continue;
++        }
++        if (ListenTracker::listened(group) >= minShare) {
++            played.append(pTrack);
++            it = m_pendingPlayed.erase(it);
++            continue;
++        }
++        ++it;
++    }
++    if (m_pendingPlayed.isEmpty()) {
++        m_pendingTimer.stop();
++    }
++    for (const TrackPointer& pTrack : std::as_const(played)) {
++        markPlayed(pTrack);
++    }
++}
++
++void SetlogFeature::markPlayed(TrackPointer currentPlayingTrack) {
++    if (!currentPlayingTrack) {
++        return;
++    }
+ 
+     TrackId currentPlayingTrackId(currentPlayingTrack->getId());
+     bool track_played_recently = false;
+diff --git a/src/library/trackset/setlogfeature.h b/src/library/trackset/setlogfeature.h
+index 14364173..ca2129a5 100644
+--- a/src/library/trackset/setlogfeature.h
++++ b/src/library/trackset/setlogfeature.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <QTimer>
++
+ #include <QPointer>
+ 
+ #include "library/trackset/baseplaylistfeature.h"
+@@ -40,6 +42,8 @@ class SetlogFeature : public BasePlaylistFeature {
+ 
+   private slots:
+     void slotPlayingTrackChanged(TrackPointer currentPlayingTrack);
++    /// DecksmithOS: tracks wait until enough of them was listened to
++    void slotCheckPendingPlayed();
+     void slotPlaylistTableChanged(int playlistId) override;
+     void slotPlaylistContentOrLockChanged(const QSet<int>& playlistIds) override;
+     void slotPlaylistTableRenamed(int playlistId, const QString& newName) override;
+@@ -51,6 +55,11 @@ class SetlogFeature : public BasePlaylistFeature {
+     QString getRootViewHtml() const override;
+ 
+     std::list<TrackId> m_recentTracks;
++    /// DecksmithOS: playing tracks not counted as played yet
++    /// ([Library] HistoryMinListenedPercent of them not listened to yet)
++    QList<TrackWeakPointer> m_pendingPlayed;
++    QTimer m_pendingTimer;
++    void markPlayed(TrackPointer currentPlayingTrack);
+     QAction* m_pJoinWithPreviousAction;
+     QAction* m_pMarkTracksPlayedAction;
+     QAction* m_pStartNewPlaylist;
+diff --git a/src/mixer/listentracker.cpp b/src/mixer/listentracker.cpp
+new file mode 100644
+index 00000000..176ea427
+--- /dev/null
++++ b/src/mixer/listentracker.cpp
+@@ -0,0 +1,94 @@
++#include "mixer/listentracker.h"
++
++#include <QElapsedTimer>
++#include <algorithm>
++
++#include "control/controlobject.h"
++#include "control/controlproxy.h"
++#include "mixer/basetrackplayer.h"
++#include "mixer/playermanager.h"
++#include "moc_listentracker.cpp"
++#include "track/track.h"
++
++namespace {
++constexpr int kPollMillis = 250;
++/// Progress faster than this (times real time) is a jump, not listening
++constexpr double kMaxSpeed = 2.0;
++} // namespace
++
++struct ListenTracker::Deck {
++    QString group;
++    std::unique_ptr<ControlObject> pListened;
++    std::unique_ptr<ControlProxy> pPlay;
++    std::unique_ptr<ControlProxy> pPosition;
++    std::unique_ptr<ControlProxy> pDuration;
++    double lastPosition = -1;
++    QElapsedTimer clock;
++};
++
++ListenTracker::ListenTracker(QObject* pParent, PlayerManager* pPlayerManager)
++        : QObject(pParent),
++          m_pPlayerManager(pPlayerManager),
++          m_pNumDecks(std::make_unique<ControlProxy>(
++                  QStringLiteral("[App]"), QStringLiteral("num_decks"), this)) {
++    m_pNumDecks->connectValueChanged(this, &ListenTracker::slotNumberOfDecksChanged);
++    slotNumberOfDecksChanged(m_pNumDecks->get());
++    m_timer.setInterval(kPollMillis);
++    connect(&m_timer, &QTimer::timeout, this, &ListenTracker::slotPoll);
++    m_timer.start();
++}
++
++ListenTracker::~ListenTracker() = default;
++
++// static
++double ListenTracker::listened(const QString& group) {
++    const ConfigKey key(group, QStringLiteral("listened"));
++    return ControlObject::exists(key) ? ControlObject::get(key) : 0.0;
++}
++
++void ListenTracker::slotNumberOfDecksChanged(double decks) {
++    for (int i = static_cast<int>(m_decks.size()); i < static_cast<int>(decks); ++i) {
++        auto pDeck = std::make_unique<Deck>();
++        pDeck->group = PlayerManager::groupForDeck(i);
++        pDeck->pListened = std::make_unique<ControlObject>(
++                ConfigKey(pDeck->group, QStringLiteral("listened")));
++        pDeck->pListened->setReadOnly();
++        pDeck->pPlay = std::make_unique<ControlProxy>(pDeck->group, QStringLiteral("play"), this);
++        pDeck->pPosition = std::make_unique<ControlProxy>(
++                pDeck->group, QStringLiteral("playposition"), this);
++        pDeck->pDuration = std::make_unique<ControlProxy>(
++                pDeck->group, QStringLiteral("duration"), this);
++        BaseTrackPlayer* pPlayer = m_pPlayerManager->getDeckBase(i);
++        if (pPlayer) {
++            Deck* pRaw = pDeck.get();
++            connect(pPlayer,
++                    &BaseTrackPlayer::newTrackLoaded,
++                    this,
++                    [pRaw](TrackPointer) {
++                        pRaw->pListened->forceSet(0.0);
++                        pRaw->lastPosition = -1;
++                    });
++        }
++        m_decks.push_back(std::move(pDeck));
++    }
++}
++
++void ListenTracker::slotPoll() {
++    for (const auto& pDeck : m_decks) {
++        const double position = pDeck->pPosition->get();
++        const double duration = pDeck->pDuration->get();
++        const qint64 elapsedMillis = pDeck->clock.isValid() ? pDeck->clock.restart() : 0;
++        if (!pDeck->clock.isValid()) {
++            pDeck->clock.start();
++        }
++        if (pDeck->pPlay->toBool() && duration > 0 && pDeck->lastPosition >= 0 &&
++                elapsedMillis > 0) {
++            const double progressSeconds = (position - pDeck->lastPosition) * duration;
++            if (progressSeconds > 0 && progressSeconds < kMaxSpeed * elapsedMillis / 1000.0) {
++                pDeck->pListened->forceSet(
++                        std::min(1.0, pDeck->pListened->get() + progressSeconds / duration));
++            }
++        }
++        pDeck->lastPosition = position;
++    }
++}
+diff --git a/src/mixer/listentracker.h b/src/mixer/listentracker.h
+new file mode 100644
+index 00000000..eecd5a19
+--- /dev/null
++++ b/src/mixer/listentracker.h
+@@ -0,0 +1,37 @@
++#pragma once
++
++#include <QObject>
++#include <QTimer>
++#include <memory>
++#include <vector>
++
++class ControlObject;
++class ControlProxy;
++class PlayerManager;
++
++/// DecksmithOS: how much of the track loaded in each deck has been listened
++/// to, as [ChannelN],listened (read only, 0..1 of the track's duration):
++/// the play position's progress while the deck plays, at normal speed
++/// (jumps and seeks are not counted). Reset when a track is loaded. Used for
++/// the history (a track counts as played from a share of it) and by Auto DJ
++/// (a track replaced before a share of it was heard goes back to the queue).
++class ListenTracker : public QObject {
++    Q_OBJECT
++  public:
++    ListenTracker(QObject* pParent, PlayerManager* pPlayerManager);
++    ~ListenTracker() override;
++
++    /// [ChannelN],listened of a deck group, 0 if none
++    static double listened(const QString& group);
++
++  private slots:
++    void slotPoll();
++    void slotNumberOfDecksChanged(double decks);
++
++  private:
++    struct Deck;
++    PlayerManager* const m_pPlayerManager;
++    std::vector<std::unique_ptr<Deck>> m_decks;
++    std::unique_ptr<ControlProxy> m_pNumDecks;
++    QTimer m_timer;
++};

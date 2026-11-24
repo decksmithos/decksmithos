@@ -337,6 +337,32 @@
                    skin bridge asks for a second tap within 3 s
                    ([Skin],dsm_lit_remove 1: "REMOVE?"). -->
               <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+              <!-- The selected tracks one place up / down in a playlist or
+                   the Auto DJ queue (patch 0032; nothing elsewhere) -->
+              <PushButton>
+                <ObjectName>LibActionBtn</ObjectName>
+                <Size>64f,44f</Size>
+                <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                <State><Number>0</Number><Text>▲</Text></State>
+                <State><Number>1</Number><Text>▲</Text></State>
+                <Connection>
+                  <ConfigKey>[Library],move_selected_up</ConfigKey>
+                </Connection>
+              </PushButton>
+              <WidgetGroup><Size>4f,44f</Size></WidgetGroup>
+              <PushButton>
+                <ObjectName>LibActionBtn</ObjectName>
+                <Size>64f,44f</Size>
+                <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                <State><Number>0</Number><Text>▼</Text></State>
+                <State><Number>1</Number><Text>▼</Text></State>
+                <Connection>
+                  <ConfigKey>[Library],move_selected_down</ConfigKey>
+                </Connection>
+              </PushButton>
+              <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
               <!-- In every section: the selected tracks' files to a folder
                    of the console or a USB drive, chosen in a dialog (patch
                    0025, [Library],copy_selected) -->

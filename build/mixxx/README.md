@@ -99,6 +99,7 @@ so the source is patched in this order:
 | `0029-decksmithos-timed-transition` | `[AutoDJ],next_transition_ms`: the next transition advances on the clock instead of the outgoing deck's position (brake) | appliance; could go upstream |
 | `0030-decksmithos-pls-playlists` | USB import: `*.pls` in the drive's root and in a `playlists` folder (any case) become drive playlists like the rekordbox/Serato ones (relative, absolute, `file://` and Windows drive-letter paths) | appliance |
 | `0031-decksmithos-beats-to-bar` | `[ChannelN],beats_to_bar` (read only, kept by Auto DJ): beats to the next bar from the first phrase/downbeat; the Auto DJ script starts FADE NOW, loop roll and brake on a bar | appliance |
+| `0032-decksmithos-listened` | `[ChannelN],listened`; history/play count only after `[Library] HistoryMinListenedPercent` (10) of a track was heard; Auto DJ puts a queue track replaced before `[Auto DJ] RequeuePercent` (5) back at the top; `[Library],move_selected_up/down` (▲ ▼ in the skin) | appliance |
 
 Refresh 0000 with `build/mixxx/make-stable-patch.sh [branch [commit]]`
 (default: head of `2.5`). It also tries each DecksmithOS patch on top and

@@ -237,6 +237,34 @@ compress_final_image() {
   log "  ${final_image}.xz ($(du -h "${final_image}.xz" | cut -f1))"
 }
 
+# Keep the disk from filling up (a build leaves ~30 GB in pi-gen/work and a
+# 3-10 GB image per run): after a successful build, pi-gen/work goes (every
+# build starts from scratch, CLEAN=1) and deploy/ and output/ keep the newest
+# KEEP_BUILDS images and update files per profile. KEEP_BUILDS=0 keeps all.
+prune_old_builds() {
+  local keep="${KEEP_BUILDS:-2}"
+  [ "${keep}" -gt 0 ] 2>/dev/null || { log "Keeping all earlier builds (KEEP_BUILDS=${keep})"; return 0; }
+  if [ "${CLEAN:-1}" = "1" ] && [ -d "${PI_GEN_DIR}/work" ]; then
+    log "Removing pi-gen/work ($(sudo du -sh "${PI_GEN_DIR}/work" 2>/dev/null | cut -f1))"
+    sudo rm -rf "${PI_GEN_DIR}/work"
+  fi
+  local profile pattern file
+  for profile in dev release; do
+    # pi-gen images: <date>-DecksmithOS-<profile>.img with .bmap/.info/.os.json
+    for file in $(find "${PI_GEN_DIR}/deploy" -maxdepth 1 -type f -name "*-DecksmithOS-${profile}.img" \
+                    -printf '%T@ %p\n' | sort -rn | tail -n +"$((keep + 1))" | cut -d' ' -f2-); do
+      pattern="${file%.img}"
+      log "Removing old image ${pattern}.*"
+      sudo rm -f "${pattern}".img "${pattern}".bmap "${pattern}".info "${pattern}".os.json
+    done
+    for file in $(find "${BUILD_DIR}/output" -maxdepth 1 -type f -name "decksmithos-${profile}-*.update" \
+                    -printf '%T@ %p\n' | sort -rn | tail -n +"$((keep + 1))" | cut -d' ' -f2-); do
+      log "Removing old update $(basename "${file}")"
+      sudo rm -f "${file}"
+    done
+  done
+}
+
 main() {
   require_tools
   prepare_pi_gen
@@ -257,6 +285,7 @@ main() {
   make_update_file
   compress_final_image
 
+  prune_old_builds
   log "Build finished successfully"
   log "pi-gen artifacts: ${PI_GEN_DIR}/deploy"
   log "DecksmithOS final artifacts: ${BUILD_DIR}/output"
