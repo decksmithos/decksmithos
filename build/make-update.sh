@@ -2,7 +2,11 @@
 # Make a signed DecksmithOS update file from a built image (slot A of
 # build/output/decksmithos-<profile>.img), for decksmithos-update on the device.
 #
-#   build/make-update.sh [image]        default: build/output/decksmithos-release.img
+#   build/make-update.sh [--unsigned] [image]
+#                                       default: build/output/decksmithos-release.img
+#   --unsigned: no signing here; output .../decksmithos-<profile>-<version>.unsigned
+#   (manifest, boot.tar.zst, rootfs.tar.zst), signed by build/sign-update.sh on
+#   the machine that holds the key (the build VM never gets it)
 #
 # Output: build/output/decksmithos-<profile>-<version>.update
 # Copy it to the root of a USB stick as "decksmithos.update"; the system menu
@@ -20,6 +24,11 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UNSIGNED=0
+if [[ "${1:-}" == --unsigned ]]; then
+  UNSIGNED=1
+  shift
+fi
 IMAGE="${1:-${SCRIPT_DIR}/output/decksmithos-release.img}"
 SIGN_KEY="${DECKSMITHOS_SIGN_KEY:-${HOME}/.ssh/decksmithos_ed25519}"
 SIGN_PASSFILE="${DECKSMITHOS_SIGN_PASSFILE:-${HOME}/.ssh/decksmithos.pass}"
@@ -30,7 +39,7 @@ die() { echo "make-update: ERROR: $*" >&2; exit 1; }
 log() { echo "make-update: $*"; }
 
 [[ -f "${IMAGE}" ]] || die "image not found: ${IMAGE}"
-[[ -f "${SIGN_KEY}" ]] || die "signing key not found: ${SIGN_KEY}"
+[[ "${UNSIGNED}" == 1 || -f "${SIGN_KEY}" ]] || die "signing key not found: ${SIGN_KEY}"
 for t in zstd ssh-keygen tar sha256sum losetup; do
   command -v "${t}" >/dev/null || die "missing tool: ${t}"
 done
@@ -79,6 +88,15 @@ rootfs_kib="$(sudo du -sk --apparent-size --exclude="${MNT}/root/${DEMO_EXCLUDE#
   echo "rootfs_kib=${rootfs_kib}"
 } > "${STAGE}/manifest"
 cat "${STAGE}/manifest"
+
+if [[ "${UNSIGNED}" == 1 ]]; then
+  out="${SCRIPT_DIR}/output/decksmithos-${profile}-${version}.unsigned"
+  tar -C "${STAGE}" --owner=0 --group=0 -cf "${STAGE}/out.unsigned" manifest boot.tar.zst rootfs.tar.zst
+  sudo mv -f "${STAGE}/out.unsigned" "${out}"
+  sudo chmod 644 "${out}"
+  log "created ${out} (unsigned: sign it with build/sign-update.sh)"
+  exit 0
+fi
 
 log "signing the manifest with ${SIGN_KEY}"
 if [[ -r "${SIGN_PASSFILE}" ]]; then

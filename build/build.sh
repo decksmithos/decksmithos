@@ -201,11 +201,16 @@ run_postprocess() {
 }
 
 # Signed update file for the system menu (build/make-update.sh). Skipped when
-# the signing key is not on this machine or DECKSMITHOS_MAKE_UPDATE=0.
+# the signing key is not on this machine or DECKSMITHOS_MAKE_UPDATE=0;
+# DECKSMITHOS_MAKE_UPDATE=unsigned makes an unsigned one to be signed elsewhere
+# (the build VM, tools/buildvm/build-in-vm.sh and build/sign-update.sh).
 make_update_file() {
   local key="${DECKSMITHOS_SIGN_KEY:-${HOME}/.ssh/decksmithos_ed25519}"
   if [[ "${DECKSMITHOS_MAKE_UPDATE:-1}" == 0 ]]; then
     log "Update file skipped (DECKSMITHOS_MAKE_UPDATE=0)"
+  elif [[ "${DECKSMITHOS_MAKE_UPDATE:-1}" == unsigned ]]; then
+    "${BUILD_DIR}/make-update.sh" --unsigned "${BUILD_DIR}/output/decksmithos-${DECKSMITHOS_PROFILE}.img" \
+      || die "make-update.sh failed"
   elif [[ ! -f "${key}" ]]; then
     log "Update file skipped: signing key ${key} not found"
   else
@@ -243,10 +248,19 @@ compress_final_image() {
 # KEEP_BUILDS images and update files per profile. KEEP_BUILDS=0 keeps all.
 prune_old_builds() {
   local keep="${KEEP_BUILDS:-2}"
+  # Deleting as root: only inside this checkout, never on an empty or odd path
+  case "${BUILD_DIR}" in
+    /*/build) ;;
+    *) log "Not pruning: unexpected BUILD_DIR '${BUILD_DIR}'"; return 0 ;;
+  esac
+  if [ "${PI_GEN_DIR}" != "${BUILD_DIR}/pi-gen" ] || [ ! -f "${BUILD_DIR}/build.sh" ]; then
+    log "Not pruning: unexpected PI_GEN_DIR '${PI_GEN_DIR}'"
+    return 0
+  fi
   [ "${keep}" -gt 0 ] 2>/dev/null || { log "Keeping all earlier builds (KEEP_BUILDS=${keep})"; return 0; }
   if [ "${CLEAN:-1}" = "1" ] && [ -d "${PI_GEN_DIR}/work" ]; then
     log "Removing pi-gen/work ($(sudo du -sh "${PI_GEN_DIR}/work" 2>/dev/null | cut -f1))"
-    sudo rm -rf "${PI_GEN_DIR}/work"
+    sudo rm -rf --one-file-system -- "${PI_GEN_DIR:?}/work"
   fi
   local profile pattern file
   for profile in dev release; do
@@ -255,12 +269,20 @@ prune_old_builds() {
                     -printf '%T@ %p\n' | sort -rn | tail -n +"$((keep + 1))" | cut -d' ' -f2-); do
       pattern="${file%.img}"
       log "Removing old image ${pattern}.*"
-      sudo rm -f "${pattern}".img "${pattern}".bmap "${pattern}".info "${pattern}".os.json
+      case "${pattern}" in
+        "${PI_GEN_DIR}/deploy/"*-DecksmithOS-"${profile}") ;;
+        *) log "Not removing unexpected '${pattern}'"; continue ;;
+      esac
+      sudo rm -f -- "${pattern}".img "${pattern}".bmap "${pattern}".info "${pattern}".os.json
     done
     for file in $(find "${BUILD_DIR}/output" -maxdepth 1 -type f -name "decksmithos-${profile}-*.update" \
                     -printf '%T@ %p\n' | sort -rn | tail -n +"$((keep + 1))" | cut -d' ' -f2-); do
+      case "${file}" in
+        "${BUILD_DIR}/output/decksmithos-${profile}-"*.update) ;;
+        *) log "Not removing unexpected '${file}'"; continue ;;
+      esac
       log "Removing old update $(basename "${file}")"
-      sudo rm -f "${file}"
+      sudo rm -f -- "${file}"
     done
   done
 }

@@ -1,0 +1,18 @@
+# systemd user service: the Claude Code session that works on DecksmithOS,
+# in a tmux session of the user claude, started at boot (loginctl
+# enable-linger claude). Attach with:  sudo -u claude tmux attach -t decksmithos
+# (or through Remote Control). Restarted when it ends.
+[Unit]
+Description=Claude Code session for DecksmithOS
+After=network-online.target
+
+[Service]
+Type=forking
+WorkingDirectory=/shared/decksmithos
+ExecStart=/usr/bin/tmux new-session -d -s decksmithos -c /shared/decksmithos -- bash -lc claude
+ExecStop=/usr/bin/tmux kill-session -t decksmithos
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

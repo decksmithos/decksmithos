@@ -1,0 +1,15 @@
+# systemd user service of the DecksmithOS build VM (install-user-services.sh).
+# Not enabled at boot: tools/buildvm/vm.sh start (and build-in-vm.sh) start it
+# when a build needs it and stop it afterwards, so the VM takes no CPU or RAM
+# between builds. Stopping the service powers the VM down cleanly.
+[Unit]
+Description=DecksmithOS build VM (KVM)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/decksmithos-buildvm/bin/vm.sh run-foreground
+ExecStop=%h/.local/share/decksmithos-buildvm/bin/vm.sh stop
+TimeoutStopSec=150
+# Lowest priority on the host: the laptop stays responsive during a build
+Nice=10
+IOSchedulingClass=idle

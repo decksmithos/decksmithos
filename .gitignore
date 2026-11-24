@@ -5,3 +5,4 @@
 build/output/
 cache/
 build/update-staging.*/
+build/output-vm/
