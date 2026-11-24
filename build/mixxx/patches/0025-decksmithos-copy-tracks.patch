@@ -713,7 +713,7 @@ index 00000000..f72535e4
 +    QStringList m_toAdd;
 +};
 diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
-index fd109599..6f14c8b8 100644
+index b6a620ba..e0c370a6 100644
 --- a/src/library/librarycontrol.cpp
 +++ b/src/library/librarycontrol.cpp
 @@ -10,6 +10,7 @@
@@ -724,9 +724,9 @@ index fd109599..6f14c8b8 100644
  #include "library/library.h"
  #include "library/libraryview.h"
  #include "mixer/playermanager.h"
-@@ -336,6 +337,20 @@ LibraryControl::LibraryControl(Library* pLibrary)
-                 &LibraryControl::slotRemoveSelected);
-     }
+@@ -341,6 +342,20 @@ LibraryControl::LibraryControl(Library* pLibrary)
+             ConfigKey("[Library]", "selection_changes"));
+     m_pSelectionChanges->setReadOnly();
  
 +    // DecksmithOS: the files of the selected tracks copied to a folder chosen
 +    // in a dialog (DECKSMITHOS_COPY_ROOTS)
@@ -745,7 +745,7 @@ index fd109599..6f14c8b8 100644
      // Sort controls
      m_pSortColumn = std::make_unique<ControlEncoder>(ConfigKey("[Library]", "sort_column"));
      m_pSortOrder = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "sort_order"));
-@@ -731,6 +746,24 @@ void LibraryControl::slotAutoDjAddAllBottom(double v) {
+@@ -740,6 +755,24 @@ void LibraryControl::slotAutoDjAddAllBottom(double v) {
      }
  }
  
@@ -771,7 +771,7 @@ index fd109599..6f14c8b8 100644
      if (!m_pLibraryWidget || v <= 0) {
          return;
 diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
-index 1f599f00..9678bd5c 100644
+index 4303f1c5..c116ac34 100644
 --- a/src/library/librarycontrol.h
 +++ b/src/library/librarycontrol.h
 @@ -107,6 +107,7 @@ class LibraryControl : public QObject {
@@ -782,16 +782,16 @@ index 1f599f00..9678bd5c 100644
  
      void maybeCreateGroupController(const QString& group);
      void slotNumDecksChanged(double v);
-@@ -172,6 +173,7 @@ class LibraryControl : public QObject {
-     std::unique_ptr<ControlObject> m_pAutoDjAddRequest;
+@@ -173,6 +174,7 @@ class LibraryControl : public QObject {
      std::unique_ptr<ControlObject> m_pAutoDjAddAllBottom;
      std::unique_ptr<ControlObject> m_pRemoveSelected;
+     std::unique_ptr<ControlObject> m_pSelectionChanges;
 +    std::unique_ptr<ControlObject> m_pCopySelected;
  
      // Controls to sort the track view
      std::unique_ptr<ControlEncoder> m_pSortColumn;
 diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
-index f735d2ec..ac483aee 100644
+index 450b87c3..84be4df4 100644
 --- a/src/widget/wtracktableview.cpp
 +++ b/src/widget/wtracktableview.cpp
 @@ -1,6 +1,7 @@
@@ -802,7 +802,7 @@ index f735d2ec..ac483aee 100644
  #include <QModelIndex>
  #include <QScrollBar>
  #include <QShortcut>
-@@ -910,6 +911,25 @@ void WTrackTableView::removeSelectedTracks() {
+@@ -925,6 +926,25 @@ void WTrackTableView::removeSelectedTracks() {
      setCurrentIndex(newIndex);
  }
  

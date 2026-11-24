@@ -162,4 +162,12 @@ export DECKSMITHOS_USB_WRITE_COMMAND="sudo -n /usr/local/sbin/decksmithos-system
 # scan that a new drive starts shows no window (patch 0019).
 export DECKSMITHOS_USB_IMPORT="/usb:/usb2"
 export DECKSMITHOS_NO_SCAN_DIALOG=1
+# The library database in write-ahead-log mode and scans committed in small
+# batches: the GUI stays responsive while a drive with thousands of tracks
+# is scanned, an interrupted scan resumes, a quit stops the scan first
+# (patch 0026)
+export DECKSMITHOS_RESPONSIVE_DB=1
+# A warning in the Mixxx log when the GUI thread stalls for more than this
+# (patch 0027); the lines before it show the cause
+export DECKSMITHOS_GUI_STALL_MS=150
 exec taskset -c "${CORES}" mixxx "${ARGS[@]}"

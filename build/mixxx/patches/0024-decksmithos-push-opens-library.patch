@@ -73,7 +73,7 @@ index 058f2beb..b6386363 100644
      }
  };
 diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
-index b08ad9e2..fd109599 100644
+index 28abff43..b6a620ba 100644
 --- a/src/library/librarycontrol.cpp
 +++ b/src/library/librarycontrol.cpp
 @@ -244,6 +244,17 @@ LibraryControl::LibraryControl(Library* pLibrary)
@@ -94,7 +94,7 @@ index b08ad9e2..fd109599 100644
      // Auto DJ controls
      m_pAutoDjAddTop = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "AutoDjAddTop"));
      m_pAutoDjAddTop->addAlias(ConfigKey(
-@@ -1096,7 +1107,60 @@ void LibraryControl::slotToggleSelectedSidebarItem(double v) {
+@@ -1105,7 +1116,60 @@ void LibraryControl::slotToggleSelectedSidebarItem(double v) {
  }
  
  void LibraryControl::slotGoToItem(double v) {
@@ -156,7 +156,7 @@ index b08ad9e2..fd109599 100644
          return;
      }
  
-@@ -1113,13 +1177,10 @@ void LibraryControl::slotGoToItem(double v) {
+@@ -1122,13 +1186,10 @@ void LibraryControl::slotGoToItem(double v) {
              m_pSidebarWidget->toggleSelectedItem();
          }
          return;
@@ -174,7 +174,7 @@ index b08ad9e2..fd109599 100644
      case FocusWidget::SearchRelatedMenu: {
          // Press Space to click dialog buttons. In SearchRelatedMenu this toggles
 diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
-index 0fa46332..1f599f00 100644
+index 75227d73..4303f1c5 100644
 --- a/src/library/librarycontrol.h
 +++ b/src/library/librarycontrol.h
 @@ -1,6 +1,7 @@

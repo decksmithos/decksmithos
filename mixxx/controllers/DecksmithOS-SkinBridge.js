@@ -41,6 +41,8 @@
 //                             tracks from the Auto DJ queue, playlist or
 //                             crate shown, or hides them in Tracks
 //                             ([Library],remove_selected, Mixxx patch 0023)
+//                             Another track, list or folder chosen in
+//                             between cancels it ([Library],selection_changes)
 
 var DecksmithSkin = {};
 
@@ -108,6 +110,11 @@ DecksmithSkin.connectAll = function() {
     }
     this.watch("search_request", function() {
         DecksmithSkin.openSearch();
+    }, "[Library]");
+    this.watch("selection_changes", function() {
+        if (DecksmithSkin.timers.remove) {
+            DecksmithSkin.removeDisarm();
+        }
     }, "[Library]");
     this.watch("dsm_remove", function(value) {
         if (value > 0) {

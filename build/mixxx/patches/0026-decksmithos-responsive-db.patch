@@ -1,0 +1,202 @@
+Description: Library scans that keep the GUI responsive (DECKSMITHOS_RESPONSIVE_DB)
+ A library scan adds all new tracks in a single database transaction. With
+ a few thousand new files (a USB drive) the database stays write-locked for
+ minutes: every GUI query (library views, sorting, settings) waits up to the
+ 5 s busy timeout and fails with "database is locked", the GUI is sluggish,
+ settings saved on quit fail and a quit takes longer than a service stop
+ timeout; an interrupted scan is rolled back completely and starts over.
+ With DECKSMITHOS_RESPONSIVE_DB set:
+ - the database uses the write-ahead log (PRAGMA journal_mode=WAL, kept in
+   the file): readers never wait for the writer;
+ - the scanner commits after every 50 tracks or 500 ms and after each
+   complete directory (with its hash), announcing the tracks added so far:
+   other writers wait at most for one batch, tracks appear while the scan
+   runs, and a scan interrupted by a quit or a power cut resumes where it
+   stopped (the directories already complete keep their hash);
+ - a running scan is cancelled when the application is about to quit,
+   before the windows are closed and the settings saved.
+ Without the variable nothing changes.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-24
+---
+diff --git a/src/coreservices.cpp b/src/coreservices.cpp
+index 20be30a5..77a3a2e0 100644
+--- a/src/coreservices.cpp
++++ b/src/coreservices.cpp
+@@ -575,6 +575,14 @@ void CoreServices::initialize(QApplication* pApp) {
+             this,
+             pConfig,
+             m_pDbConnectionPool);
++    if (MixxxDb::isResponsiveDatabase()) {
++        // DecksmithOS: a running scan stops before the windows are closed and
++        // the settings saved, so that their writes do not wait for it
++        connect(pApp,
++                &QCoreApplication::aboutToQuit,
++                m_pTrackCollectionManager.get(),
++                &TrackCollectionManager::stopLibraryScan);
++    }
+ 
+     m_pLibrary = std::make_shared<Library>(
+             this,
+diff --git a/src/database/mixxxdb.cpp b/src/database/mixxxdb.cpp
+index af053a10..e52b8a06 100644
+--- a/src/database/mixxxdb.cpp
++++ b/src/database/mixxxdb.cpp
+@@ -1,6 +1,7 @@
+ #include "database/mixxxdb.h"
+ 
+ #include <QDir>
++#include <QSqlQuery>
+ 
+ #include "database/schemamanager.h"
+ #include "moc_mixxxdb.cpp"
+@@ -69,6 +70,11 @@ MixxxDb::MixxxDb(
+     : m_pDbConnectionPool(std::make_shared<mixxx::DbConnectionPool>(dbConnectionParams(pConfig, inMemoryConnection), "MIXXX")) {
+ }
+ 
++// static
++bool MixxxDb::isResponsiveDatabase() {
++    return !qEnvironmentVariableIsEmpty("DECKSMITHOS_RESPONSIVE_DB");
++}
++
+ bool MixxxDb::initDatabaseSchema(
+         const QSqlDatabase& database,
+         int schemaVersion,
+@@ -85,6 +91,16 @@ bool MixxxDb::initDatabaseSchema(
+     case SchemaManager::Result::CurrentVersion:
+     case SchemaManager::Result::UpgradeSucceeded:
+     case SchemaManager::Result::NewerVersionBackwardsCompatible:
++        if (isResponsiveDatabase()) {
++            // DecksmithOS: write-ahead log, so that readers (the GUI) never
++            // wait for a writer (the library scanner). Kept in the file.
++            QSqlQuery query(database);
++            if (query.exec(QStringLiteral("PRAGMA journal_mode=WAL")) && query.next()) {
++                kLogger.info() << "Journal mode" << query.value(0).toString();
++            } else {
++                kLogger.warning() << "Failed to switch to the write-ahead log";
++            }
++        }
+         return true; // done
+     case SchemaManager::Result::UpgradeFailed:
+         QMessageBox::warning(nullptr,
+diff --git a/src/database/mixxxdb.h b/src/database/mixxxdb.h
+index 0e31fb61..e6657550 100644
+--- a/src/database/mixxxdb.h
++++ b/src/database/mixxxdb.h
+@@ -13,6 +13,10 @@ class MixxxDb : public QObject {
+ 
+     static const int kRequiredSchemaVersion;
+ 
++    /// DecksmithOS (DECKSMITHOS_RESPONSIVE_DB): write-ahead log, library
++    /// scans committed in small batches, the scan stopped first on quit
++    static bool isResponsiveDatabase();
++
+     static bool initDatabaseSchema(
+             const QSqlDatabase& database,
+             int schemaVersion = kRequiredSchemaVersion,
+diff --git a/src/library/dao/trackdao.cpp b/src/library/dao/trackdao.cpp
+index 248c4a6c..548879dd 100644
+--- a/src/library/dao/trackdao.cpp
++++ b/src/library/dao/trackdao.cpp
+@@ -390,6 +390,8 @@ void TrackDAO::addTracksPrepare() {
+     }
+     // Start the transaction
+     m_pTransaction = std::make_unique<SqlTransaction>(m_database);
++    m_batchTracks = 0;
++    m_batchTimer.start();
+ 
+     m_pQueryTrackLocationInsert = std::make_unique<QSqlQuery>(m_database);
+     m_pQueryTrackLocationSelect = std::make_unique<QSqlQuery>(m_database);
+@@ -513,6 +515,26 @@ void TrackDAO::addTracksPrepare() {
+             "WHERE location=:location");
+ }
+ 
++void TrackDAO::addTracksCommitBatch() {
++    constexpr int kBatchTracks = 50;
++    constexpr qint64 kBatchMillis = 500;
++    if (!m_pTransaction) {
++        return;
++    }
++    ++m_batchTracks;
++    if (m_batchTracks < kBatchTracks && m_batchTimer.elapsed() < kBatchMillis) {
++        return;
++    }
++    m_pTransaction->commit();
++    m_pTransaction = std::make_unique<SqlTransaction>(m_database);
++    m_batchTracks = 0;
++    m_batchTimer.start();
++    if (!m_tracksAddedSet.isEmpty()) {
++        emit tracksAdded(m_tracksAddedSet);
++        m_tracksAddedSet.clear();
++    }
++}
++
+ void TrackDAO::addTracksFinish(bool rollback) {
+     if (m_pTransaction) {
+         if (rollback) {
+diff --git a/src/library/dao/trackdao.h b/src/library/dao/trackdao.h
+index 2b52b3c8..387b3edc 100644
+--- a/src/library/dao/trackdao.h
++++ b/src/library/dao/trackdao.h
+@@ -4,6 +4,7 @@
+ 
+ #include <QList>
+ #include <QObject>
++#include <QElapsedTimer>
+ #include <QSet>
+ #include <QString>
+ #include <QtSql/QSqlQuery>
+@@ -163,6 +164,10 @@ class TrackDAO : public QObject, public virtual DAO, public virtual GlobalTrackC
+             const QString& filePath,
+             bool unremove);
+     void addTracksFinish(bool rollback = false);
++    /// DecksmithOS: commits what was added since the last batch and starts
++    /// a new transaction, after kBatchTracks tracks or kBatchMillis, so that
++    /// a long scan neither blocks other writers nor loses its progress
++    void addTracksCommitBatch();
+ 
+     bool updateTrack(const Track& track) const;
+ 
+@@ -215,6 +220,8 @@ class TrackDAO : public QObject, public virtual DAO, public virtual GlobalTrackC
+     int m_queryLibraryMixxxDeletedColumn;
+ 
+     QSet<TrackId> m_tracksAddedSet;
++    int m_batchTracks = 0;
++    QElapsedTimer m_batchTimer;
+ 
+     DISALLOW_COPY_AND_ASSIGN(TrackDAO);
+     mutable QSqlQuery m_lastAddedToHistoryQuery;
+diff --git a/src/library/scanner/libraryscanner.cpp b/src/library/scanner/libraryscanner.cpp
+index df1530c3..e141de72 100644
+--- a/src/library/scanner/libraryscanner.cpp
++++ b/src/library/scanner/libraryscanner.cpp
+@@ -1,5 +1,7 @@
+ #include "library/scanner/libraryscanner.h"
+ 
++#include "database/mixxxdb.h"
++
+ #include "library/coverartutils.h"
+ #include "util/threadplacement.h"
+ #include "library/queryutil.h"
+@@ -579,6 +581,10 @@ void LibraryScanner::slotDirectoryHashedAndScanned(const QString& directoryPath,
+     } else {
+         m_libraryHashDao.updateDirectoryHash(directoryPath, hash, 0);
+     }
++    // DecksmithOS: the directory is complete, its tracks and hash can be kept
++    if (MixxxDb::isResponsiveDatabase()) {
++        m_trackDao.addTracksCommitBatch();
++    }
+     emit progressHashing(directoryPath);
+ }
+ 
+@@ -627,6 +633,9 @@ void LibraryScanner::slotAddNewTrack(const QString& trackPath) {
+     TrackPointer pTrack = m_trackDao.addTracksAddFile(
+             trackPath,
+             false);
++    if (MixxxDb::isResponsiveDatabase()) {
++        m_trackDao.addTracksCommitBatch();
++    }
+     if (!pTrack) {
+         // This happens only when there is an issue with the database which
+         // has been logged already. No need for yet another warning here.

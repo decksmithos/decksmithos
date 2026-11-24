@@ -6,15 +6,18 @@ Description: Remove or hide the selected tracks from a control
  asks for a second press instead). For a touch screen without context
  menus. Locked playlists and crates and views without either action
  (Browse, Rekordbox, Serato) are left unchanged.
+ [Library],selection_changes (read only) counts up whenever the selected
+ tracks or the list shown change, so that the skin can cancel an armed
+ REMOVE.
 Author: DecksmithOS
 Forwarded: no
 Last-Update: 2026-11-24
 ---
 diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
-index 4c301ee9..b08ad9e2 100644
+index 4c301ee9..28abff43 100644
 --- a/src/library/librarycontrol.cpp
 +++ b/src/library/librarycontrol.cpp
-@@ -310,6 +310,21 @@ LibraryControl::LibraryControl(Library* pLibrary)
+@@ -310,6 +310,26 @@ LibraryControl::LibraryControl(Library* pLibrary)
                  &LibraryControl::slotAutoDjAddAllBottom);
      }
  
@@ -32,11 +35,27 @@ index 4c301ee9..b08ad9e2 100644
 +                this,
 +                &LibraryControl::slotRemoveSelected);
 +    }
++    // DecksmithOS: counts up when the selected tracks or the list shown change
++    // (read only), so that a skin can cancel an armed REMOVE
++    m_pSelectionChanges = std::make_unique<ControlObject>(
++            ConfigKey("[Library]", "selection_changes"));
++    m_pSelectionChanges->setReadOnly();
 +
      // Sort controls
      m_pSortColumn = std::make_unique<ControlEncoder>(ConfigKey("[Library]", "sort_column"));
      m_pSortOrder = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "sort_order"));
-@@ -705,6 +720,17 @@ void LibraryControl::slotAutoDjAddAllBottom(double v) {
+@@ -599,6 +619,10 @@ void LibraryControl::bindLibraryWidget(WLibrary* pLibraryWidget, KeyboardEventFi
+             &WLibrary::destroyed,
+             this,
+             &LibraryControl::libraryWidgetDeleted);
++    // DecksmithOS: another view shown (sidebar) is a selection change too
++    connect(m_pLibraryWidget, &QStackedWidget::currentChanged, this, [this]() {
++        m_pSelectionChanges->forceSet(m_pSelectionChanges->get() + 1);
++    });
+ }
+ 
+ void LibraryControl::bindSearchboxWidget(WSearchLineEdit* pSearchbox) {
+@@ -705,6 +729,17 @@ void LibraryControl::slotAutoDjAddAllBottom(double v) {
      }
  }
  
@@ -55,7 +74,7 @@ index 4c301ee9..b08ad9e2 100644
      if (v > 0) {
          slotSelectTrack(1);
 diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
-index 4a359086..0fa46332 100644
+index 4a359086..75227d73 100644
 --- a/src/library/librarycontrol.h
 +++ b/src/library/librarycontrol.h
 @@ -102,6 +102,7 @@ class LibraryControl : public QObject {
@@ -66,19 +85,52 @@ index 4a359086..0fa46332 100644
  
      void maybeCreateGroupController(const QString& group);
      void slotNumDecksChanged(double v);
-@@ -159,6 +160,7 @@ class LibraryControl : public QObject {
+@@ -159,6 +160,8 @@ class LibraryControl : public QObject {
      std::unique_ptr<ControlObject> m_pAutoDjAddReplace;
      std::unique_ptr<ControlObject> m_pAutoDjAddRequest;
      std::unique_ptr<ControlObject> m_pAutoDjAddAllBottom;
 +    std::unique_ptr<ControlObject> m_pRemoveSelected;
++    std::unique_ptr<ControlObject> m_pSelectionChanges;
  
      // Controls to sort the track view
      std::unique_ptr<ControlEncoder> m_pSortColumn;
 diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
-index 9f73c506..f735d2ec 100644
+index 9f73c506..450b87c3 100644
 --- a/src/widget/wtracktableview.cpp
 +++ b/src/widget/wtracktableview.cpp
-@@ -1277,7 +1277,7 @@ void WTrackTableView::resizeEvent(QResizeEvent* event) {
+@@ -121,9 +121,23 @@ void WTrackTableView::slotScrollValueChanged(int /*unused*/) {
+     enableCachedOnly();
+ }
+ 
++namespace {
++/// DecksmithOS: counts changes of the selected tracks or of the list shown
++/// ([Library],selection_changes, read only; the skin bridge disarms REMOVE)
++void countSelectionChange() {
++    ControlObject* pChanges = ControlObject::getControl(
++            ConfigKey(QStringLiteral("[Library]"), QStringLiteral("selection_changes")),
++            ControlFlag::NoWarnIfMissing);
++    if (pChanges) {
++        pChanges->forceSet(pChanges->get() + 1);
++    }
++}
++} // namespace
++
+ void WTrackTableView::selectionChanged(
+         const QItemSelection& selected, const QItemSelection& deselected) {
+     m_selectionChangedSinceLastGuiTick = true;
++    countSelectionChange();
+     enableCachedOnly();
+ #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+     // Workaround for Qt6 bug https://bugreports.qt.io/browse/QTBUG-108595:
+@@ -196,6 +210,7 @@ void WTrackTableView::loadTrackModel(QAbstractItemModel* pNewModel, bool restore
+     VERIFY_OR_DEBUG_ASSERT(pNewTrackModel) {
+         return;
+     }
++    countSelectionChange();
+ 
+     m_sorting = pNewTrackModel->hasCapabilities(TrackModel::Capability::Sorting);
+ 
+@@ -1277,7 +1292,7 @@ void WTrackTableView::resizeEvent(QResizeEvent* event) {
      }
  }
  
@@ -87,7 +139,7 @@ index 9f73c506..f735d2ec 100644
      TrackModel* pTrackModel = getTrackModel();
      if (!pTrackModel) {
          return;
-@@ -1317,7 +1317,7 @@ void WTrackTableView::hideOrRemoveSelectedTracks() {
+@@ -1317,7 +1332,7 @@ void WTrackTableView::hideOrRemoveSelectedTracks() {
      }
      }
  

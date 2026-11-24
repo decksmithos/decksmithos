@@ -1,0 +1,385 @@
+Description: Auto DJ fixes found on the hardware: fill without loading, early outros, GUI stalls
+ - Random tracks for the queue (patch 0022: 8 candidates placed by key and
+   tempo) are read from the database (ids, files, bpm, key_id) instead of
+   being loaded as tracks; the queue's key and tempo too. This runs in the
+   GUI thread at every transition: with a large library, loading 8 + 10
+   tracks stalled it for about half a second.
+ - An outro that ends in the first tenth of a track is ignored (as not
+   set): a file the decoder could not read is analysed as silence, with
+   intro, outro and last sound all at 0, and Auto DJ left such a track a
+   few seconds after it started. Test FullIntroOutro_OutroAtStartIgnored.
+ - DECKSMITHOS_GUI_STALL_MS: a warning "GUI thread stalled for N ms" when a
+   20 ms timer of the GUI thread comes later than that, to find what stalls
+   the waveforms on the hardware.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-24
+---
+diff --git a/src/coreservices.cpp b/src/coreservices.cpp
+index 77a3a2e0..b26a0576 100644
+--- a/src/coreservices.cpp
++++ b/src/coreservices.cpp
+@@ -3,6 +3,8 @@
+ #include "mixer/removabledrives.h"
+ 
+ #include <QApplication>
++#include <QTimer>
++#include <QElapsedTimer>
+ #include <QFileDialog>
+ #include <QProcess>
+ #include <QProcessEnvironment>
+@@ -575,6 +577,22 @@ void CoreServices::initialize(QApplication* pApp) {
+             this,
+             pConfig,
+             m_pDbConnectionPool);
++    // DecksmithOS: logs every stall of the GUI thread longer than
++    // DECKSMITHOS_GUI_STALL_MS (a 20 ms timer that comes late); the log lines
++    // before it show what the GUI thread was doing
++    if (const int stallMillis = qEnvironmentVariableIntValue("DECKSMITHOS_GUI_STALL_MS");
++            stallMillis > 0) {
++        auto* pTimer = new QTimer(this);
++        auto pElapsed = std::make_shared<QElapsedTimer>();
++        pElapsed->start();
++        connect(pTimer, &QTimer::timeout, this, [pElapsed, stallMillis]() {
++            const qint64 gap = pElapsed->restart();
++            if (gap > stallMillis) {
++                qWarning() << "GUI thread stalled for" << gap << "ms";
++            }
++        });
++        pTimer->start(20);
++    }
+     if (MixxxDb::isResponsiveDatabase()) {
+         // DecksmithOS: a running scan stops before the windows are closed and
+         // the settings saved, so that their writes do not wait for it
+diff --git a/src/library/autodj/autodjfeature.cpp b/src/library/autodj/autodjfeature.cpp
+index 604e8bbd..fef0a9a9 100644
+--- a/src/library/autodj/autodjfeature.cpp
++++ b/src/library/autodj/autodjfeature.cpp
+@@ -1,5 +1,11 @@
+ #include "library/autodj/autodjfeature.h"
+ 
++#include <QSqlQuery>
++
++#include <QSqlError>
++
++#include <QFileInfo>
++
+ #include <QMenu>
+ #include <QtDebug>
+ 
+@@ -289,9 +295,12 @@ void AutoDJFeature::slotAddRandomTrack() {
+     // fits best where it fits best (key, then tempo)
+     constexpr int kRandomCandidates = 8;
+     if (m_iAutoDJPlaylistId >= 0) {
+-        QList<TrackPointer> candidates;
++        // DecksmithOS: the candidates are only read from the database (ids,
++        // files, key and tempo), not loaded as tracks: this runs in the GUI
++        // thread at every transition and must not stall it
++        QList<TrackId> candidates;
+         QSet<TrackId> seen;
+-        for (int attempts = 0; candidates.size() < kRandomCandidates &&
++        for (int attempts = 0; seen.size() < kRandomCandidates &&
+                 attempts < 2 * kMaxRetrieveAttempts + 2 * kRandomCandidates;
+                 ++attempts) {
+             TrackId randomTrackId;
+@@ -309,20 +318,30 @@ void AutoDJFeature::slotAddRandomTrack() {
+                 continue;
+             }
+             seen.insert(randomTrackId);
+-            TrackPointer pRandomTrack =
+-                    m_pLibrary->trackCollectionManager()->getTrackById(randomTrackId);
+-            VERIFY_OR_DEBUG_ASSERT(pRandomTrack) {
+-                qWarning() << "Track does not exist:"
+-                           << randomTrackId;
+-                continue;
++        }
++        if (!seen.isEmpty()) {
++            QStringList ids;
++            for (const TrackId& trackId : std::as_const(seen)) {
++                ids.append(trackId.toString());
+             }
+-            if (!pRandomTrack->getFileInfo().checkFileExists()) {
+-                qWarning() << "Track does not exist:"
+-                           << pRandomTrack->getInfo()
+-                           << pRandomTrack->getLocation();
+-                continue;
++            QSqlQuery query(m_pTrackCollection->database());
++            query.setForwardOnly(true);
++            if (query.exec(QStringLiteral(
++                        "SELECT library.id, track_locations.location FROM library "
++                        "JOIN track_locations ON library.location = track_locations.id "
++                        "WHERE library.id IN (%1)")
++                                .arg(ids.join(QChar(','))))) {
++                while (query.next()) {
++                    const QString location = query.value(1).toString();
++                    if (!QFileInfo::exists(location)) {
++                        qWarning() << "Track does not exist:" << location;
++                        continue;
++                    }
++                    candidates.append(TrackId(query.value(0)));
++                }
++            } else {
++                qWarning() << "Random tracks:" << query.lastError();
+             }
+-            candidates.append(pRandomTrack);
+         }
+         if (m_pAutoDJProcessor->addRandomTrack(candidates)) {
+             m_pAutoDJView->onShow();
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 8da4235a..4452002a 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -2,9 +2,12 @@
+ 
+ #include <algorithm>
+ #include <optional>
++#include <QSqlQuery>
++#include <QSqlError>
+ 
+ #include "engine/channels/enginedeck.h"
+ #include "library/autodj/harmonicorder.h"
++#include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+ #include "mixer/basetrackplayer.h"
+ #include "mixer/playermanager.h"
+@@ -334,15 +337,42 @@ AutoDJProcessor::AutoDJError AutoDJProcessor::sortPlaylistHarmonic(
+     return ADJ_OK;
+ }
+ 
+-bool AutoDJProcessor::addRandomTrack(const QList<TrackPointer>& candidates) {
+-    const auto harmonicTrack = [](const TrackPointer& pTrack) {
++namespace {
++/// DecksmithOS: key and tempo of tracks straight from the database, without
++/// loading them (the GUI thread must not stall at a transition)
++QHash<TrackId, mixxx::autodj::HarmonicTrack> harmonicTracks(
++        const QSqlDatabase& database, const QList<TrackId>& trackIds) {
++    QHash<TrackId, mixxx::autodj::HarmonicTrack> tracks;
++    QStringList ids;
++    for (const TrackId& trackId : trackIds) {
++        if (trackId.isValid()) {
++            ids.append(trackId.toString());
++        }
++    }
++    if (ids.isEmpty()) {
++        return tracks;
++    }
++    QSqlQuery query(database);
++    query.setForwardOnly(true);
++    if (!query.exec(QStringLiteral("SELECT id, bpm, key_id FROM library WHERE id IN (%1)")
++                            .arg(ids.join(QChar(','))))) {
++        qWarning() << "Auto DJ: key and tempo:" << query.lastError();
++        return tracks;
++    }
++    while (query.next()) {
+         mixxx::autodj::HarmonicTrack track;
+-        if (pTrack) {
+-            track.bpm = pTrack->getBpm();
+-            track.key = pTrack->getKey();
++        track.bpm = query.value(1).toDouble();
++        const int key = query.value(2).toInt();
++        if (mixxx::track::io::key::ChromaticKey_IsValid(key)) {
++            track.key = static_cast<mixxx::track::io::key::ChromaticKey>(key);
+         }
+-        return track;
+-    };
++        tracks.insert(TrackId(query.value(0)), track);
++    }
++    return tracks;
++}
++} // namespace
++
++bool AutoDJProcessor::addRandomTrack(const QList<TrackId>& candidates) {
+     if (candidates.isEmpty()) {
+         return false;
+     }
+@@ -351,48 +381,67 @@ bool AutoDJProcessor::addRandomTrack(const QList<TrackPointer>& candidates) {
+     // A running Auto DJ has the first queued track cued already: it stays
+     // first. Requests stay ahead of random tracks.
+     const int head = (m_eState != ADJ_DISABLED && rowCount > 0) ? 1 : 0;
+-    QList<mixxx::autodj::HarmonicTrack> queue;
++    QList<TrackId> queueIds;
+     int first = 0;
+     for (int row = head; row < rowCount; ++row) {
+-        const QModelIndex index = m_pAutoDJTableModel->index(row, 0);
+-        if (m_requestedTracks.contains(m_pAutoDJTableModel->getTrackId(index))) {
++        const TrackId trackId = m_pAutoDJTableModel->getTrackId(
++                m_pAutoDJTableModel->index(row, 0));
++        if (m_requestedTracks.contains(trackId)) {
+             first = row - head + 1;
+         }
+-        queue.append(harmonicTrack(m_pAutoDJTableModel->getTrack(index)));
++        queueIds.append(trackId);
+     }
++    TrackId previousId;
+     std::optional<mixxx::autodj::HarmonicTrack> previous;
+     if (head > 0) {
+-        previous = harmonicTrack(m_pAutoDJTableModel->getTrack(m_pAutoDJTableModel->index(0, 0)));
++        previousId = m_pAutoDJTableModel->getTrackId(m_pAutoDJTableModel->index(0, 0));
+     } else {
+         for (const auto& pDeck : m_decks) {
+             if (pDeck->isPlaying()) {
+-                previous = harmonicTrack(pDeck->getLoadedTrack());
++                const TrackPointer pTrack = pDeck->getLoadedTrack();
++                if (pTrack) {
++                    mixxx::autodj::HarmonicTrack track;
++                    track.bpm = pTrack->getBpm();
++                    track.key = pTrack->getKey();
++                    previous = track;
++                }
+                 break;
+             }
+         }
+     }
++    QList<TrackId> allIds = queueIds + candidates;
++    allIds.append(previousId);
++    const auto tracks = harmonicTracks(
++            m_pTrackCollectionManager->internalCollection()->database(), allIds);
++    if (previousId.isValid()) {
++        previous = tracks.value(previousId);
++    }
++    QList<mixxx::autodj::HarmonicTrack> queue;
++    for (const TrackId& trackId : std::as_const(queueIds)) {
++        queue.append(tracks.value(trackId));
++    }
+     const int last = static_cast<int>(queue.size());
+-    TrackPointer pBest;
++    TrackId best;
+     mixxx::autodj::HarmonicFill bestFill;
+-    for (const auto& pCandidate : candidates) {
+-        if (!pCandidate) {
++    for (const TrackId& candidate : candidates) {
++        if (!candidate.isValid()) {
+             continue;
+         }
+         const auto fill = mixxx::autodj::harmonicFillSlot(
+-                queue, harmonicTrack(pCandidate), previous, first, last);
+-        if (!pBest || fill.cost < bestFill.cost) {
+-            pBest = pCandidate;
++                queue, tracks.value(candidate), previous, first, last);
++        if (!best.isValid() || fill.cost < bestFill.cost) {
++            best = candidate;
+             bestFill = fill;
+         }
+     }
+-    if (!pBest) {
++    if (!best.isValid()) {
+         return false;
+     }
+     // An invalid index appends
+     const QModelIndex before = bestFill.slot < last
+             ? m_pAutoDJTableModel->index(head + bestFill.slot, 0)
+             : QModelIndex();
+-    if (m_pAutoDJTableModel->addTracksWithTrackIds(before, {pBest->getId()}, nullptr) < 1) {
++    if (m_pAutoDJTableModel->addTracksWithTrackIds(before, {best}, nullptr) < 1) {
+         return false;
+     }
+     m_pAutoDJTableModel->select();
+@@ -1510,9 +1559,30 @@ double AutoDJProcessor::getIntroEndSecond(DeckAttributes* pDeck) {
+     return framePositionToSeconds(introEndPosition, pDeck);
+ }
+ 
++namespace {
++/// DecksmithOS: an outro that ends in the first tenth of a track is the
++/// result of a failed analysis (a file the decoder could not read: intro,
++/// outro and last sound all at 0), not a real outro; treated as not set, so
++/// that Auto DJ does not leave such a track after a few seconds.
++constexpr double kMinOutroEndFraction = 0.1;
++
++bool isImplausibleOutro(mixxx::audio::FramePos outroStart,
++        mixxx::audio::FramePos outroEnd,
++        mixxx::audio::FramePos trackEnd) {
++    if (!trackEnd.isValid() || trackEnd.value() <= 0) {
++        return false;
++    }
++    const auto end = outroEnd.isValid() ? outroEnd : outroStart;
++    return end.isValid() && end.value() < kMinOutroEndFraction * trackEnd.value();
++}
++} // namespace
++
+ double AutoDJProcessor::getOutroStartSecond(DeckAttributes* pDeck) {
+     const mixxx::audio::FramePos trackEndPosition = pDeck->trackEndPosition();
+-    const mixxx::audio::FramePos outroStartPosition = pDeck->outroStartPosition();
++    mixxx::audio::FramePos outroStartPosition = pDeck->outroStartPosition();
++    if (isImplausibleOutro(outroStartPosition, pDeck->outroEndPosition(), trackEndPosition)) {
++        outroStartPosition = mixxx::audio::FramePos();
++    }
+     if (!outroStartPosition.isValid() || outroStartPosition > trackEndPosition) {
+         // Assume a zero length outro if outroStart is not set.
+         // The outroEnd is automatically placed by AnalyzerSilence, so use
+@@ -1525,8 +1595,14 @@ double AutoDJProcessor::getOutroStartSecond(DeckAttributes* pDeck) {
+ 
+ double AutoDJProcessor::getOutroEndSecond(DeckAttributes* pDeck) {
+     const mixxx::audio::FramePos trackEndPosition = pDeck->trackEndPosition();
+-    const mixxx::audio::FramePos outroStartPosition = pDeck->outroStartPosition();
+-    const mixxx::audio::FramePos outroEndPosition = pDeck->outroEndPosition();
++    mixxx::audio::FramePos outroStartPosition = pDeck->outroStartPosition();
++    mixxx::audio::FramePos outroEndPosition = pDeck->outroEndPosition();
++    if (isImplausibleOutro(outroStartPosition, outroEndPosition, trackEndPosition)) {
++        qWarning() << "Auto DJ: ignoring an outro in the first tenth of"
++                   << pDeck->group << "(a failed analysis?)";
++        outroStartPosition = mixxx::audio::FramePos();
++        outroEndPosition = mixxx::audio::FramePos();
++    }
+     if (!outroEndPosition.isValid() || outroEndPosition > trackEndPosition) {
+         double lastSoundSecond = getLastSoundSecond(pDeck);
+         DEBUG_ASSERT(lastSoundSecond <= framePositionToSeconds(trackEndPosition, pDeck));
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index ec8af9f0..0e49bfbf 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -219,7 +219,7 @@ class AutoDJProcessor : public QObject {
+     /// best (key, then tempo), where it fits best: after the cued track and
+     /// the requests, at the end unless clearly better earlier. False if none
+     /// could be queued.
+-    bool addRandomTrack(const QList<TrackPointer>& candidates);
++    bool addRandomTrack(const QList<TrackId>& candidates);
+     const QSet<TrackId>& requestedTracks() const {
+         return m_requestedTracks;
+     }
+diff --git a/src/test/autodjprocessor_test.cpp b/src/test/autodjprocessor_test.cpp
+index 0d00164f..3c2036f0 100644
+--- a/src/test/autodjprocessor_test.cpp
++++ b/src/test/autodjprocessor_test.cpp
+@@ -331,6 +331,42 @@ TEST_F(AutoDJProcessorTest, FullIntroOutro_LongerIntro) {
+     EXPECT_DOUBLE_EQ(1.0, mixer.crossfader.get());
+ }
+ 
++// DecksmithOS: a failed analysis leaves the outro at 0; Auto DJ must not
++// leave the track after a few seconds but play it to its end
++TEST_F(AutoDJProcessorTest, FullIntroOutro_OutroAtStartIgnored) {
++    pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FullIntroOutro);
++
++    TrackId testId = addTrackToCollection(kTrackLocationTest);
++    ASSERT_TRUE(testId.isValid());
++
++    mixer.crossfader.set(-1.0);
++    TrackPointer pTrack = newTestTrack();
++    pTrack->setDuration(100);
++    deck1.slotLoadTrack(pTrack, true);
++    deck1.fakeTrackLoadedEvent(pTrack);
++
++    PlaylistTableModel* pAutoDJTableModel = pProcessor->getTableModel();
++    pAutoDJTableModel->appendTrack(testId);
++
++    EXPECT_CALL(*pProcessor, emitLoadTrackToPlayer(_, QString("[Channel2]"), false));
++    EXPECT_CALL(*pProcessor, emitAutoDJStateChanged(AutoDJProcessor::ADJ_IDLE));
++    EXPECT_EQ(AutoDJProcessor::ADJ_OK, pProcessor->toggleAutoDJ(true));
++    deck2.slotLoadTrack(pTrack, false);
++
++    // Intro, outro (and last sound) all at the start
++    deck1.outroStartPos.set(0);
++    deck1.outroEndPos.set(0);
++    deck2.fakeTrackLoadedEvent(pTrack);
++
++    // A few seconds in: no transition yet
++    deck1.playposition.set(0.05);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++    EXPECT_DOUBLE_EQ(0.0, deck2.play.get());
++    deck1.playposition.set(0.5);
++    EXPECT_EQ(AutoDJProcessor::ADJ_IDLE, pProcessor->getState());
++    EXPECT_DOUBLE_EQ(0.0, deck2.play.get());
++}
++
+ TEST_F(AutoDJProcessorTest, FullIntroOutro_LongerOutro) {
+     pProcessor->setTransitionMode(AutoDJProcessor::TransitionMode::FullIntroOutro);
+ 
