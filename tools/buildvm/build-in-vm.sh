@@ -61,7 +61,9 @@ git -C "${REPO_DIR}" update-ref -d "${ref}"
 vm_ssh 'rm -rf ~/src ~/src.bundle'
 vm_ssh 'cat > ~/src.bundle' < "${bundle}"
 rm -f "${bundle}"
-vm_ssh "git clone -q ~/src.bundle ~/src && git -C ~/src checkout -q ${commit}"
+# git clone takes only branches and tags from a bundle: fetch the ref by name
+vm_ssh "git init -q ~/src && git -C ~/src fetch -q ~/src.bundle '${ref}:${ref}' \
+  && git -C ~/src -c advice.detachedHead=false checkout -q ${commit}"
 
 # --- Build (as root inside the VM only) ----------------------------------------------
 vm_log "building ${profile} of ${short} in the VM (log: ${log_file})"

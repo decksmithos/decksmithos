@@ -9,6 +9,7 @@ image builds run in a KVM virtual machine, started only for a build.
 | `create-vm.sh` | once: Debian trixie cloud image, cloud-init (user `builder`, key, pi-gen and Docker packages), snapshot `clean` |
 | `vm.sh` | `start`, `stop`, `status`, `ssh`, `reset` (back to `clean`) |
 | `build-in-vm.sh [--keep-running] [commit] [release\|dev]` | a commit (git bundle) built in the VM, results in `build/output-vm/<profile>/`, the update signed on the host (`build/sign-update.sh`) |
+| `mixxx-in-vm.sh [--keep-running] [--nocheck] [src-dir] [out-dir]` | Mixxx test build (amd64) of `build/mixxx` of the working tree in a `debian:trixie` container in the VM, packages and log in `build/output-vm/mixxx/<version>/`; one build at a time (`build.lock`) |
 | `decksmithos-buildvm.service` | systemd user unit of the VM (not enabled: started on demand) |
 | `claude-decksmithos.service` | systemd user unit: Claude Code in tmux session `decksmithos` |
 | `install-user-services.sh` | installs both units for the current user |

@@ -51,6 +51,18 @@ sudo docker run --rm --platform linux/arm64 \
 
 Set `MIXXX_NOCHECK=1` to skip the upstream test suite.
 
+**Test build in the build VM (amd64, with the test suite).** From a
+developer machine, without root on the host (`tools/buildvm/README.md`):
+
+```sh
+tools/buildvm/mixxx-in-vm.sh [--nocheck] [build/mixxx] [out-dir]
+```
+
+It runs `build-mixxx-deb.sh` with `ALLOW_ANY_ARCH=1` in a `debian:trixie`
+container inside the VM (ccache kept in the VM) and copies the packages and
+`build.log` to `build/output-vm/mixxx/<version>/`. The packages are amd64:
+for compiling and testing only, not for the device.
+
 ## Patches and their order
 
 The build appends `patches/*.patch` (in name order) to Debian's quilt series,
