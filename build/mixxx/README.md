@@ -98,6 +98,7 @@ so the source is patched in this order:
 | `0028-decksmithos-drive-store` | `DECKSMITHOS/` on a USB drive: per-track analysis JSON (grid, keys, cues, structure, gain, waveforms; wins over rekordbox), playlists and crates created while the drive is connected as M3U8 + `index.json`; imported when the drive appears, deleted from the library when it goes; flushed before EJECT | appliance |
 | `0029-decksmithos-timed-transition` | `[AutoDJ],next_transition_ms`: the next transition advances on the clock instead of the outgoing deck's position (brake) | appliance; could go upstream |
 | `0030-decksmithos-pls-playlists` | USB import: `*.pls` in the drive's root and in a `playlists` folder (any case) become drive playlists like the rekordbox/Serato ones (relative, absolute, `file://` and Windows drive-letter paths) | appliance |
+| `0031-decksmithos-beats-to-bar` | `[ChannelN],beats_to_bar` (read only, kept by Auto DJ): beats to the next bar from the first phrase/downbeat; the Auto DJ script starts FADE NOW, loop roll and brake on a bar | appliance |
 
 Refresh 0000 with `build/mixxx/make-stable-patch.sh [branch [commit]]`
 (default: head of `2.5`). It also tries each DecksmithOS patch on top and

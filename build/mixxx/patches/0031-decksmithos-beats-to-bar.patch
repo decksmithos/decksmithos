@@ -1,0 +1,137 @@
+Description: [ChannelN],beats_to_bar: where the next bar of a deck is
+ Read only, kept up to date by Auto DJ while it runs (from the play position
+ updates of each deck): the beats from the play position to the next bar
+ (downbeat), 0 < value <= 4, or 0 when the track has no beat grid. Bars are
+ counted in 4 beats from the first phrase of the track structure (rekordbox
+ or detected, patches 0007/0020), else its first downbeat, else the first
+ beat. A script that starts a transition by itself (FADE NOW, a loop roll,
+ a brake) waits for the next bar of the playing track, so that the bars of
+ both tracks line up (the incoming track is cued on a phrase start by
+ [AutoDJ],phrase_align). Beats are counted incrementally per deck.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-24
+---
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 133ccba3..8e9612d9 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -1,6 +1,7 @@
+ #include "library/autodj/autodjprocessor.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <optional>
+ #include <QSqlQuery>
+ #include <QSqlError>
+@@ -264,9 +265,70 @@ void AutoDJProcessor::slotNumberOfDecksChanged(int decks) {
+             return;
+         }
+         m_decks.emplace_back(std::make_unique<DeckAttributes>(i, pPlayer));
++        // DecksmithOS: where the next bar is, for scripts that start a
++        // transition by themselves (FADE NOW, loop roll, brake)
++        auto pBeatsToBar = std::make_unique<ControlObject>(
++                ConfigKey(PlayerManager::groupForDeck(i), QStringLiteral("beats_to_bar")));
++        pBeatsToBar->setReadOnly();
++        m_beatsToBar.push_back(std::move(pBeatsToBar));
+     }
+ }
+ 
++void AutoDJProcessor::updateBeatsToBar(DeckAttributes* pDeck, double playPosition) {
++    constexpr int kBeatsPerBar = 4;
++    if (pDeck->index < 0 || pDeck->index >= static_cast<int>(m_beatsToBar.size())) {
++        return;
++    }
++    double value = 0;
++    const TrackPointer pTrack = pDeck->getLoadedTrack();
++    const mixxx::BeatsPointer pBeats = pTrack ? pTrack->getBeats() : nullptr;
++    const mixxx::audio::FramePos trackEnd = pDeck->trackEndPosition();
++    if (pBeats && trackEnd.isValid()) {
++        // Bars counted from the first phrase, else the first downbeat,
++        // else the first beat
++        mixxx::audio::FramePos anchor;
++        const mixxx::TrackStructurePointer pStructure = pTrack->getStructure();
++        if (pStructure && !pStructure->phrases().isEmpty()) {
++            anchor = pStructure->phrases().first().start;
++        }
++        if (!anchor.isValid() && pStructure) {
++            anchor = pStructure->firstDownbeat();
++        }
++        if (!anchor.isValid()) {
++            anchor = pBeats->firstBeat();
++        }
++        const mixxx::audio::FramePos position(playPosition * trackEnd.value());
++        mixxx::audio::FramePos prev;
++        mixxx::audio::FramePos next;
++        if (anchor.isValid() && position.isValid() &&
++                pBeats->findPrevNextBeats(position, &prev, &next, false) && next > prev) {
++            const double fraction = (position - prev) / (next - prev);
++            if (m_barCounts.size() < m_beatsToBar.size()) {
++                m_barCounts.resize(m_beatsToBar.size());
++            }
++            BarCount& count = m_barCounts[pDeck->index];
++            if (count.pBeats != pBeats || count.anchor != anchor || !count.beat.isValid() ||
++                    prev < count.beat) {
++                count.pBeats = pBeats;
++                count.anchor = anchor;
++                count.beat = prev;
++                count.beats = prev >= anchor ? pBeats->numBeatsInRange(anchor, prev)
++                                             : -pBeats->numBeatsInRange(prev, anchor);
++            } else if (prev > count.beat) {
++                count.beats += pBeats->numBeatsInRange(count.beat, prev);
++                count.beat = prev;
++            }
++            const double beats = count.beats + fraction;
++            double inBar = std::fmod(beats, static_cast<double>(kBeatsPerBar));
++            if (inBar < 0) {
++                inBar += kBeatsPerBar;
++            }
++            value = kBeatsPerBar - inBar;
++        }
++    }
++    m_beatsToBar[pDeck->index]->forceSet(value);
++}
++
+ double AutoDJProcessor::getCrossfader() const {
+     if (m_coCrossfaderReverse.toBool()) {
+         return m_coCrossfader.get() * -1.0;
+@@ -1096,6 +1158,7 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+         return;
+     }
+     updateSecondsToTransition(pAttributes, thisPlayPosition);
++    updateBeatsToBar(pAttributes, thisPlayPosition);
+ 
+     DeckAttributes* thisDeck = pAttributes;
+     DeckAttributes* otherDeck = getOtherDeck(thisDeck);
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index 9539d671..26d87bfe 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -16,6 +16,7 @@
+ #include "engine/channels/enginechannel.h"
+ #include "library/playlisttablemodel.h"
+ #include "preferences/usersettings.h"
++#include "track/beats.h"
+ #include "track/track_decl.h"
+ #include "util/class.h"
+ #include "util/parented_ptr.h"
+@@ -362,6 +363,19 @@ class AutoDJProcessor : public QObject {
+     QElapsedTimer m_timedFadeClock;
+     QTimer m_timedFadeTimer;
+     DeckAttributes* m_pTimedFadeDeck = nullptr;
++    /// [ChannelN],beats_to_bar (read only, per deck index): beats from the
++    /// play position to the next bar (downbeat), 0 < value <= 4; 0 if unknown
++    std::vector<std::unique_ptr<ControlObject>> m_beatsToBar;
++    /// Beats counted from the anchor up to a beat, per deck, so that only
++    /// the beats since the last update are counted
++    struct BarCount {
++        mixxx::BeatsPointer pBeats;
++        mixxx::audio::FramePos anchor;
++        mixxx::audio::FramePos beat;
++        int beats = 0;
++    };
++    std::vector<BarCount> m_barCounts;
++    void updateBeatsToBar(DeckAttributes* pDeck, double playPosition);
+ 
+     DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
+ };
