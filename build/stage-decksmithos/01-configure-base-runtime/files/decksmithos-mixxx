@@ -151,6 +151,11 @@ export DECKSMITHOS_BROWSE_SOURCES="CONSOLE=/storage/library:USB=/usb:USB2=/usb2"
 # for dj by /etc/sudoers.d/decksmithos-system
 export DECKSMITHOS_DRIVES="/usb:/usb2"
 export DECKSMITHOS_EJECT_COMMAND="sudo -n /usr/local/sbin/decksmithos-system eject"
+# COPY in the library: the selected tracks' files to a folder of the console
+# or of a USB drive (patch 0025); a drive is writable only while the copy
+# runs (decksmithos-system usb-write)
+export DECKSMITHOS_COPY_ROOTS="CONSOLE=/storage/library:USB=/usb:USB2=/usb2"
+export DECKSMITHOS_USB_WRITE_COMMAND="sudo -n /usr/local/sbin/decksmithos-system usb-write"
 # rekordbox / Serato drives: their playlists and crates appear first in
 # Playlists, the rekordbox analysis (grid, cues, loops, key) is applied to
 # their tracks, all gone when the drive is removed (patch 0016); the library

@@ -1133,6 +1133,9 @@ font-size:25px;
 #LibAdjNextBtn { color: #8fc1ff; border-color: #1e6fd9; }
 #LibAdjNextBtn[value="0"] { color: #6a6a72; border-color: #45454d; }
 #LibAdjNextBtn:pressed { background-color: #2d2d35; }
+#LibRemoveBtn { font-size: 18px; color: #ff8a80; background-color: #1d1d22; border: 1px solid #6b2a2a; border-radius: 3px; margin: 2px 0px; padding: 0px; }
+#LibRemoveBtn[value="1"] { color: #fff; background-color: #c62828; border-color: #ff5252; }
+#LibRemoveBtn:pressed { background-color: #2d2d35; }
 #LibAdjToggleBtn[value="1"] { color: #000; background-color: #2fbf71; border-color: #6fe0a0; }
 #LibEjectBtn { font-size: 18px; color: #fff; background-color: #2a2a30; border: 1px solid #8a8a92; border-radius: 3px; margin: 2px 0px; padding: 0px; }
 #LibEjectBtn:pressed { background-color: #4b93ff; }

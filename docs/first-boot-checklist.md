@@ -148,8 +148,20 @@ sudo reboot                    # stays in B
       `build/stage-decksmithos/03-display-profile/files/td2/xorg.conf.d/91-touch-rotate.conf`.
 - [ ] Buttons, faders and library scrolling are usable by finger.
 - [ ] No mouse cursor on screen; a USB mouse shows it while moving.
-- [ ] Long press (about 1 s) opens the context menu in the library
-      (right click). A short tap still acts immediately on release.
+- [ ] No context menus by touch (no long-press right click, decided
+      2026-11-22): held buttons (momentary effects, cue preview) act while
+      held. In the library, REMOVE takes a selected track out of the Auto DJ
+      queue, a playlist or a crate (hides it in Tracks) on the second tap
+      within 3 s ("REMOVE?"); one tap alone changes nothing.
+- [ ] Controller browse push: on the main page it opens the library at the
+      list shown last; in the track table it loads nothing; held for 1 s it
+      opens SEARCH with the on-screen keyboard. LOAD on a playing deck does
+      nothing.
+- [ ] COPY: select tracks on USB2, COPY, choose CONSOLE (and a new folder),
+      COPY: the files appear there and in the library. To USB: the copy
+      works, and `findmnt /usb` shows `ro` again afterwards. A track keeps
+      playing without audio overloads during a large copy (Auto DJ log:
+      "audio overloads").
 
 ## 6. Controller: Numark Mixtrack Pro 3
 

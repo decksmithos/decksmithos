@@ -1,0 +1,211 @@
+Description: Browse push: shows a hidden library, held opens the search, no load
+ [Library],GoToItem (the browse encoder push of many controller mappings):
+ - while the skin hides the library ([Skin],show_maximized_library 0 and the
+   library widget not visible) a push sets show_maximized_library to 1, so
+   the library page appears at the list shown last; it acts on nothing
+   nobody can see;
+ - a push held for one second opens the search: the library is shown, the
+   search box gets the focus and [Library],search_request (new, read only)
+   counts up, so a skin can switch to the list it searches. This needs the
+   release (GoToItem 0): the push then acts on release. Until a mapping has
+   sent a release, every push acts at once, as before;
+ - in the track table a push loads nothing (Mixxx: the double-click action,
+   e.g. into the first stopped deck); each deck has its own LOAD.
+ Numark Mixtrack Pro 3: the browse push sends GoToItem's release too.
+ Skins that always show the library are unchanged apart from the hold and
+ the track table.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-24
+---
+diff --git a/res/controllers/Numark-Mixtrack-3-scripts.js b/res/controllers/Numark-Mixtrack-3-scripts.js
+index 058f2beb..b6386363 100644
+--- a/res/controllers/Numark-Mixtrack-3-scripts.js
++++ b/res/controllers/Numark-Mixtrack-3-scripts.js
+@@ -1092,23 +1092,32 @@ NumarkMixtrack3.BrowseButton = function(channel, control, value, status, group)
+         NumarkMixtrack3.decks.D3.shiftKey || NumarkMixtrack3.decks.D4.shiftKey
+     );
+ 
+-    if (value === ON) {
+-        if (engine.getSetting("libraryMode") === "focus") {
+-            if (shifted) {
+-                // SHIFT + BROWSE push : maximize/minimize library view
+-                script.toggleControl("[Skin]", "show_maximized_library");
+-            } else {
+-                // Browse push : expand sidebar item or load track when in track table
+-                engine.setValue("[Library]", "GoToItem", true);
+-            }
+-        } else { // Classic mode
+-            if (shifted) {
+-                // SHIFT + BROWSE push : directory mode -- > Open/Close selected side bar item
+-                engine.setValue("[Library]", "GoToItem", true);
+-            } else {
+-                // Browse push : maximize/minimize library view
+-                script.toggleControl("[Skin]", "show_maximized_library");
+-            }
++    // GoToItem gets the release too (DecksmithOS: a push held for a second
++    // opens the search), also when SHIFT was let go first
++    if (value !== ON) {
++        if (NumarkMixtrack3.browseGoToItemHeld) {
++            NumarkMixtrack3.browseGoToItemHeld = false;
++            engine.setValue("[Library]", "GoToItem", false);
++        }
++        return;
++    }
++    if (engine.getSetting("libraryMode") === "focus") {
++        if (shifted) {
++            // SHIFT + BROWSE push : maximize/minimize library view
++            script.toggleControl("[Skin]", "show_maximized_library");
++        } else {
++            // Browse push : expand sidebar item (DecksmithOS: no load from the track table)
++            NumarkMixtrack3.browseGoToItemHeld = true;
++            engine.setValue("[Library]", "GoToItem", true);
++        }
++    } else { // Classic mode
++        if (shifted) {
++            // SHIFT + BROWSE push : directory mode -- > Open/Close selected side bar item
++            NumarkMixtrack3.browseGoToItemHeld = true;
++            engine.setValue("[Library]", "GoToItem", true);
++        } else {
++            // Browse push : maximize/minimize library view
++            script.toggleControl("[Skin]", "show_maximized_library");
+         }
+     }
+ };
+diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
+index b08ad9e2..fd109599 100644
+--- a/src/library/librarycontrol.cpp
++++ b/src/library/librarycontrol.cpp
+@@ -244,6 +244,17 @@ LibraryControl::LibraryControl(Library* pLibrary)
+                 &LibraryControl::slotGoToItem);
+     }
+ 
++    // DecksmithOS: a GoToItem push held for a second opens the search
++    m_pSearchRequest = std::make_unique<ControlObject>(
++            ConfigKey("[Library]", "search_request"));
++    m_pSearchRequest->setReadOnly();
++    m_goToItemHoldTimer.setSingleShot(true);
++    m_goToItemHoldTimer.setInterval(1000);
++    connect(&m_goToItemHoldTimer,
++            &QTimer::timeout,
++            this,
++            &LibraryControl::goToItemHold);
++
+     // Auto DJ controls
+     m_pAutoDjAddTop = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "AutoDjAddTop"));
+     m_pAutoDjAddTop->addAlias(ConfigKey(
+@@ -1096,7 +1107,60 @@ void LibraryControl::slotToggleSelectedSidebarItem(double v) {
+ }
+ 
+ void LibraryControl::slotGoToItem(double v) {
+-    if (v <= 0) {
++    // DecksmithOS: a push acts when it is released; held for a second it
++    // opens the search instead. Mappings that never send a release (no 0
++    // seen yet) act on the push, as before.
++    if (v > 0) {
++        m_goToItemHeld = true;
++        if (m_goToItemReleaseSeen) {
++            m_goToItemHoldTimer.start();
++        } else {
++            goToItemPush();
++        }
++        return;
++    }
++    if (!m_goToItemHeld) {
++        return;
++    }
++    m_goToItemHeld = false;
++    m_goToItemReleaseSeen = true;
++    if (m_goToItemHoldTimer.isActive()) {
++        m_goToItemHoldTimer.stop();
++        goToItemPush();
++    }
++}
++
++namespace {
++const ConfigKey kShowLibraryKey("[Skin]", "show_maximized_library");
++
++/// DecksmithOS: shows a library the skin hides (a library page behind
++/// [Skin],show_maximized_library); true if it was hidden
++bool showHiddenLibrary(WLibrary* pLibraryWidget) {
++    if (pLibraryWidget && !pLibraryWidget->isVisible() &&
++            ControlObject::exists(kShowLibraryKey) &&
++            ControlObject::get(kShowLibraryKey) <= 0) {
++        ControlObject::set(kShowLibraryKey, 1.0);
++        return true;
++    }
++    return false;
++}
++} // namespace
++
++void LibraryControl::goToItemHold() {
++    if (!m_goToItemHeld) {
++        return;
++    }
++    // The skin may switch to the list it searches (DecksmithOS skin bridge:
++    // Tracks, all music); the search box gets the focus here for any skin
++    showHiddenLibrary(m_pLibraryWidget);
++    m_pSearchRequest->forceSet(m_pSearchRequest->get() + 1);
++    setLibraryFocus(FocusWidget::Searchbar);
++}
++
++void LibraryControl::goToItemPush() {
++    // DecksmithOS: while the skin hides the library, a push shows it, at the
++    // list shown last, instead of acting on something nobody can see
++    if (showHiddenLibrary(m_pLibraryWidget)) {
+         return;
+     }
+ 
+@@ -1113,13 +1177,10 @@ void LibraryControl::slotGoToItem(double v) {
+             m_pSidebarWidget->toggleSelectedItem();
+         }
+         return;
+-    case FocusWidget::TracksTable: {
+-        WTrackTableView* pTrackTableView = m_pLibraryWidget->getCurrentTrackTableView();
+-        if (pTrackTableView) {
+-            pTrackTableView->activateSelectedTrack();
+-        }
++    case FocusWidget::TracksTable:
++        // DecksmithOS: no track load from the push (Mixxx: the double-click
++        // action, e.g. into the first stopped deck); each deck has its LOAD
+         return;
+-    }
+     case FocusWidget::Dialog:
+     case FocusWidget::SearchRelatedMenu: {
+         // Press Space to click dialog buttons. In SearchRelatedMenu this toggles
+diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
+index 0fa46332..1f599f00 100644
+--- a/src/library/librarycontrol.h
++++ b/src/library/librarycontrol.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <QObject>
++#include <QTimer>
+ #include <memory>
+ 
+ #include "control/controlproxy.h"
+@@ -46,6 +47,9 @@ class LibraryControl : public QObject {
+     void bindSearchboxWidget(WSearchLineEdit* pSearchbox);
+     // Give the keyboard focus to one of the library widgets
+     void setLibraryFocus(FocusWidget newFocusWidget);
++    // DecksmithOS: GoToItem short push and push held for kGoToItemHoldMs
++    void goToItemPush();
++    void goToItemHold();
+     FocusWidget getFocusedWidget();
+ 
+   signals:
+@@ -153,6 +157,13 @@ class LibraryControl : public QObject {
+ 
+     // Control to choose the currently selected item in focused widget (double click)
+     std::unique_ptr<ControlObject> m_pGoToItem;
++    // DecksmithOS: [Library],search_request (read only), counts the GoToItem
++    // pushes held for the search; the hold timer, and whether the mapping
++    // sends releases (else every push acts at once)
++    std::unique_ptr<ControlObject> m_pSearchRequest;
++    QTimer m_goToItemHoldTimer;
++    bool m_goToItemHeld = false;
++    bool m_goToItemReleaseSeen = false;
+ 
+     // Add to Auto-Dj Queue
+     std::unique_ptr<ControlObject> m_pAutoDjAddTop;

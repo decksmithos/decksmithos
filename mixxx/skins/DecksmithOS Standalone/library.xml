@@ -147,7 +147,8 @@
                random tracks from the source crates (or the whole library;
                patch 0022). Elsewhere: the selected track to the end of the
                queue or next, the whole list shown to the end (patch 0022),
-               and for a crate: use it as an Auto DJ source (patch 0022). -->
+               and for a crate: use it as an Auto DJ source (patch 0022).
+               Both: COPY (patch 0025) and REMOVE (patch 0023, two taps). -->
           <WidgetGroup>
             <ObjectName>LibActionRow</ObjectName>
             <Layout>horizontal</Layout>
@@ -330,6 +331,43 @@
                   <BindProperty>visible</BindProperty>
                 </Connection>
               </WidgetGroup>
+              <!-- In every section: the selected tracks out of the Auto DJ
+                   queue, playlist or crate shown, or hidden from the library
+                   in Tracks (patch 0023, [Library],remove_selected). The
+                   skin bridge asks for a second tap within 3 s
+                   ([Skin],dsm_lit_remove 1: "REMOVE?"). -->
+              <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+              <!-- In every section: the selected tracks' files to a folder
+                   of the console or a USB drive, chosen in a dialog (patch
+                   0025, [Library],copy_selected) -->
+              <PushButton>
+                <ObjectName>LibActionBtn</ObjectName>
+                <Size>120f,44f</Size>
+                <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                <State><Number>0</Number><Text>COPY</Text></State>
+                <State><Number>1</Number><Text>COPY</Text></State>
+                <Connection>
+                  <ConfigKey>[Library],copy_selected</ConfigKey>
+                </Connection>
+              </PushButton>
+              <WidgetGroup><Size>8f,44f</Size></WidgetGroup>
+              <PushButton>
+                <ObjectName>LibRemoveBtn</ObjectName>
+                <Size>130f,44f</Size>
+                <NumberStates>2</NumberStates>
+                <LeftClickIsPushButton>true</LeftClickIsPushButton>
+                <State><Number>0</Number><Text>REMOVE</Text></State>
+                <State><Number>1</Number><Text>REMOVE?</Text></State>
+                <Connection>
+                  <ConfigKey>[Skin],dsm_remove</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                </Connection>
+                <Connection>
+                  <ConfigKey>[Skin],dsm_lit_remove</ConfigKey>
+                  <ConnectValueFromWidget>false</ConnectValueFromWidget>
+                </Connection>
+              </PushButton>
               <WidgetGroup><Size>4f,44f</Size></WidgetGroup>
             </Children>
           </WidgetGroup>

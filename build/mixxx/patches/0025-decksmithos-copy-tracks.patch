@@ -1,0 +1,844 @@
+Description: Copy the selected tracks to a folder (DECKSMITHOS_COPY_ROOTS)
+ [Library],copy_selected opens a dialog for the files of the tracks selected
+ in any library view (also Browse): a folder tree whose roots are
+ DECKSMITHOS_COPY_ROOTS ("CONSOLE=/storage/library:USB=/usb:USB2=/usb2"; a
+ root listed in DECKSMITHOS_DRIVES only while a drive is mounted there), an
+ optional new folder, COPY and CANCEL. Files are copied unchanged, each
+ under a temporary name renamed when complete; a file of the same name in
+ the folder is skipped; the free space is checked first (and the 4 GiB
+ limit of FAT32). The copy runs in a thread at the lowest CPU and idle I/O
+ priority and drops the copied data from the page cache. A drive is made
+ writable for the copy with DECKSMITHOS_USB_WRITE_COMMAND <mount point> on,
+ and read-only again with ... off. Copied files are added to the library.
+ For a touch screen appliance without a file manager. Without the variable
+ the control does nothing.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-24
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0681d9eb..8d3742ae 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -985,6 +985,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/itunes/itunesxmlimporter.cpp
+   src/library/library_prefs.cpp
+   src/library/library.cpp
++  src/library/copytracksdialog.cpp
+   src/library/librarycontrol.cpp
+   src/library/libraryfeature.cpp
+   src/library/librarytablemodel.cpp
+diff --git a/src/library/copytracksdialog.cpp b/src/library/copytracksdialog.cpp
+new file mode 100644
+index 00000000..0e3e4f90
+--- /dev/null
++++ b/src/library/copytracksdialog.cpp
+@@ -0,0 +1,586 @@
++#include "library/copytracksdialog.h"
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QFileSystemModel>
++#include <QHBoxLayout>
++#include <QHeaderView>
++#include <QLabel>
++#include <QLineEdit>
++#include <QProcess>
++#include <QProgressBar>
++#include <QPushButton>
++#include <QStorageInfo>
++#include <QThread>
++#include <QTimer>
++#include <QTreeView>
++#include <QVBoxLayout>
++#include <QtDebug>
++
++#ifdef __linux__
++#include <fcntl.h>
++#include <sys/resource.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#endif
++
++#include "library/trackcollectionmanager.h"
++#include "moc_copytracksdialog.cpp"
++#include "track/trackref.h"
++#include "widget/touchscroll.h"
++
++namespace {
++
++constexpr qint64 kFatMaxFileSize = Q_INT64_C(4294967295);
++constexpr qint64 kChunkSize = 1 << 20;
++
++bool isMounted(const QString& path) {
++    if (!QFileInfo(path).isDir()) {
++        return false;
++    }
++    const QStorageInfo storage(path);
++    return storage.isValid() && storage.isReady() && storage.rootPath() != QDir::rootPath();
++}
++
++QStringList removableDrives() {
++    QStringList drives;
++    const QStringList paths = qEnvironmentVariable("DECKSMITHOS_DRIVES")
++                                      .split(QChar(':'), Qt::SkipEmptyParts);
++    for (const QString& path : paths) {
++        drives.append(QDir::cleanPath(path));
++    }
++    return drives;
++}
++
++QString formatSize(qint64 bytes) {
++    if (bytes >= Q_INT64_C(1) << 30) {
++        return QStringLiteral("%1 GB").arg(bytes / double(Q_INT64_C(1) << 30), 0, 'f', 1);
++    }
++    return QStringLiteral("%1 MB").arg(bytes / double(1 << 20), 0, 'f', 0);
++}
++
++/// The copy thread yields to everything else: lowest CPU priority, idle I/O
++void lowerThreadPriority() {
++#ifdef __linux__
++    const auto tid = static_cast<id_t>(syscall(SYS_gettid));
++    setpriority(PRIO_PROCESS, tid, 19);
++    constexpr int kIoprioWhoProcess = 1;
++    constexpr int kIoprioClassIdle = 3;
++    constexpr int kIoprioClassShift = 13;
++    syscall(SYS_ioprio_set, kIoprioWhoProcess, tid, kIoprioClassIdle << kIoprioClassShift);
++#endif
++}
++
++/// Drops the file from the page cache, so that a large copy does not push
++/// out what the decks read
++void dropCache(const QFile& file) {
++#ifdef __linux__
++    posix_fadvise(file.handle(), 0, 0, POSIX_FADV_DONTNEED);
++#else
++    Q_UNUSED(file);
++#endif
++}
++
++bool runWriteCommand(const QStringList& command, const QString& drive, const QString& state) {
++    if (command.isEmpty()) {
++        return false;
++    }
++    QProcess process;
++    QStringList arguments = command.mid(1);
++    arguments << drive << state;
++    process.start(command.first(), arguments);
++    if (!process.waitForFinished(60000)) {
++        process.kill();
++        process.waitForFinished();
++        qWarning() << "Copy:" << command << drive << state << "did not finish";
++        return false;
++    }
++    const bool ok = process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
++    if (!ok) {
++        qWarning() << "Copy:" << command << drive << state << "failed:"
++                   << QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
++    }
++    return ok;
++}
++
++enum class CopyResult {
++    Copied,
++    Failed,
++    Cancelled,
++};
++
++CopyResult copyFile(const QString& source,
++        const QString& target,
++        const std::atomic<bool>& cancel) {
++    QFile in(source);
++    if (!in.open(QIODevice::ReadOnly)) {
++        qWarning() << "Copy: cannot read" << source << in.errorString();
++        return CopyResult::Failed;
++    }
++    const QFileInfo targetInfo(target);
++    const QString part = targetInfo.dir().filePath(
++            QStringLiteral(".") + targetInfo.fileName() + QStringLiteral(".part"));
++    QFile out(part);
++    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++        qWarning() << "Copy: cannot write" << part << out.errorString();
++        return CopyResult::Failed;
++    }
++    QByteArray buffer(kChunkSize, Qt::Uninitialized);
++    while (true) {
++        if (cancel.load()) {
++            out.close();
++            QFile::remove(part);
++            return CopyResult::Cancelled;
++        }
++        const qint64 n = in.read(buffer.data(), buffer.size());
++        if (n < 0 || (n > 0 && out.write(buffer.constData(), n) != n)) {
++            qWarning() << "Copy: error copying" << source << "to" << part
++                       << in.errorString() << out.errorString();
++            out.close();
++            QFile::remove(part);
++            return CopyResult::Failed;
++        }
++        if (n == 0) {
++            break;
++        }
++    }
++    bool ok = out.flush();
++#ifdef __linux__
++    ok = ok && fsync(out.handle()) == 0;
++#endif
++    out.setFileTime(QFileInfo(source).lastModified(), QFileDevice::FileModificationTime);
++    dropCache(in);
++    dropCache(out);
++    out.close();
++    in.close();
++    if (!ok || !QFile::rename(part, target)) {
++        qWarning() << "Copy: cannot complete" << target;
++        QFile::remove(part);
++        return CopyResult::Failed;
++    }
++    return CopyResult::Copied;
++}
++
++bool isValidFolderName(const QString& name) {
++    static const QString kForbidden = QStringLiteral("/\\:*?\"<>|");
++    if (name == QStringLiteral(".") || name == QStringLiteral("..") || name.size() > 100) {
++        return false;
++    }
++    for (const QChar c : name) {
++        if (kForbidden.contains(c) || c.unicode() < 0x20) {
++            return false;
++        }
++    }
++    return true;
++}
++
++} // namespace
++
++// static
++bool CopyTracksDialog::isEnabled() {
++    return !qEnvironmentVariableIsEmpty("DECKSMITHOS_COPY_ROOTS");
++}
++
++CopyTracksDialog::CopyTracksDialog(QWidget* pParent,
++        TrackCollectionManager* pTrackCollectionManager,
++        const QStringList& sourceFiles)
++        : QDialog(pParent),
++          m_pTrackCollectionManager(pTrackCollectionManager),
++          m_sourceFiles(sourceFiles),
++          m_sourceBytes(0),
++          m_rootIndex(-1),
++          m_pThread(nullptr),
++          m_cancel(false),
++          m_done(false) {
++    setObjectName(QStringLiteral("CopyTracksDialog"));
++    setWindowTitle(tr("Copy tracks"));
++    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
++    setModal(true);
++    setStyleSheet(QStringLiteral(
++            "#CopyTracksDialog { background-color: #111114; border: 2px solid #45454d; }"
++            "QLabel { color: #e8e8ec; font-size: 20px; }"
++            "QLabel#CopyTitle { font-size: 24px; font-weight: bold; }"
++            "QPushButton { font-size: 20px; color: #e8e8ec; background-color: #1d1d22;"
++            "  border: 1px solid #45454d; border-radius: 3px; min-height: 48px;"
++            "  padding: 0px 18px; }"
++            "QPushButton:checked { color: #fff; background-color: #1e6fd9;"
++            "  border-color: #4b93ff; }"
++            "QPushButton:disabled { color: #55555c; }"
++            "QPushButton#CopyStart { color: #000; background-color: #2fbf71;"
++            "  border-color: #6fe0a0; }"
++            "QPushButton#CopyStart:disabled { color: #55555c; background-color: #1d1d22;"
++            "  border-color: #45454d; }"
++            "QTreeView { font-size: 20px; color: #e8e8ec; background-color: #18181c;"
++            "  border: 1px solid #45454d; }"
++            "QTreeView::item { height: 46px; }"
++            "QTreeView::item:selected { background-color: #1e6fd9; color: #fff; }"
++            "QLineEdit { font-size: 20px; color: #e8e8ec; background-color: #18181c;"
++            "  border: 1px solid #45454d; min-height: 44px; padding: 0px 8px; }"
++            "QProgressBar { font-size: 18px; color: #e8e8ec; background-color: #18181c;"
++            "  border: 1px solid #45454d; min-height: 30px; text-align: center; }"
++            "QProgressBar::chunk { background-color: #2fbf71; }"));
++
++    for (const QString& source : m_sourceFiles) {
++        m_sourceBytes += QFileInfo(source).size();
++    }
++
++    auto* pLayout = new QVBoxLayout(this);
++    pLayout->setContentsMargins(16, 12, 16, 12);
++    pLayout->setSpacing(10);
++
++    auto* pTitle = new QLabel(
++            tr("COPY %n track(s) (%1) TO:", nullptr, static_cast<int>(m_sourceFiles.size()))
++                    .arg(formatSize(m_sourceBytes)),
++            this);
++    pTitle->setObjectName(QStringLiteral("CopyTitle"));
++    pLayout->addWidget(pTitle);
++
++    // Roots
++    auto* pRootRow = new QHBoxLayout();
++    const QStringList drives = removableDrives();
++    const QStringList entries = qEnvironmentVariable("DECKSMITHOS_COPY_ROOTS")
++                                        .split(QChar(':'), Qt::SkipEmptyParts);
++    for (const QString& entry : entries) {
++        const int eq = entry.indexOf(QChar('='));
++        if (eq <= 0) {
++            continue;
++        }
++        Root root;
++        root.label = entry.left(eq);
++        root.path = QDir::cleanPath(entry.mid(eq + 1));
++        root.removable = drives.contains(root.path);
++        if (root.removable ? !isMounted(root.path) : !QFileInfo(root.path).isDir()) {
++            continue; // no drive there now
++        }
++        root.pButton = new QPushButton(root.label, this);
++        root.pButton->setCheckable(true);
++        root.pButton->setFocusPolicy(Qt::NoFocus);
++        const int index = static_cast<int>(m_roots.size());
++        connect(root.pButton, &QPushButton::clicked, this, [this, index]() {
++            selectRoot(index);
++        });
++        pRootRow->addWidget(root.pButton);
++        m_roots.append(root);
++    }
++    pRootRow->addStretch(1);
++    pLayout->addLayout(pRootRow);
++
++    // Folder tree
++    m_pModel = new QFileSystemModel(this);
++    m_pModel->setFilter(QDir::AllDirs | QDir::NoDotAndDotDot);
++    m_pModel->setReadOnly(true);
++    m_pTree = new QTreeView(this);
++    m_pTree->setModel(m_pModel);
++    m_pTree->setHeaderHidden(true);
++    for (int column = 1; column < m_pModel->columnCount(); ++column) {
++        m_pTree->hideColumn(column);
++    }
++    m_pTree->setIndentation(28);
++    m_pTree->setUniformRowHeights(true);
++    m_pTree->setExpandsOnDoubleClick(false);
++    m_pTree->setSelectionMode(QAbstractItemView::SingleSelection);
++    m_pTree->setFocusPolicy(Qt::NoFocus);
++    mixxx::widget::maybeEnableTouchScrolling(m_pTree);
++    // A tap selects a folder and opens or closes it
++    connect(m_pTree, &QTreeView::clicked, this, [this](const QModelIndex& index) {
++        m_pTree->setExpanded(index, !m_pTree->isExpanded(index));
++    });
++    connect(m_pTree->selectionModel(),
++            &QItemSelectionModel::currentChanged,
++            this,
++            [this]() {
++                updateDestination();
++            });
++    pLayout->addWidget(m_pTree, 1);
++
++    // Destination and new folder
++    auto* pFolderRow = new QHBoxLayout();
++    m_pDestination = new QLabel(this);
++    m_pDestination->setWordWrap(true);
++    pFolderRow->addWidget(m_pDestination, 1);
++    m_pNewFolder = new QLineEdit(this);
++    m_pNewFolder->setPlaceholderText(tr("new folder (optional)"));
++    m_pNewFolder->setMaxLength(100);
++    connect(m_pNewFolder, &QLineEdit::textChanged, this, [this]() {
++        updateDestination();
++    });
++    pFolderRow->addWidget(m_pNewFolder, 1);
++    pLayout->addLayout(pFolderRow);
++
++    m_pProgress = new QProgressBar(this);
++    m_pProgress->setRange(0, static_cast<int>(m_sourceFiles.size()));
++    m_pProgress->setValue(0);
++    m_pProgress->setFormat(QStringLiteral("%v / %m"));
++    m_pProgress->hide();
++    pLayout->addWidget(m_pProgress);
++    m_pStatus = new QLabel(this);
++    m_pStatus->setWordWrap(true);
++    pLayout->addWidget(m_pStatus);
++
++    auto* pButtons = new QHBoxLayout();
++    m_pCancel = new QPushButton(tr("CANCEL"), this);
++    m_pCancel->setFocusPolicy(Qt::NoFocus);
++    connect(m_pCancel, &QPushButton::clicked, this, &CopyTracksDialog::reject);
++    pButtons->addWidget(m_pCancel);
++    pButtons->addStretch(1);
++    m_pCopy = new QPushButton(tr("COPY"), this);
++    m_pCopy->setObjectName(QStringLiteral("CopyStart"));
++    m_pCopy->setFocusPolicy(Qt::NoFocus);
++    connect(m_pCopy, &QPushButton::clicked, this, &CopyTracksDialog::startCopy);
++    pButtons->addWidget(m_pCopy);
++    pLayout->addLayout(pButtons);
++
++    if (pParent) {
++        // Nearly the whole window: a touch screen needs the room
++        const QWidget* pWindow = pParent->window();
++        const QRect area = pWindow->geometry();
++        setGeometry(area.adjusted(area.width() / 20, 8, -area.width() / 20, -8));
++    }
++
++    if (m_roots.isEmpty()) {
++        m_pTree->setEnabled(false);
++        m_pNewFolder->setEnabled(false);
++        m_pCopy->setEnabled(false);
++        m_pStatus->setText(tr("No destination available."));
++    } else {
++        selectRoot(0);
++    }
++}
++
++CopyTracksDialog::~CopyTracksDialog() {
++    if (m_pThread) {
++        m_cancel.store(true);
++        m_pThread->wait();
++    }
++}
++
++void CopyTracksDialog::selectRoot(int index) {
++    if (index < 0 || index >= m_roots.size() || m_pThread) {
++        return;
++    }
++    m_rootIndex = index;
++    for (int i = 0; i < m_roots.size(); ++i) {
++        m_roots[i].pButton->setChecked(i == index);
++    }
++    const QString path = m_roots[index].path;
++    m_pModel->setRootPath(path);
++    const QModelIndex rootIndex = m_pModel->index(path);
++    m_pTree->setRootIndex(rootIndex);
++    m_pTree->selectionModel()->clearSelection();
++    m_pTree->setCurrentIndex(QModelIndex());
++    updateDestination();
++}
++
++QString CopyTracksDialog::destinationFolder(QString* pError) const {
++    if (m_rootIndex < 0) {
++        *pError = tr("Choose where to copy to.");
++        return QString();
++    }
++    QString folder = m_roots[m_rootIndex].path;
++    const QModelIndex current = m_pTree->currentIndex();
++    if (current.isValid()) {
++        const QString path = QDir::cleanPath(m_pModel->filePath(current));
++        if (path == folder || path.startsWith(folder + QChar('/'))) {
++            folder = path;
++        }
++    }
++    const QString newFolder = m_pNewFolder->text().trimmed();
++    if (!newFolder.isEmpty()) {
++        if (!isValidFolderName(newFolder)) {
++            *pError = tr("A folder name cannot contain / \\ : * ? \" < > |");
++            return QString();
++        }
++        folder = QDir(folder).filePath(newFolder);
++    }
++    return folder;
++}
++
++void CopyTracksDialog::updateDestination() {
++    if (m_rootIndex < 0 || m_pThread || m_done) {
++        return;
++    }
++    QString error;
++    const QString folder = destinationFolder(&error);
++    if (folder.isEmpty()) {
++        m_pDestination->setText(QString());
++        m_pStatus->setText(error);
++        m_pCopy->setEnabled(false);
++        return;
++    }
++    const Root& root = m_roots[m_rootIndex];
++    QString shown = root.label;
++    const QString relative = QDir(root.path).relativeFilePath(folder);
++    if (relative != QStringLiteral(".")) {
++        shown += QStringLiteral(" / ") + relative.split(QChar('/')).join(QStringLiteral(" / "));
++    }
++    m_pDestination->setText(tr("Into: %1").arg(shown));
++    const QStorageInfo storage(root.path);
++    m_pStatus->setText(tr("Free: %1").arg(formatSize(storage.bytesAvailable())));
++    m_pCopy->setEnabled(true);
++}
++
++void CopyTracksDialog::startCopy() {
++    if (m_pThread || m_done) {
++        return;
++    }
++    QString error;
++    const QString folder = destinationFolder(&error);
++    if (folder.isEmpty()) {
++        m_pStatus->setText(error);
++        return;
++    }
++    const Root root = m_roots[m_rootIndex];
++    const QString writeDrive = root.removable ? root.path : QString();
++    const QStringList writeCommand = QProcess::splitCommand(
++            qEnvironmentVariable("DECKSMITHOS_USB_WRITE_COMMAND"));
++    const QStringList sources = m_sourceFiles;
++
++    for (const Root& r : std::as_const(m_roots)) {
++        r.pButton->setEnabled(false);
++    }
++    m_pTree->setEnabled(false);
++    m_pNewFolder->setEnabled(false);
++    m_pCopy->setEnabled(false);
++    m_pProgress->show();
++    m_pStatus->setText(tr("Copying..."));
++    qInfo() << "Copy:" << sources.size() << "files to" << folder;
++
++    m_pThread = QThread::create([this, sources, folder, writeDrive, writeCommand]() {
++        lowerThreadPriority();
++        QStringList copied;
++        int skipped = 0;
++        int failed = 0;
++        QString error;
++        auto finish = [&]() {
++            QMetaObject::invokeMethod(
++                    this,
++                    [this, copied, skipped, failed, error]() {
++                        copyFinished(copied, skipped, failed, error);
++                    },
++                    Qt::QueuedConnection);
++        };
++        if (!writeDrive.isEmpty() && !runWriteCommand(writeCommand, writeDrive, QStringLiteral("on"))) {
++            error = tr("This drive cannot be written to (only FAT32, exFAT and NTFS "
++                       "drives can).");
++            finish();
++            return;
++        }
++        if (!QDir().mkpath(folder)) {
++            error = tr("The folder could not be created.");
++        } else {
++            const QStorageInfo storage(folder);
++            const bool fat = storage.fileSystemType().startsWith("vfat") ||
++                    storage.fileSystemType().startsWith("msdos");
++            qint64 needed = 0;
++            for (const QString& source : sources) {
++                if (!QFileInfo::exists(QDir(folder).filePath(QFileInfo(source).fileName()))) {
++                    needed += QFileInfo(source).size();
++                }
++            }
++            if (needed > storage.bytesAvailable()) {
++                error = tr("Not enough free space: %1 needed, %2 free.")
++                                .arg(formatSize(needed), formatSize(storage.bytesAvailable()));
++            } else {
++                int done = 0;
++                for (const QString& source : sources) {
++                    if (m_cancel.load()) {
++                        break;
++                    }
++                    const QFileInfo sourceInfo(source);
++                    const QString target = QDir(folder).filePath(sourceInfo.fileName());
++                    QMetaObject::invokeMethod(
++                            this,
++                            [this, done, name = sourceInfo.fileName()]() {
++                                m_pProgress->setValue(done);
++                                m_pStatus->setText(tr("Copying %1").arg(name));
++                            },
++                            Qt::QueuedConnection);
++                    if (!sourceInfo.isFile()) {
++                        ++failed;
++                    } else if (QFileInfo::exists(target)) {
++                        ++skipped; // already there (or the file itself)
++                    } else if (fat && sourceInfo.size() > kFatMaxFileSize) {
++                        ++failed;
++                    } else {
++                        switch (copyFile(source, target, m_cancel)) {
++                        case CopyResult::Copied:
++                            copied.append(target);
++                            break;
++                        case CopyResult::Failed:
++                            ++failed;
++                            break;
++                        case CopyResult::Cancelled:
++                            break;
++                        }
++                    }
++                    ++done;
++                }
++            }
++        }
++        if (!writeDrive.isEmpty() && !runWriteCommand(writeCommand, writeDrive, QStringLiteral("off"))) {
++            qWarning() << "Copy:" << writeDrive << "could not be made read-only again";
++        }
++        finish();
++    });
++    m_pThread->start(QThread::LowestPriority);
++}
++
++void CopyTracksDialog::copyFinished(const QStringList& copied,
++        int skipped,
++        int failed,
++        const QString& error) {
++    m_pThread->wait();
++    delete m_pThread;
++    m_pThread = nullptr;
++    m_done = true;
++    m_pProgress->setValue(m_pProgress->maximum());
++    QStringList lines;
++    if (!error.isEmpty()) {
++        lines.append(error);
++    }
++    lines.append(tr("Copied: %1").arg(copied.size()));
++    if (skipped > 0) {
++        lines.append(tr("Already there: %1").arg(skipped));
++    }
++    if (failed > 0) {
++        lines.append(tr("Failed: %1").arg(failed));
++    }
++    if (m_cancel.load()) {
++        lines.append(tr("Stopped."));
++    }
++    m_pStatus->setText(lines.join(QStringLiteral(" - ")));
++    qInfo() << "Copy finished:" << copied.size() << "copied," << skipped << "already there,"
++            << failed << "failed" << error;
++    m_pCancel->setText(tr("CLOSE"));
++    m_pCancel->setEnabled(true);
++    m_toAdd = copied;
++    // One track per event loop pass: reading the tags takes a moment
++    addToLibrary();
++}
++
++void CopyTracksDialog::addToLibrary() {
++    if (m_toAdd.isEmpty() || !m_pTrackCollectionManager) {
++        return;
++    }
++    const QString location = m_toAdd.takeFirst();
++    m_pTrackCollectionManager->getOrAddTrack(TrackRef::fromFilePath(location));
++    QTimer::singleShot(0, this, &CopyTracksDialog::addToLibrary);
++}
++
++void CopyTracksDialog::reject() {
++    if (m_pThread) {
++        // Stops after the file being copied; the dialog closes when done
++        m_cancel.store(true);
++        m_pCancel->setEnabled(false);
++        m_pStatus->setText(tr("Stopping..."));
++        return;
++    }
++    if (!m_toAdd.isEmpty()) {
++        // Finish adding to the library while hidden
++        hide();
++        QTimer::singleShot(200, this, &CopyTracksDialog::reject);
++        return;
++    }
++    QDialog::reject();
++}
+diff --git a/src/library/copytracksdialog.h b/src/library/copytracksdialog.h
+new file mode 100644
+index 00000000..f72535e4
+--- /dev/null
++++ b/src/library/copytracksdialog.h
+@@ -0,0 +1,86 @@
++#pragma once
++
++#include <QDialog>
++#include <QList>
++#include <QPointer>
++#include <QString>
++#include <QStringList>
++#include <atomic>
++
++class QFileSystemModel;
++class QLabel;
++class QLineEdit;
++class QProgressBar;
++class QPushButton;
++class QThread;
++class QTreeView;
++class TrackCollectionManager;
++
++/// DecksmithOS: copies the files of tracks to a folder chosen in a folder
++/// tree, for a touch screen without a file manager (DECKSMITHOS_COPY_ROOTS).
++///
++///  - DECKSMITHOS_COPY_ROOTS="CONSOLE=/storage/library:USB=/usb:USB2=/usb2":
++///    the roots of the tree, by label; a root that is a removable drive
++///    (DECKSMITHOS_DRIVES) is offered only while a drive is mounted there.
++///  - DECKSMITHOS_USB_WRITE_COMMAND: run with the drive's mount point and
++///    "on" before the copy to a drive and with "off" after it (DecksmithOS:
++///    sudo -n decksmithos-system usb-write; the drives are mounted read-only
++///    otherwise).
++///
++/// Files are copied as they are (never changed), into the chosen folder or
++/// a new folder in it; a file of the same name there is skipped. Each copy
++/// is written under a temporary name and renamed when complete. The copy
++/// runs in a thread at the lowest CPU and idle I/O priority, so that the
++/// decks reading from the same drives are served first. Copied files in the
++/// library's directories are added to the library.
++class CopyTracksDialog : public QDialog {
++    Q_OBJECT
++  public:
++    static bool isEnabled();
++
++    CopyTracksDialog(QWidget* pParent,
++            TrackCollectionManager* pTrackCollectionManager,
++            const QStringList& sourceFiles);
++    ~CopyTracksDialog() override;
++
++  protected:
++    void reject() override;
++
++  private:
++    struct Root {
++        QString label;
++        QString path;
++        bool removable;
++        QPushButton* pButton;
++    };
++
++    void selectRoot(int index);
++    void updateDestination();
++    QString destinationFolder(QString* pError) const;
++    void startCopy();
++    void copyFinished(const QStringList& copied,
++            int skipped,
++            int failed,
++            const QString& error);
++    void addToLibrary();
++
++    TrackCollectionManager* const m_pTrackCollectionManager;
++    const QStringList m_sourceFiles;
++    qint64 m_sourceBytes;
++    QList<Root> m_roots;
++    int m_rootIndex;
++
++    QFileSystemModel* m_pModel;
++    QTreeView* m_pTree;
++    QLabel* m_pDestination;
++    QLineEdit* m_pNewFolder;
++    QProgressBar* m_pProgress;
++    QLabel* m_pStatus;
++    QPushButton* m_pCancel;
++    QPushButton* m_pCopy;
++
++    QThread* m_pThread;
++    std::atomic<bool> m_cancel;
++    bool m_done;
++    QStringList m_toAdd;
++};
+diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
+index fd109599..6f14c8b8 100644
+--- a/src/library/librarycontrol.cpp
++++ b/src/library/librarycontrol.cpp
+@@ -10,6 +10,7 @@
+ #include "control/controlencoder.h"
+ #include "control/controlobject.h"
+ #include "control/controlpushbutton.h"
++#include "library/copytracksdialog.h"
+ #include "library/library.h"
+ #include "library/libraryview.h"
+ #include "mixer/playermanager.h"
+@@ -336,6 +337,20 @@ LibraryControl::LibraryControl(Library* pLibrary)
+                 &LibraryControl::slotRemoveSelected);
+     }
+ 
++    // DecksmithOS: the files of the selected tracks copied to a folder chosen
++    // in a dialog (DECKSMITHOS_COPY_ROOTS)
++    m_pCopySelected = std::make_unique<ControlPushButton>(
++            ConfigKey("[Library]", "copy_selected"));
++#ifdef MIXXX_USE_QML
++    if (!CmdlineArgs::Instance().isQml())
++#endif
++    {
++        connect(m_pCopySelected.get(),
++                &ControlPushButton::valueChanged,
++                this,
++                &LibraryControl::slotCopySelected);
++    }
++
+     // Sort controls
+     m_pSortColumn = std::make_unique<ControlEncoder>(ConfigKey("[Library]", "sort_column"));
+     m_pSortOrder = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "sort_order"));
+@@ -731,6 +746,24 @@ void LibraryControl::slotAutoDjAddAllBottom(double v) {
+     }
+ }
+ 
++void LibraryControl::slotCopySelected(double v) {
++    if (!m_pLibraryWidget || v <= 0 || !CopyTracksDialog::isEnabled()) {
++        return;
++    }
++    WTrackTableView* pTrackTableView = m_pLibraryWidget->getCurrentTrackTableView();
++    if (!pTrackTableView) {
++        return;
++    }
++    const QStringList locations = pTrackTableView->getSelectedTrackLocations();
++    if (locations.isEmpty()) {
++        return;
++    }
++    auto* pDialog = new CopyTracksDialog(
++            m_pLibraryWidget->window(), m_pLibrary->trackCollectionManager(), locations);
++    pDialog->setAttribute(Qt::WA_DeleteOnClose);
++    pDialog->open();
++}
++
+ void LibraryControl::slotRemoveSelected(double v) {
+     if (!m_pLibraryWidget || v <= 0) {
+         return;
+diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
+index 1f599f00..9678bd5c 100644
+--- a/src/library/librarycontrol.h
++++ b/src/library/librarycontrol.h
+@@ -107,6 +107,7 @@ class LibraryControl : public QObject {
+     void slotAutoDjAddRequest(double v);
+     void slotAutoDjAddAllBottom(double v);
+     void slotRemoveSelected(double v);
++    void slotCopySelected(double v);
+ 
+     void maybeCreateGroupController(const QString& group);
+     void slotNumDecksChanged(double v);
+@@ -172,6 +173,7 @@ class LibraryControl : public QObject {
+     std::unique_ptr<ControlObject> m_pAutoDjAddRequest;
+     std::unique_ptr<ControlObject> m_pAutoDjAddAllBottom;
+     std::unique_ptr<ControlObject> m_pRemoveSelected;
++    std::unique_ptr<ControlObject> m_pCopySelected;
+ 
+     // Controls to sort the track view
+     std::unique_ptr<ControlEncoder> m_pSortColumn;
+diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
+index f735d2ec..ac483aee 100644
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -1,6 +1,7 @@
+ #include "widget/wtracktableview.h"
+ 
+ #include <QDrag>
++#include <algorithm>
+ #include <QModelIndex>
+ #include <QScrollBar>
+ #include <QShortcut>
+@@ -910,6 +911,25 @@ void WTrackTableView::removeSelectedTracks() {
+     setCurrentIndex(newIndex);
+ }
+ 
++QStringList WTrackTableView::getSelectedTrackLocations() const {
++    QStringList locations;
++    TrackModel* pTrackModel = getTrackModel();
++    if (!pTrackModel) {
++        return locations;
++    }
++    QModelIndexList indices = getSelectedRows();
++    std::sort(indices.begin(), indices.end(), [](const QModelIndex& a, const QModelIndex& b) {
++        return a.row() < b.row();
++    });
++    for (const QModelIndex& index : std::as_const(indices)) {
++        const QString location = pTrackModel->getTrackLocation(index);
++        if (!location.isEmpty() && !locations.contains(location)) {
++            locations.append(location);
++        }
++    }
++    return locations;
++}
++
+ void WTrackTableView::cutSelectedTracks() {
+     const QModelIndexList indices = getSelectedRows();
+     const QModelIndex newIndex = calculateCutIndex(currentIndex(), indices);
+diff --git a/src/widget/wtracktableview.h b/src/widget/wtracktableview.h
+index 6ec7a768..2a51ec40 100644
+--- a/src/widget/wtracktableview.h
++++ b/src/widget/wtracktableview.h
+@@ -68,6 +68,9 @@ class WTrackTableView : public WLibraryTableView {
+     /// (the track menu's "Remove"/"Hide" and its shortcut). The confirmation
+     /// dialog of the library preferences is shown only if askConfirmation.
+     void hideOrRemoveSelectedTracks(bool askConfirmation = true);
++    /// DecksmithOS: the files of the selected tracks, in the order shown
++    /// (any view, also Browse)
++    QStringList getSelectedTrackLocations() const;
+     void cutSelectedTracks();
+     void copySelectedTracks();
+     void pasteTracks(const QModelIndex& index);

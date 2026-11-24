@@ -42,6 +42,10 @@ when an output device is configured in the preferences):
                          no "No Output Devices" dialog when Mixxx starts
                          before the controller (its USB audio) is plugged
                          in (build/mixxx/patches/0003)
+  [Controls] LoadWhenDeckPlaying 0
+                         no track loads into a playing deck (Mixxx:
+                         "Reject" in Preferences > Decks); a live set must
+                         not lose the playing track to a slipped LOAD
 
 Otherwise only values DecksmithOS set itself are changed: the last automatic values are
 kept in decksmithos-auto.json next to mixxx.cfg, and a value that differs from
@@ -74,6 +78,9 @@ MIXXX_WRITTEN = {"[Preferences]geometry": None, "[Library]ShowITunesLibrary": "1
 # AUTO FILL keeps at least this many tracks queued (Mixxx: 5), so that the
 # harmonic fill (Mixxx patch 0022) has more to choose places from
 AUTODJ_FILL_MINIMUM = "10"
+# A track never loads into a deck that is playing (LOAD, controllers, drag and
+# drop; Mixxx's LoadWhenDeckPlaying::Reject)
+LOAD_WHEN_PLAYING_REJECT = "0"
 
 
 def written_by_mixxx(name, value):
@@ -272,7 +279,8 @@ def main():
             auto[name] = value
         else:
             auto.pop(name, None)  # the user's value from now on
-    forced = {("[Soundcard]", "HideNoOutputWarning"): "1"}
+    forced = {("[Soundcard]", "HideNoOutputWarning"): "1",
+              ("[Controls]", "LoadWhenDeckPlaying"): LOAD_WHEN_PLAYING_REJECT}
     for (section, key), value in forced.items():
         if get(sections, section, key) != value:
             put(sections, section, key, value)

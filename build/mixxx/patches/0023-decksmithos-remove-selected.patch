@@ -1,0 +1,123 @@
+Description: Remove or hide the selected tracks from a control
+ [Library],remove_selected: the selected tracks out of the Auto DJ queue,
+ playlist or crate shown, or hidden from the library in views without a
+ remove action (Tracks), as the track menu's "Remove"/"Hide" and its
+ shortcut do, but without the confirmation dialog (the skin or controller
+ asks for a second press instead). For a touch screen without context
+ menus. Locked playlists and crates and views without either action
+ (Browse, Rekordbox, Serato) are left unchanged.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-24
+---
+diff --git a/src/library/librarycontrol.cpp b/src/library/librarycontrol.cpp
+index 4c301ee9..b08ad9e2 100644
+--- a/src/library/librarycontrol.cpp
++++ b/src/library/librarycontrol.cpp
+@@ -310,6 +310,21 @@ LibraryControl::LibraryControl(Library* pLibrary)
+                 &LibraryControl::slotAutoDjAddAllBottom);
+     }
+ 
++    // DecksmithOS: the selected tracks out of the Auto DJ queue, playlist or
++    // crate shown, or hidden from the library (Tracks), without a dialog
++    // (the skin or controller asks for a second press instead)
++    m_pRemoveSelected = std::make_unique<ControlPushButton>(
++            ConfigKey("[Library]", "remove_selected"));
++#ifdef MIXXX_USE_QML
++    if (!CmdlineArgs::Instance().isQml())
++#endif
++    {
++        connect(m_pRemoveSelected.get(),
++                &ControlPushButton::valueChanged,
++                this,
++                &LibraryControl::slotRemoveSelected);
++    }
++
+     // Sort controls
+     m_pSortColumn = std::make_unique<ControlEncoder>(ConfigKey("[Library]", "sort_column"));
+     m_pSortOrder = std::make_unique<ControlPushButton>(ConfigKey("[Library]", "sort_order"));
+@@ -705,6 +720,17 @@ void LibraryControl::slotAutoDjAddAllBottom(double v) {
+     }
+ }
+ 
++void LibraryControl::slotRemoveSelected(double v) {
++    if (!m_pLibraryWidget || v <= 0) {
++        return;
++    }
++
++    WTrackTableView* pTrackTableView = m_pLibraryWidget->getCurrentTrackTableView();
++    if (pTrackTableView) {
++        pTrackTableView->hideOrRemoveSelectedTracks(false);
++    }
++}
++
+ void LibraryControl::slotSelectNextTrack(double v) {
+     if (v > 0) {
+         slotSelectTrack(1);
+diff --git a/src/library/librarycontrol.h b/src/library/librarycontrol.h
+index 4a359086..0fa46332 100644
+--- a/src/library/librarycontrol.h
++++ b/src/library/librarycontrol.h
+@@ -102,6 +102,7 @@ class LibraryControl : public QObject {
+     void slotAutoDjAddReplace(double v);
+     void slotAutoDjAddRequest(double v);
+     void slotAutoDjAddAllBottom(double v);
++    void slotRemoveSelected(double v);
+ 
+     void maybeCreateGroupController(const QString& group);
+     void slotNumDecksChanged(double v);
+@@ -159,6 +160,7 @@ class LibraryControl : public QObject {
+     std::unique_ptr<ControlObject> m_pAutoDjAddReplace;
+     std::unique_ptr<ControlObject> m_pAutoDjAddRequest;
+     std::unique_ptr<ControlObject> m_pAutoDjAddAllBottom;
++    std::unique_ptr<ControlObject> m_pRemoveSelected;
+ 
+     // Controls to sort the track view
+     std::unique_ptr<ControlEncoder> m_pSortColumn;
+diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
+index 9f73c506..f735d2ec 100644
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -1277,7 +1277,7 @@ void WTrackTableView::resizeEvent(QResizeEvent* event) {
+     }
+ }
+ 
+-void WTrackTableView::hideOrRemoveSelectedTracks() {
++void WTrackTableView::hideOrRemoveSelectedTracks(bool askConfirmation) {
+     TrackModel* pTrackModel = getTrackModel();
+     if (!pTrackModel) {
+         return;
+@@ -1317,7 +1317,7 @@ void WTrackTableView::hideOrRemoveSelectedTracks() {
+     }
+     }
+ 
+-    if (pTrackModel->getRequireConfirmationToHideRemoveTracks()) {
++    if (askConfirmation && pTrackModel->getRequireConfirmationToHideRemoveTracks()) {
+         QString title;
+         QString message;
+         if (cap == TrackModel::Capability::Hide) {
+diff --git a/src/widget/wtracktableview.h b/src/widget/wtracktableview.h
+index 592cb14f..6ec7a768 100644
+--- a/src/widget/wtracktableview.h
++++ b/src/widget/wtracktableview.h
+@@ -63,6 +63,11 @@ class WTrackTableView : public WLibraryTableView {
+     void selectTrack(const TrackId&);
+ 
+     void removeSelectedTracks();
++    /// Removes the selected tracks from the Auto DJ queue, playlist or crate
++    /// shown, or hides them in the library views without a remove action
++    /// (the track menu's "Remove"/"Hide" and its shortcut). The confirmation
++    /// dialog of the library preferences is shown only if askConfirmation.
++    void hideOrRemoveSelectedTracks(bool askConfirmation = true);
+     void cutSelectedTracks();
+     void copySelectedTracks();
+     void pasteTracks(const QModelIndex& index);
+@@ -171,8 +176,6 @@ class WTrackTableView : public WLibraryTableView {
+     void initTrackMenu();
+     void showTrackMenu(const QPoint pos, const QModelIndex& index);
+ 
+-    void hideOrRemoveSelectedTracks();
+-
+     const UserSettingsPointer m_pConfig;
+     Library* const m_pLibrary;
+ 

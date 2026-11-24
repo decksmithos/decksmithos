@@ -32,6 +32,15 @@
 //       duck                  -12 dB while held
 //       buildup               high-pass filter sweep while held (the deck's
 //                             quick effect super knob), back on release
+//   [Library],search_request  a controller's browse push held for a second
+//                             (Mixxx patch 0024): SEARCH, as the top-bar
+//                             button, but never closing the library page
+//   [Skin],dsm_remove         REMOVE in the library: the first tap arms it
+//                             ([Skin],dsm_lit_remove 1, "REMOVE?"), a second
+//                             tap within REMOVE_ARM_MS removes the selected
+//                             tracks from the Auto DJ queue, playlist or
+//                             crate shown, or hides them in Tracks
+//                             ([Library],remove_selected, Mixxx patch 0023)
 
 var DecksmithSkin = {};
 
@@ -43,6 +52,7 @@ DecksmithSkin.RETRY_MS = 1000;
 DecksmithSkin.RETRY_MAX = 120;
 DecksmithSkin.BUILDUP_MS = 8000; // full sweep time
 DecksmithSkin.STEP_MS = 50;
+DecksmithSkin.REMOVE_ARM_MS = 3000;
 
 DecksmithSkin.init = function() {
     this.connections = [];
@@ -96,6 +106,14 @@ DecksmithSkin.connectAll = function() {
             });
         });
     }
+    this.watch("search_request", function() {
+        DecksmithSkin.openSearch();
+    }, "[Library]");
+    this.watch("dsm_remove", function(value) {
+        if (value > 0) {
+            DecksmithSkin.removeTap();
+        }
+    });
     // Lit buttons follow the library page and its active section
     var update = function() {
         DecksmithSkin.updateLit();
@@ -126,6 +144,31 @@ DecksmithSkin.retryPending = function() {
             DecksmithSkin.watch(p.key, p.callback, p.group);
         });
         DecksmithSkin.retryPending();
+    }, true);
+};
+
+// --- REMOVE ------------------------------------------------------------------
+
+DecksmithSkin.removeDisarm = function() {
+    if (this.timers.remove) {
+        engine.stopTimer(this.timers.remove);
+        delete this.timers.remove;
+    }
+    engine.setValue("[Skin]", "dsm_lit_remove", 0);
+};
+
+// Two taps: a lone tap (a finger that slipped) changes nothing
+DecksmithSkin.removeTap = function() {
+    if (this.timers.remove) {
+        this.removeDisarm();
+        engine.setValue("[Library]", "remove_selected", 1);
+        engine.setValue("[Library]", "remove_selected", 0);
+        return;
+    }
+    engine.setValue("[Skin]", "dsm_lit_remove", 1);
+    this.timers.remove = engine.beginTimer(this.REMOVE_ARM_MS, function() {
+        delete DecksmithSkin.timers.remove;
+        engine.setValue("[Skin]", "dsm_lit_remove", 0);
     }, true);
 };
 
@@ -192,6 +235,20 @@ DecksmithSkin.navigate = function(name) {
         this.closeLibrary(); // second tap
         return;
     }
+    this.open(name);
+};
+
+// SEARCH from a controller: opens it, or puts the focus back on the search
+// box when it is open already
+DecksmithSkin.openSearch = function() {
+    if (this.litButton() === "search") {
+        engine.setValue("[Library]", "focused_widget", 1);
+        return;
+    }
+    this.open("search");
+};
+
+DecksmithSkin.open = function(name) {
     engine.setValue("[Skin]", "show_maximized_library", 1);
     if (name !== "search") {
         // the section's lists are in the sidebar

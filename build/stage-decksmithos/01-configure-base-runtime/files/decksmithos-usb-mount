@@ -11,6 +11,12 @@
 #     unmounts the slot (fails while a file on it is open, e.g. a loaded
 #     track) and removes the disk from the kernel, so it can be pulled out;
 #     it is mounted again only when plugged in again.
+#   decksmithos-usb-mount write <slot> on|off
+#     remounts the slot read-write (on) or back read-only (off), for the
+#     copy to a drive (Mixxx patch 0025): only FAT32, exFAT and NTFS (ext*
+#     are mounted with noload, which allows no writing; HFS+ is not written
+#     by Linux safely). "off" flushes everything first. A drive stays
+#     writable only while a copy runs.
 set -Eeuo pipefail
 
 read -r -a SLOTS <<< "${DECKSMITHOS_USB_SLOTS:-/usb /usb2}"
@@ -19,8 +25,9 @@ LOCK="/run/decksmithos-usb.lock"
 
 log() { printf '[decksmithos-usb] %s\n' "$*"; }
 
-ACTION="${1:?usage: $0 add|remove <kernel name> | eject <slot>}"
-NAME="${2:?usage: $0 add|remove <kernel name> | eject <slot>}"
+USAGE="usage: $0 add|remove <kernel name> | eject <slot> | write <slot> on|off"
+ACTION="${1:?${USAGE}}"
+NAME="${2:?${USAGE}}"
 DEV="/dev/${NAME}"
 
 # Parent disk of a block device (the device itself if it has no parent).
@@ -132,9 +139,40 @@ do_eject() {
   fi
 }
 
+do_write() {
+  exec 9>"${LOCK}"
+  flock 9
+
+  local slot="${NAME}" state="${3:-}" known="" s src fstype
+  for s in "${SLOTS[@]}"; do
+    [[ "${s}" == "${slot}" ]] && known=1
+  done
+  [[ -n "${known}" ]] || { log "write: ${slot} is not a USB slot (${SLOTS[*]})"; exit 2; }
+  src="$(slot_source "${slot}")"
+  [[ -n "${src}" ]] || { log "write: nothing mounted at ${slot}"; exit 1; }
+  fstype="$(findmnt -n -o FSTYPE --mountpoint "${slot}")"
+  case "${state}" in
+    on)
+      case "${fstype}" in
+        vfat|exfat|ntfs3) ;;
+        *) log "write: ${slot} (${fstype}) is not written to"; exit 1 ;;
+      esac
+      mount -o remount,rw "${slot}"
+      log "${src} at ${slot} writable (copy)"
+      ;;
+    off)
+      sync -f "${slot}" 2>/dev/null || sync
+      mount -o remount,ro "${slot}"
+      log "${src} at ${slot} read-only again"
+      ;;
+    *) log "write: on or off, not '${state}'"; exit 2 ;;
+  esac
+}
+
 case "${ACTION}" in
   add)    do_add ;;
   remove) do_remove ;;
   eject)  do_eject ;;
+  write)  do_write "$@" ;;
   *)      log "unknown action '${ACTION}'"; exit 2 ;;
 esac
