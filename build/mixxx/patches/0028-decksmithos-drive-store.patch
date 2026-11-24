@@ -1,0 +1,1787 @@
+Description: The DJ's library data on the USB drive (DECKSMITHOS/)
+ Part of the USB import (DECKSMITHOS_USB_IMPORT, patch 0016). A drive with a
+ folder DECKSMITHOS/ at its root (created from the DecksmithOS system menu
+ or by hand; the system mounts such a drive read-write) keeps:
+ - Analysis/<sha1 of the path on the drive>.json per track of the drive:
+   beat grid, keys, cues and hot cues, intro/outro, track structure, replay
+   gain, color, rating and the waveforms. Written (in a low priority thread,
+   temporary file, sync, rename; unchanged files are not rewritten) whenever
+   the library saves such a track, so analysis done and edits made on any
+   console travel with the drive. Applied when the drive appears (worker
+   thread reads, GUI thread applies in small batches; a track loaded first
+   gets it right before loading); it wins over the rekordbox export.
+ - Playlists/*.m3u8, Crates/*.m3u8 and index.json: the playlists and crates
+   created while the drive is connected (the drive that appeared last), as
+   M3U8 with paths relative to the file for the tracks of the drive (any
+   mount point, other players) and absolute paths for the others, kept up
+   to date with their tracks, order and name. They are created in the
+   library when the drive appears (after its rekordbox and Serato lists,
+   editable) and deleted when it is removed; list files put there by hand
+   are imported too. Crates of drives left over from a crash are deleted at
+   startup (table decksmithos_drive_crates).
+ EJECT (patch 0017) writes everything pending first. Audio files are never
+ changed.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-24
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8d3742ae..246d7996 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1047,6 +1047,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/trackset/tracksettablemodel.cpp
+   src/library/traktor/traktorfeature.cpp
+   src/library/usbimport/usbimportutil.cpp
++  src/library/usbimport/drivestore.cpp
+   src/library/usbimport/usblibraryimporter.cpp
+   src/library/treeitem.cpp
+   src/library/treeitemmodel.cpp
+diff --git a/src/library/usbimport/drivestore.cpp b/src/library/usbimport/drivestore.cpp
+new file mode 100644
+index 00000000..4586e63b
+--- /dev/null
++++ b/src/library/usbimport/drivestore.cpp
+@@ -0,0 +1,1092 @@
++#include "library/usbimport/drivestore.h"
++
++#include <QCryptographicHash>
++#include <QDir>
++#include <QElapsedTimer>
++#include <QFile>
++#include <QFileInfo>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QRegularExpression>
++#include <QSignalBlocker>
++#include <QSqlQuery>
++#include <QStorageInfo>
++#include <QThread>
++#include <QUrl>
++#include <QtDebug>
++#include <cstdio>
++
++#ifdef __linux__
++#include <unistd.h>
++#endif
++
++#include "library/dao/analysisdao.h"
++#include "library/dao/playlistdao.h"
++#include "library/queryutil.h"
++#include "library/trackcollection.h"
++#include "library/trackcollectionmanager.h"
++#include "library/trackset/crate/crate.h"
++#include "library/usbimport/usblibraryimporter.h"
++#include "moc_drivestore.cpp"
++#include "track/beats.h"
++#include "track/keyfactory.h"
++#include "track/track.h"
++
++namespace mixxx {
++namespace usbimport {
++
++const QString kStoreDirectory = QStringLiteral("DECKSMITHOS");
++
++namespace {
++
++const QString kAnalysisDirectory = QStringLiteral("Analysis");
++const QString kPlaylistDirectory = QStringLiteral("Playlists");
++const QString kCrateDirectory = QStringLiteral("Crates");
++const QString kIndexFile = QStringLiteral("index.json");
++const QString kListSuffix = QStringLiteral(".m3u8");
++const QString kCrateTable = QStringLiteral("decksmithos_drive_crates");
++constexpr int kFormatVersion = 1;
++/// Delay before writing, so that a burst of changes is written once
++constexpr int kWriteDelayMillis = 2000;
++/// GUI thread time per write tick for building track files
++constexpr int kWriteBudgetMillis = 15;
++/// New lists of a drive are listed after the ones read from it
++constexpr int kNewListSortOffset = 500000;
++
++int crateInt(const CrateId& crateId) {
++    return crateId.toVariant().toInt();
++}
++
++QString storePath(const QString& mountPoint) {
++    return QDir(mountPoint).filePath(kStoreDirectory);
++}
++
++QString relativeToDrive(const QString& mountPoint, const QString& location) {
++    const QString prefix = mountPoint + QChar('/');
++    if (!location.startsWith(prefix)) {
++        return QString();
++    }
++    return location.mid(prefix.size());
++}
++
++QString base64(const QByteArray& data) {
++    return QString::fromLatin1(data.toBase64());
++}
++
++QByteArray fromBase64(const QJsonValue& value) {
++    return QByteArray::fromBase64(value.toString().toLatin1());
++}
++
++/// A list name as a file name on FAT32/exFAT/NTFS
++QString safeFileName(const QString& name) {
++    static const QRegularExpression kForbidden(QStringLiteral("[\\\\/:*?\"<>|\\x00-\\x1f]"));
++    QString fileName = name;
++    fileName.replace(kForbidden, QStringLiteral("_"));
++    fileName = fileName.trimmed();
++    while (fileName.endsWith(QChar('.'))) {
++        fileName.chop(1);
++    }
++    if (fileName.isEmpty()) {
++        fileName = QStringLiteral("List");
++    }
++    return fileName.left(100);
++}
++
++/// Writes a file under a temporary name, syncs it and renames it over the
++/// old one; skipped if the file already has this content (any thread)
++bool writeFileAtomically(const QString& path, const QByteArray& data) {
++    QFile existing(path);
++    if (existing.open(QIODevice::ReadOnly)) {
++        if (existing.size() == data.size() && existing.readAll() == data) {
++            return true;
++        }
++        existing.close();
++    }
++    const QFileInfo info(path);
++    if (!QDir().mkpath(info.absolutePath())) {
++        qWarning() << "Drive store: cannot create" << info.absolutePath();
++        return false;
++    }
++    const QString temporary =
++            info.dir().filePath(QStringLiteral(".") + info.fileName() + QStringLiteral(".tmp"));
++    QFile file(temporary);
++    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
++            file.write(data) != data.size() || !file.flush()) {
++        qWarning() << "Drive store: cannot write" << temporary << file.errorString();
++        file.close();
++        QFile::remove(temporary);
++        return false;
++    }
++#ifdef __linux__
++    fsync(file.handle());
++#endif
++    file.close();
++    if (std::rename(QFile::encodeName(temporary).constData(),
++                QFile::encodeName(path).constData()) != 0) {
++        qWarning() << "Drive store: cannot rename" << temporary << "to" << path;
++        QFile::remove(temporary);
++        return false;
++    }
++    return true;
++}
++
++QStringList parseList(const QString& path) {
++    QStringList locations;
++    QFile file(path);
++    if (!file.open(QIODevice::ReadOnly)) {
++        qWarning() << "Drive store: cannot read" << path;
++        return locations;
++    }
++    const QDir base = QFileInfo(path).dir();
++    const QStringList lines = QString::fromUtf8(file.readAll()).split(QChar('\n'));
++    for (QString line : lines) {
++        line = line.trimmed();
++        if (line.startsWith(QChar(0xFEFF))) {
++            line.remove(0, 1);
++        }
++        if (line.isEmpty() || line.startsWith(QChar('#'))) {
++            continue;
++        }
++        line.replace(QChar('\\'), QChar('/'));
++        if (line.startsWith(QStringLiteral("file://"))) {
++            line = QUrl(line).toLocalFile();
++        }
++        locations.append(QDir::cleanPath(
++                QDir::isAbsolutePath(line) ? line : base.absoluteFilePath(line)));
++    }
++    return locations;
++}
++
++QByteArray listFileContent(const QString& filePath, const QStringList& locations) {
++    const QDir base = QFileInfo(filePath).dir();
++    QByteArray data = QByteArrayLiteral("#EXTM3U\n");
++    for (const QString& location : locations) {
++        // Relative for the tracks of the drive (any slot, any computer),
++        // absolute for the others
++        const bool onSameDrive = !base.relativeFilePath(location).startsWith(
++                QStringLiteral("../../../"));
++        data += (onSameDrive ? base.relativeFilePath(location) : location).toUtf8();
++        data += '\n';
++    }
++    return data;
++}
++
++QJsonArray cuesToJson(const TrackPointer& pTrack) {
++    QJsonArray cues;
++    const QList<CuePointer> cuePoints = pTrack->getCuePoints();
++    for (const CuePointer& pCue : cuePoints) {
++        QJsonObject cue;
++        cue[QStringLiteral("type")] = static_cast<int>(pCue->getType());
++        cue[QStringLiteral("hotCue")] = pCue->getHotCue();
++        const auto position = pCue->getPosition();
++        cue[QStringLiteral("position")] =
++                position.isValid() ? QJsonValue(position.value()) : QJsonValue();
++        cue[QStringLiteral("length")] = pCue->getLengthFrames();
++        cue[QStringLiteral("label")] = pCue->getLabel();
++        cue[QStringLiteral("color")] = static_cast<qint64>(pCue->getColor());
++        cues.append(cue);
++    }
++    return cues;
++}
++
++} // namespace
++
++QString analysisFileName(const QString& mountPoint, const QString& location) {
++    const QString relative = relativeToDrive(mountPoint, location);
++    if (relative.isEmpty()) {
++        return QString();
++    }
++    return QString::fromLatin1(
++                   QCryptographicHash::hash(relative.toUtf8(), QCryptographicHash::Sha1)
++                           .toHex()) +
++            QStringLiteral(".json");
++}
++
++bool hasStore(const QString& mountPoint) {
++    return QFileInfo(storePath(mountPoint)).isDir();
++}
++
++StoreIndex readStoreIndex(const QString& mountPoint) {
++    StoreIndex index;
++    const QDir store(storePath(mountPoint));
++    if (!store.exists()) {
++        return index;
++    }
++    index.present = true;
++    index.writable = !QStorageInfo(mountPoint).isReadOnly() &&
++            QFileInfo(store.absolutePath()).isWritable();
++    const QStringList analysisFiles = QDir(store.filePath(kAnalysisDirectory))
++                                              .entryList(QStringList{QStringLiteral("*.json")},
++                                                      QDir::Files);
++    index.analysisFiles = QSet<QString>(analysisFiles.begin(), analysisFiles.end());
++
++    QSet<QString> listed;
++    QFile indexFile(store.filePath(kIndexFile));
++    if (indexFile.open(QIODevice::ReadOnly)) {
++        const QJsonArray lists = QJsonDocument::fromJson(indexFile.readAll())
++                                         .object()
++                                         .value(QStringLiteral("lists"))
++                                         .toArray();
++        for (const QJsonValue& value : lists) {
++            const QJsonObject object = value.toObject();
++            StoreList list;
++            list.crate = object.value(QStringLiteral("kind")).toString() == QStringLiteral("crate");
++            list.name = object.value(QStringLiteral("name")).toString();
++            list.file = object.value(QStringLiteral("file")).toString();
++            if (list.name.isEmpty() || list.file.isEmpty() ||
++                    !QFileInfo::exists(store.filePath(list.file))) {
++                continue;
++            }
++            list.locations = parseList(store.filePath(list.file));
++            listed.insert(list.file.toLower());
++            index.lists.append(list);
++        }
++    }
++    // List files without an index entry (put there by hand), by name
++    for (const bool crate : {false, true}) {
++        const QString directory = crate ? kCrateDirectory : kPlaylistDirectory;
++        QStringList files = QDir(store.filePath(directory))
++                                    .entryList(QStringList{QStringLiteral("*.m3u8"),
++                                                       QStringLiteral("*.m3u")},
++                                            QDir::Files,
++                                            QDir::Name | QDir::IgnoreCase);
++        for (const QString& fileName : files) {
++            const QString file = directory + QChar('/') + fileName;
++            if (listed.contains(file.toLower())) {
++                continue;
++            }
++            StoreList list;
++            list.crate = crate;
++            list.name = QFileInfo(fileName).completeBaseName();
++            list.file = file;
++            list.locations = parseList(store.filePath(file));
++            index.lists.append(list);
++        }
++    }
++    return index;
++}
++
++QJsonObject readAnalysisFile(const QString& mountPoint, const QString& location) {
++    const QString fileName = analysisFileName(mountPoint, location);
++    if (fileName.isEmpty()) {
++        return QJsonObject();
++    }
++    QFile file(QDir(storePath(mountPoint)).filePath(kAnalysisDirectory + QChar('/') + fileName));
++    if (!file.open(QIODevice::ReadOnly)) {
++        return QJsonObject();
++    }
++    const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
++    // A file of another track whose path has the same hash is ignored
++    if (object.value(QStringLiteral("path")).toString() != relativeToDrive(mountPoint, location)) {
++        return QJsonObject();
++    }
++    return object;
++}
++
++struct DriveStore::Store {
++    QString mountPoint;
++    bool writable = false;
++    int sortOrderBase = 0;
++    int newLists = 0;
++    /// Lists in index order: (crate, id)
++    QList<QPair<bool, int>> order;
++    bool listsDirty = false;
++};
++
++DriveStore* DriveStore::s_pInstance = nullptr;
++
++DriveStore::DriveStore(QObject* parent, TrackCollectionManager* pTrackCollectionManager)
++        : QObject(parent),
++          m_pTrackCollectionManager(pTrackCollectionManager),
++          m_busy(false) {
++    m_writer.setMaxThreadCount(1);
++    m_writeTimer.setSingleShot(true);
++    connect(&m_writeTimer, &QTimer::timeout, this, &DriveStore::slotWritePending);
++
++    TrackCollection* pCollection = m_pTrackCollectionManager->internalCollection();
++    connect(pCollection, &TrackCollection::tracksChanged, this, &DriveStore::slotTracksChanged);
++    PlaylistDAO* pPlaylists = &pCollection->getPlaylistDAO();
++    connect(pPlaylists, &PlaylistDAO::added, this, &DriveStore::slotPlaylistAdded);
++    connect(pPlaylists, &PlaylistDAO::deleted, this, &DriveStore::slotPlaylistDeleted);
++    connect(pPlaylists, &PlaylistDAO::renamed, this, &DriveStore::slotPlaylistRenamed);
++    connect(pPlaylists, &PlaylistDAO::tracksAdded, this, &DriveStore::slotPlaylistChanged);
++    connect(pPlaylists, &PlaylistDAO::tracksMoved, this, &DriveStore::slotPlaylistChanged);
++    connect(pPlaylists, &PlaylistDAO::tracksRemoved, this, &DriveStore::slotPlaylistChanged);
++    connect(pCollection, &TrackCollection::crateInserted, this, &DriveStore::slotCrateInserted);
++    connect(pCollection, &TrackCollection::crateUpdated, this, &DriveStore::slotCrateChanged);
++    connect(pCollection, &TrackCollection::crateDeleted, this, &DriveStore::slotCrateDeleted);
++    connect(pCollection,
++            &TrackCollection::crateTracksChanged,
++            this,
++            [this](CrateId crateId, const QList<TrackId>&, const QList<TrackId>&) {
++                slotCrateChanged(crateId);
++            });
++
++    DEBUG_ASSERT(!s_pInstance);
++    s_pInstance = this;
++}
++
++DriveStore::~DriveStore() {
++    s_pInstance = nullptr;
++    m_writer.waitForDone();
++}
++
++void DriveStore::deleteStaleCrates() {
++    const QSqlDatabase database = m_pTrackCollectionManager->internalCollection()->database();
++    QSqlQuery query(database);
++    if (!query.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS %1 ("
++                                   "crate_id INTEGER PRIMARY KEY, "
++                                   "mount_point TEXT NOT NULL)")
++                            .arg(kCrateTable))) {
++        LOG_FAILED_QUERY(query);
++        return;
++    }
++    QList<CrateId> crateIds;
++    if (query.exec(QStringLiteral("SELECT crate_id FROM %1").arg(kCrateTable))) {
++        while (query.next()) {
++            crateIds.append(CrateId(query.value(0)));
++        }
++    }
++    m_busy = true;
++    for (const CrateId& crateId : std::as_const(crateIds)) {
++        m_pTrackCollectionManager->internalCollection()->deleteCrate(crateId);
++    }
++    m_busy = false;
++    if (!query.exec(QStringLiteral("DELETE FROM %1").arg(kCrateTable))) {
++        LOG_FAILED_QUERY(query);
++    }
++    if (!crateIds.isEmpty()) {
++        qInfo() << "Drive store: deleted" << crateIds.size() << "crates of the last session";
++    }
++}
++
++// static
++void DriveStore::flush(const QString& mountPoint) {
++    DriveStore* pThis = s_pInstance;
++    if (!pThis) {
++        return;
++    }
++    Store* pStore = pThis->storeOf(mountPoint);
++    if (!pStore) {
++        return;
++    }
++    QElapsedTimer timer;
++    timer.start();
++    pThis->writeTracksNow(-1);
++    pThis->writeListsNow(pStore);
++    pThis->m_writer.waitForDone();
++    qInfo() << "Drive store: flushed" << mountPoint << "in" << timer.elapsed() << "ms";
++}
++
++DriveStore::Store* DriveStore::storeOf(const QString& mountPoint) const {
++    for (const auto& pStore : m_stores) {
++        if (pStore->mountPoint == mountPoint) {
++            return pStore.get();
++        }
++    }
++    return nullptr;
++}
++
++bool DriveStore::isStore(const QString& mountPoint) const {
++    return storeOf(mountPoint) != nullptr;
++}
++
++void DriveStore::storeAppeared(const QString& mountPoint, bool writable) {
++    Store* pStore = storeOf(mountPoint);
++    if (!pStore) {
++        auto pNew = std::make_shared<Store>();
++        pNew->mountPoint = mountPoint;
++        m_stores.append(pNew);
++        pStore = pNew.get();
++    }
++    pStore->writable = writable;
++    qInfo() << "Drive store:" << mountPoint << (writable ? "writable" : "read-only");
++}
++
++void DriveStore::storeRemoved(const QString& mountPoint) {
++    Store* pStore = storeOf(mountPoint);
++    if (!pStore) {
++        return;
++    }
++    // The drive's playlists are deleted by the importer (kPlaylistTable),
++    // its crates here
++    m_busy = true;
++    const QSqlDatabase database = m_pTrackCollectionManager->internalCollection()->database();
++    for (auto it = m_crates.begin(); it != m_crates.end();) {
++        if (it->mountPoint == mountPoint) {
++            m_pTrackCollectionManager->internalCollection()->deleteCrate(it.key());
++            QSqlQuery query(database);
++            query.prepare(QStringLiteral("DELETE FROM %1 WHERE crate_id = :id").arg(kCrateTable));
++            query.bindValue(QStringLiteral(":id"), it.key().toVariant());
++            query.exec();
++            it = m_crates.erase(it);
++        } else {
++            ++it;
++        }
++    }
++    m_busy = false;
++    for (auto it = m_playlists.begin(); it != m_playlists.end();) {
++        it = it->mountPoint == mountPoint ? m_playlists.erase(it) : std::next(it);
++    }
++    for (int i = 0; i < m_stores.size(); ++i) {
++        if (m_stores[i]->mountPoint == mountPoint) {
++            m_stores.removeAt(i);
++            break;
++        }
++    }
++    qInfo() << "Drive store:" << mountPoint << "gone";
++}
++
++QSet<int> DriveStore::importLists(const QString& mountPoint,
++        const QList<StoreList>& lists,
++        int sortOrderBase) {
++    QSet<int> playlistIds;
++    Store* pStore = storeOf(mountPoint);
++    if (!pStore) {
++        return playlistIds;
++    }
++    pStore->sortOrderBase = sortOrderBase;
++    TrackCollection* pCollection = m_pTrackCollectionManager->internalCollection();
++    const QSqlDatabase database = pCollection->database();
++    PlaylistDAO& playlistDao = pCollection->getPlaylistDAO();
++
++    // Library ids of all locations of the lists
++    QHash<QString, TrackId> trackIds;
++    {
++        QSqlQuery query(database);
++        query.prepare(QStringLiteral(
++                "SELECT library.id FROM library "
++                "INNER JOIN track_locations ON library.location = track_locations.id "
++                "WHERE track_locations.location = :location AND library.mixxx_deleted = 0"));
++        for (const StoreList& list : lists) {
++            for (const QString& location : list.locations) {
++                if (trackIds.contains(location)) {
++                    continue;
++                }
++                query.bindValue(QStringLiteral(":location"), location);
++                if (query.exec() && query.next()) {
++                    trackIds.insert(location, TrackId(query.value(0)));
++                } else {
++                    trackIds.insert(location, TrackId());
++                }
++            }
++        }
++    }
++
++    m_busy = true;
++    int sortOrder = sortOrderBase;
++    for (const StoreList& list : lists) {
++        QList<TrackId> ids;
++        for (const QString& location : list.locations) {
++            const TrackId trackId = trackIds.value(location);
++            if (trackId.isValid()) {
++                ids.append(trackId);
++            }
++        }
++        if (list.crate) {
++            Crate crate;
++            QString name = list.name;
++            for (int n = 2; pCollection->crates().readCrateByName(name); ++n) {
++                name = QStringLiteral("%1 (%2)").arg(list.name).arg(n);
++            }
++            crate.setName(name);
++            CrateId crateId;
++            if (!pCollection->insertCrate(crate, &crateId)) {
++                qWarning() << "Drive store: cannot create crate" << name;
++                continue;
++            }
++            pCollection->addCrateTracks(crateId, ids);
++            QSqlQuery query(database);
++            query.prepare(QStringLiteral(
++                    "INSERT OR REPLACE INTO %1 (crate_id, mount_point) VALUES (:id, :mount_point)")
++                            .arg(kCrateTable));
++            query.bindValue(QStringLiteral(":id"), crateId.toVariant());
++            query.bindValue(QStringLiteral(":mount_point"), mountPoint);
++            query.exec();
++            m_crates.insert(crateId, ListRef{mountPoint, list.file});
++            pStore->order.append(qMakePair(true, crateInt(crateId)));
++        } else {
++            QString name = list.name;
++            for (int n = 2; playlistDao.getPlaylistIdFromName(name) != kInvalidPlaylistId; ++n) {
++                name = QStringLiteral("%1 (%2)").arg(list.name).arg(n);
++            }
++            int playlistId;
++            {
++                const QSignalBlocker blocker(&playlistDao);
++                playlistId = playlistDao.createPlaylist(name);
++                if (playlistId != kInvalidPlaylistId && !ids.isEmpty()) {
++                    playlistDao.appendTracksToPlaylist(ids, playlistId);
++                }
++            }
++            if (playlistId == kInvalidPlaylistId) {
++                qWarning() << "Drive store: cannot create playlist" << name;
++                continue;
++            }
++            QSqlQuery query(database);
++            query.prepare(QStringLiteral(
++                    "INSERT OR REPLACE INTO %1 (playlist_id, mount_point, sort_order) "
++                    "VALUES (:id, :mount_point, :sort_order)")
++                            .arg(kPlaylistTable));
++            query.bindValue(QStringLiteral(":id"), playlistId);
++            query.bindValue(QStringLiteral(":mount_point"), mountPoint);
++            query.bindValue(QStringLiteral(":sort_order"), sortOrder++);
++            query.exec();
++            m_playlists.insert(playlistId, ListRef{mountPoint, list.file});
++            pStore->order.append(qMakePair(false, playlistId));
++            playlistIds.insert(playlistId);
++        }
++        if (ids.size() != list.locations.size()) {
++            qInfo() << "Drive store: list" << list.name << "has"
++                    << list.locations.size() - ids.size() << "tracks that are not in the library";
++        }
++    }
++    m_busy = false;
++    qInfo() << "Drive store: imported" << lists.size() << "lists of" << mountPoint;
++    return playlistIds;
++}
++
++DriveStore::Store* DriveStore::storeForNewList() {
++    // The drive that appeared last
++    for (int i = m_stores.size() - 1; i >= 0; --i) {
++        if (m_stores[i]->writable) {
++            return m_stores[i].get();
++        }
++    }
++    return nullptr;
++}
++
++QString DriveStore::uniqueFile(Store* pStore, bool crate, const QString& name) const {
++    const QString directory = crate ? kCrateDirectory : kPlaylistDirectory;
++    const QString base = safeFileName(name);
++    QSet<QString> used;
++    for (const auto& ref : m_playlists) {
++        if (ref.mountPoint == pStore->mountPoint) {
++            used.insert(ref.file.toLower());
++        }
++    }
++    for (const auto& ref : m_crates) {
++        if (ref.mountPoint == pStore->mountPoint) {
++            used.insert(ref.file.toLower());
++        }
++    }
++    QString file = directory + QChar('/') + base + kListSuffix;
++    for (int n = 2; used.contains(file.toLower()); ++n) {
++        file = QStringLiteral("%1/%2 (%3)%4").arg(directory, base).arg(n).arg(kListSuffix);
++    }
++    return file;
++}
++
++void DriveStore::slotPlaylistAdded(int playlistId) {
++    if (m_busy || m_playlists.contains(playlistId)) {
++        return;
++    }
++    PlaylistDAO& playlistDao = m_pTrackCollectionManager->internalCollection()->getPlaylistDAO();
++    if (playlistDao.getHiddenType(playlistId) != PlaylistDAO::PLHT_NOT_HIDDEN) {
++        return; // Auto DJ queue, history
++    }
++    Store* pStore = storeForNewList();
++    if (!pStore) {
++        return;
++    }
++    const QString name = playlistDao.getPlaylistName(playlistId);
++    m_playlists.insert(playlistId, ListRef{pStore->mountPoint, uniqueFile(pStore, false, name)});
++    pStore->order.append(qMakePair(false, playlistId));
++    QSqlQuery query(m_pTrackCollectionManager->internalCollection()->database());
++    query.prepare(QStringLiteral(
++            "INSERT OR REPLACE INTO %1 (playlist_id, mount_point, sort_order) "
++            "VALUES (:id, :mount_point, :sort_order)")
++                    .arg(kPlaylistTable));
++    query.bindValue(QStringLiteral(":id"), playlistId);
++    query.bindValue(QStringLiteral(":mount_point"), pStore->mountPoint);
++    query.bindValue(QStringLiteral(":sort_order"),
++            pStore->sortOrderBase + kNewListSortOffset + pStore->newLists++);
++    query.exec();
++    qInfo() << "Drive store: playlist" << name << "belongs to" << pStore->mountPoint;
++    listChanged(false, playlistId);
++}
++
++void DriveStore::slotPlaylistDeleted(int playlistId) {
++    if (m_busy) {
++        return;
++    }
++    const auto it = m_playlists.constFind(playlistId);
++    if (it == m_playlists.constEnd()) {
++        return;
++    }
++    Store* pStore = storeOf(it->mountPoint);
++    if (pStore && pStore->writable) {
++        enqueueRemove(QDir(storePath(it->mountPoint)).filePath(it->file));
++        pStore->order.removeAll(qMakePair(false, playlistId));
++        pStore->listsDirty = true;
++        scheduleWrite();
++    }
++    m_playlists.erase(it);
++}
++
++void DriveStore::slotPlaylistRenamed(int playlistId, const QString& name) {
++    if (m_busy) {
++        return;
++    }
++    auto it = m_playlists.find(playlistId);
++    if (it == m_playlists.end()) {
++        return;
++    }
++    Store* pStore = storeOf(it->mountPoint);
++    if (!pStore || !pStore->writable) {
++        return;
++    }
++    enqueueRemove(QDir(storePath(it->mountPoint)).filePath(it->file));
++    it->file = QString(); // not counted as used
++    it->file = uniqueFile(pStore, false, name);
++    listChanged(false, playlistId);
++}
++
++void DriveStore::slotPlaylistChanged(const QSet<int>& playlistIds) {
++    for (const int playlistId : playlistIds) {
++        if (m_playlists.contains(playlistId)) {
++            listChanged(false, playlistId);
++        }
++    }
++}
++
++void DriveStore::slotCrateInserted(CrateId crateId) {
++    if (m_busy || m_crates.contains(crateId)) {
++        return;
++    }
++    Store* pStore = storeForNewList();
++    if (!pStore) {
++        return;
++    }
++    const QString name = listName(true, crateInt(crateId));
++    m_crates.insert(crateId, ListRef{pStore->mountPoint, uniqueFile(pStore, true, name)});
++    pStore->order.append(qMakePair(true, crateInt(crateId)));
++    QSqlQuery query(m_pTrackCollectionManager->internalCollection()->database());
++    query.prepare(QStringLiteral(
++            "INSERT OR REPLACE INTO %1 (crate_id, mount_point) VALUES (:id, :mount_point)")
++                    .arg(kCrateTable));
++    query.bindValue(QStringLiteral(":id"), crateId.toVariant());
++    query.bindValue(QStringLiteral(":mount_point"), pStore->mountPoint);
++    query.exec();
++    qInfo() << "Drive store: crate" << name << "belongs to" << pStore->mountPoint;
++    listChanged(true, crateInt(crateId));
++}
++
++void DriveStore::slotCrateChanged(CrateId crateId) {
++    if (m_busy) {
++        return;
++    }
++    auto it = m_crates.find(crateId);
++    if (it == m_crates.end()) {
++        return;
++    }
++    Store* pStore = storeOf(it->mountPoint);
++    if (!pStore || !pStore->writable) {
++        return;
++    }
++    // Renamed?
++    const QString name = listName(true, crateInt(crateId));
++    if (QFileInfo(it->file).completeBaseName() != safeFileName(name) &&
++            !QFileInfo(it->file).completeBaseName().startsWith(safeFileName(name) + " (")) {
++        enqueueRemove(QDir(storePath(it->mountPoint)).filePath(it->file));
++        it->file = QString();
++        it->file = uniqueFile(pStore, true, name);
++    }
++    listChanged(true, crateInt(crateId));
++}
++
++void DriveStore::slotCrateDeleted(CrateId crateId) {
++    if (m_busy) {
++        return;
++    }
++    const auto it = m_crates.constFind(crateId);
++    if (it == m_crates.constEnd()) {
++        return;
++    }
++    Store* pStore = storeOf(it->mountPoint);
++    if (pStore && pStore->writable) {
++        enqueueRemove(QDir(storePath(it->mountPoint)).filePath(it->file));
++        pStore->order.removeAll(qMakePair(true, crateInt(crateId)));
++        pStore->listsDirty = true;
++        scheduleWrite();
++    }
++    QSqlQuery query(m_pTrackCollectionManager->internalCollection()->database());
++    query.prepare(QStringLiteral("DELETE FROM %1 WHERE crate_id = :id").arg(kCrateTable));
++    query.bindValue(QStringLiteral(":id"), crateId.toVariant());
++    query.exec();
++    m_crates.erase(it);
++}
++
++void DriveStore::listChanged(bool crate, int id) {
++    const ListRef ref = crate ? m_crates.value(CrateId(QVariant(id))) : m_playlists.value(id);
++    Store* pStore = storeOf(ref.mountPoint);
++    if (!pStore || !pStore->writable) {
++        return;
++    }
++    pStore->listsDirty = true;
++    scheduleWrite();
++}
++
++QString DriveStore::listName(bool crate, int id) const {
++    if (!crate) {
++        return m_pTrackCollectionManager->internalCollection()->getPlaylistDAO().getPlaylistName(id);
++    }
++    QSqlQuery query(m_pTrackCollectionManager->internalCollection()->database());
++    query.prepare(QStringLiteral("SELECT name FROM crates WHERE id = :id"));
++    query.bindValue(QStringLiteral(":id"), id);
++    if (query.exec() && query.next()) {
++        return query.value(0).toString();
++    }
++    return QString();
++}
++
++QStringList DriveStore::listLocations(bool crate, int id) const {
++    QStringList locations;
++    QSqlQuery query(m_pTrackCollectionManager->internalCollection()->database());
++    query.setForwardOnly(true);
++    if (crate) {
++        query.prepare(QStringLiteral(
++                "SELECT track_locations.location FROM crate_tracks "
++                "INNER JOIN library ON crate_tracks.track_id = library.id "
++                "INNER JOIN track_locations ON library.location = track_locations.id "
++                "WHERE crate_tracks.crate_id = :id "
++                "ORDER BY library.artist, library.title"));
++    } else {
++        query.prepare(QStringLiteral(
++                "SELECT track_locations.location FROM PlaylistTracks "
++                "INNER JOIN library ON PlaylistTracks.track_id = library.id "
++                "INNER JOIN track_locations ON library.location = track_locations.id "
++                "WHERE PlaylistTracks.playlist_id = :id "
++                "ORDER BY PlaylistTracks.position"));
++    }
++    query.bindValue(QStringLiteral(":id"), id);
++    if (!query.exec()) {
++        LOG_FAILED_QUERY(query);
++        return locations;
++    }
++    while (query.next()) {
++        locations.append(query.value(0).toString());
++    }
++    return locations;
++}
++
++void DriveStore::writeListsNow(Store* pStore) {
++    if (!pStore->writable || !pStore->listsDirty) {
++        return;
++    }
++    pStore->listsDirty = false;
++    const QDir store(storePath(pStore->mountPoint));
++    QJsonArray lists;
++    for (const auto& entry : std::as_const(pStore->order)) {
++        const bool crate = entry.first;
++        const ListRef ref = crate ? m_crates.value(CrateId(QVariant(entry.second)))
++                                  : m_playlists.value(entry.second);
++        if (ref.file.isEmpty()) {
++            continue;
++        }
++        QJsonObject list;
++        list[QStringLiteral("kind")] = crate ? QStringLiteral("crate") : QStringLiteral("playlist");
++        list[QStringLiteral("name")] = listName(crate, entry.second);
++        list[QStringLiteral("file")] = ref.file;
++        lists.append(list);
++        const QString path = store.filePath(ref.file);
++        enqueueWrite(path, listFileContent(path, listLocations(crate, entry.second)));
++    }
++    QJsonObject index;
++    index[QStringLiteral("format")] = QStringLiteral("DecksmithOS drive library");
++    index[QStringLiteral("version")] = kFormatVersion;
++    index[QStringLiteral("lists")] = lists;
++    enqueueWrite(store.filePath(kIndexFile), QJsonDocument(index).toJson());
++}
++
++void DriveStore::slotTracksChanged(const QSet<TrackId>& trackIds) {
++    if (m_stores.isEmpty() || trackIds.isEmpty()) {
++        return;
++    }
++    bool anyWritable = false;
++    for (const auto& pStore : std::as_const(m_stores)) {
++        anyWritable = anyWritable || pStore->writable;
++    }
++    if (!anyWritable) {
++        return;
++    }
++    QStringList ids;
++    for (const TrackId& trackId : trackIds) {
++        ids.append(trackId.toString());
++    }
++    QSqlQuery query(m_pTrackCollectionManager->internalCollection()->database());
++    query.setForwardOnly(true);
++    if (!query.exec(QStringLiteral(
++                "SELECT library.id, track_locations.location FROM library "
++                "INNER JOIN track_locations ON library.location = track_locations.id "
++                "WHERE library.id IN (%1)")
++                            .arg(ids.join(QChar(','))))) {
++        LOG_FAILED_QUERY(query);
++        return;
++    }
++    while (query.next()) {
++        const QString location = query.value(1).toString();
++        for (const auto& pStore : std::as_const(m_stores)) {
++            if (pStore->writable && !relativeToDrive(pStore->mountPoint, location).isEmpty()) {
++                m_pendingTracks.insert(TrackId(query.value(0)));
++                break;
++            }
++        }
++    }
++    if (!m_pendingTracks.isEmpty()) {
++        scheduleWrite();
++    }
++}
++
++void DriveStore::scheduleWrite() {
++    if (!m_writeTimer.isActive()) {
++        m_writeTimer.start(kWriteDelayMillis);
++    }
++}
++
++void DriveStore::slotWritePending() {
++    writeTracksNow(kWriteBudgetMillis);
++    for (const auto& pStore : std::as_const(m_stores)) {
++        writeListsNow(pStore.get());
++    }
++    if (!m_pendingTracks.isEmpty()) {
++        m_writeTimer.start(50);
++    }
++}
++
++void DriveStore::writeTracksNow(int maxMillis) {
++    QElapsedTimer timer;
++    timer.start();
++    while (!m_pendingTracks.isEmpty() && (maxMillis < 0 || timer.elapsed() < maxMillis)) {
++        const TrackId trackId = *m_pendingTracks.begin();
++        m_pendingTracks.erase(m_pendingTracks.begin());
++        const TrackPointer pTrack = m_pTrackCollectionManager->getTrackById(trackId);
++        if (!pTrack) {
++            continue;
++        }
++        const QString location = pTrack->getLocation();
++        for (const auto& pStore : std::as_const(m_stores)) {
++            const QString fileName = analysisFileName(pStore->mountPoint, location);
++            if (!pStore->writable || fileName.isEmpty()) {
++                continue;
++            }
++            const QJsonObject object = trackToJson(pTrack, pStore->mountPoint);
++            enqueueWrite(QDir(storePath(pStore->mountPoint))
++                                 .filePath(kAnalysisDirectory + QChar('/') + fileName),
++                    QJsonDocument(object).toJson(QJsonDocument::Compact));
++            break;
++        }
++    }
++}
++
++QJsonObject DriveStore::trackToJson(const TrackPointer& pTrack, const QString& mountPoint) {
++    QJsonObject object;
++    object[QStringLiteral("format")] = QStringLiteral("DecksmithOS track analysis");
++    object[QStringLiteral("version")] = kFormatVersion;
++    object[QStringLiteral("path")] = relativeToDrive(mountPoint, pTrack->getLocation());
++    object[QStringLiteral("artist")] = pTrack->getArtist();
++    object[QStringLiteral("title")] = pTrack->getTitle();
++    object[QStringLiteral("sampleRate")] = static_cast<int>(pTrack->getSampleRate().value());
++    object[QStringLiteral("bpm")] = pTrack->getBpm();
++    object[QStringLiteral("bpmLocked")] = pTrack->isBpmLocked();
++    if (const auto pBeats = pTrack->getBeats()) {
++        QJsonObject beats;
++        beats[QStringLiteral("version")] = pBeats->getVersion();
++        beats[QStringLiteral("subVersion")] = pBeats->getSubVersion();
++        beats[QStringLiteral("data")] = base64(pBeats->toByteArray());
++        object[QStringLiteral("beats")] = beats;
++    }
++    const Keys keys = pTrack->getKeys();
++    if (keys.getGlobalKey() != mixxx::track::io::key::INVALID) {
++        QJsonObject keysObject;
++        keysObject[QStringLiteral("version")] = keys.getVersion();
++        keysObject[QStringLiteral("subVersion")] = keys.getSubVersion();
++        keysObject[QStringLiteral("data")] = base64(keys.toByteArray());
++        keysObject[QStringLiteral("text")] = pTrack->getKeyText();
++        object[QStringLiteral("keys")] = keysObject;
++    }
++    object[QStringLiteral("cues")] = cuesToJson(pTrack);
++    const mixxx::ReplayGain replayGain = pTrack->getReplayGain();
++    QJsonObject gain;
++    gain[QStringLiteral("ratio")] = replayGain.getRatio();
++    gain[QStringLiteral("peak")] = static_cast<double>(replayGain.getPeak());
++    object[QStringLiteral("replayGain")] = gain;
++    const auto color = pTrack->getColor();
++    object[QStringLiteral("color")] =
++            color ? QJsonValue(static_cast<qint64>(*color)) : QJsonValue();
++    object[QStringLiteral("rating")] = pTrack->getRating();
++    if (const auto pStructure = pTrack->getStructure()) {
++        object[QStringLiteral("structure")] = base64(pStructure->toByteArray());
++    }
++    if (pTrack->getId().isValid()) {
++        QJsonArray waveforms;
++        AnalysisDao& analysisDao =
++                m_pTrackCollectionManager->internalCollection()->getAnalysisDAO();
++        for (const auto type : {AnalysisDao::TYPE_WAVEFORM, AnalysisDao::TYPE_WAVESUMMARY}) {
++            const QList<AnalysisDao::AnalysisInfo> analyses =
++                    analysisDao.getAnalysesForTrackByType(pTrack->getId(), type);
++            for (const auto& analysis : analyses) {
++                QJsonObject waveform;
++                waveform[QStringLiteral("type")] = static_cast<int>(analysis.type);
++                waveform[QStringLiteral("version")] = analysis.version;
++                waveform[QStringLiteral("description")] = analysis.description;
++                waveform[QStringLiteral("data")] = base64(qCompress(analysis.data, 9));
++                waveforms.append(waveform);
++            }
++        }
++        object[QStringLiteral("waveforms")] = waveforms;
++    }
++    return object;
++}
++
++void DriveStore::applyAnalysis(const TrackPointer& pTrack, const QJsonObject& object) {
++    if (!pTrack || object.isEmpty()) {
++        return;
++    }
++    const auto sampleRate = mixxx::audio::SampleRate(
++            object.value(QStringLiteral("sampleRate")).toInt());
++    const QJsonObject beatsObject = object.value(QStringLiteral("beats")).toObject();
++    if (!beatsObject.isEmpty() && sampleRate.isValid()) {
++        const auto pBeats = mixxx::Beats::fromByteArray(sampleRate,
++                beatsObject.value(QStringLiteral("version")).toString(),
++                beatsObject.value(QStringLiteral("subVersion")).toString(),
++                fromBase64(beatsObject.value(QStringLiteral("data"))));
++        const auto pOldBeats = pTrack->getBeats();
++        if (pBeats && (!pOldBeats || pOldBeats->toByteArray() != pBeats->toByteArray())) {
++            pTrack->setBpmLocked(false);
++            pTrack->trySetBeats(pBeats);
++        }
++    }
++    const bool bpmLocked = object.value(QStringLiteral("bpmLocked")).toBool();
++    if (pTrack->isBpmLocked() != bpmLocked) {
++        pTrack->setBpmLocked(bpmLocked);
++    }
++
++    const QJsonObject keysObject = object.value(QStringLiteral("keys")).toObject();
++    if (!keysObject.isEmpty()) {
++        QByteArray data = fromBase64(keysObject.value(QStringLiteral("data")));
++        const Keys keys = KeyFactory::loadKeysFromByteArray(
++                keysObject.value(QStringLiteral("version")).toString(),
++                keysObject.value(QStringLiteral("subVersion")).toString(),
++                &data);
++        if (keys.getGlobalKey() != mixxx::track::io::key::INVALID &&
++                keys.toByteArray() != pTrack->getKeys().toByteArray()) {
++            pTrack->setKeys(keys);
++        }
++    }
++
++    const QJsonArray cues = object.value(QStringLiteral("cues")).toArray();
++    if (cues != cuesToJson(pTrack)) {
++        for (const auto type : {mixxx::CueType::HotCue,
++                     mixxx::CueType::Loop,
++                     mixxx::CueType::Jump,
++                     mixxx::CueType::Intro,
++                     mixxx::CueType::Outro,
++                     mixxx::CueType::N60dBSound}) {
++            pTrack->removeCuesOfType(type);
++        }
++        for (const QJsonValue& value : cues) {
++            const QJsonObject cue = value.toObject();
++            const auto type = static_cast<mixxx::CueType>(cue.value(QStringLiteral("type")).toInt());
++            const QJsonValue positionValue = cue.value(QStringLiteral("position"));
++            const auto start = positionValue.isDouble()
++                    ? mixxx::audio::FramePos(positionValue.toDouble())
++                    : mixxx::audio::FramePos();
++            if (type == mixxx::CueType::MainCue) {
++                pTrack->setMainCuePosition(start);
++                continue;
++            }
++            const double length = cue.value(QStringLiteral("length")).toDouble();
++            const auto end = start.isValid() && length != 0
++                    ? mixxx::audio::FramePos(start.value() + length)
++                    : mixxx::audio::FramePos();
++            const auto color = mixxx::RgbColor(static_cast<mixxx::RgbColor::code_t>(
++                    cue.value(QStringLiteral("color")).toInteger()));
++            CuePointer pCue = pTrack->createAndAddCue(
++                    type, cue.value(QStringLiteral("hotCue")).toInt(-1), start, end, color);
++            pCue->setLabel(cue.value(QStringLiteral("label")).toString());
++        }
++    }
++
++    const QJsonObject gain = object.value(QStringLiteral("replayGain")).toObject();
++    const mixxx::ReplayGain replayGain(gain.value(QStringLiteral("ratio")).toDouble(),
++            static_cast<CSAMPLE>(gain.value(QStringLiteral("peak")).toDouble()));
++    if (replayGain.hasRatio() && !(replayGain == pTrack->getReplayGain())) {
++        pTrack->setReplayGain(replayGain);
++    }
++    const QJsonValue colorValue = object.value(QStringLiteral("color"));
++    const auto color = colorValue.isDouble()
++            ? mixxx::RgbColor::optional(static_cast<mixxx::RgbColor::code_t>(colorValue.toInteger()))
++            : mixxx::RgbColor::nullopt();
++    if (pTrack->getColor() != color) {
++        pTrack->setColor(color);
++    }
++    const int rating = object.value(QStringLiteral("rating")).toInt();
++    if (pTrack->getRating() != rating) {
++        pTrack->setRating(rating);
++    }
++
++    TrackCollection* pCollection = m_pTrackCollectionManager->internalCollection();
++    const QByteArray structureData = fromBase64(object.value(QStringLiteral("structure")));
++    if (!structureData.isEmpty()) {
++        const auto pStructure = mixxx::TrackStructure::fromByteArray(structureData);
++        const auto pOldStructure = pTrack->getStructure();
++        if (pStructure &&
++                (!pOldStructure || pOldStructure->toByteArray() != pStructure->toByteArray())) {
++            pTrack->setStructure(pStructure);
++            if (pTrack->getId().isValid()) {
++                pCollection->getAnalysisDAO().saveTrackStructure(pTrack->getId(), pStructure);
++            }
++        }
++    }
++
++    if (pTrack->getId().isValid()) {
++        AnalysisDao& analysisDao = pCollection->getAnalysisDAO();
++        const QJsonArray waveforms = object.value(QStringLiteral("waveforms")).toArray();
++        for (const QJsonValue& value : waveforms) {
++            const QJsonObject waveform = value.toObject();
++            const auto type = static_cast<AnalysisDao::AnalysisType>(
++                    waveform.value(QStringLiteral("type")).toInt());
++            if (type != AnalysisDao::TYPE_WAVEFORM && type != AnalysisDao::TYPE_WAVESUMMARY) {
++                continue;
++            }
++            const QString version = waveform.value(QStringLiteral("version")).toString();
++            bool present = false;
++            const QList<AnalysisDao::AnalysisInfo> existing =
++                    analysisDao.getAnalysesForTrackByType(pTrack->getId(), type);
++            for (const auto& analysis : existing) {
++                present = present || analysis.version == version;
++            }
++            if (present) {
++                continue;
++            }
++            AnalysisDao::AnalysisInfo info;
++            info.trackId = pTrack->getId();
++            info.type = type;
++            info.version = version;
++            info.description = waveform.value(QStringLiteral("description")).toString();
++            info.data = qUncompress(fromBase64(waveform.value(QStringLiteral("data"))));
++            if (!info.data.isEmpty()) {
++                for (const auto& analysis : existing) {
++                    analysisDao.deleteAnalysis(analysis.analysisId);
++                }
++                analysisDao.saveAnalysis(&info);
++            }
++        }
++    }
++}
++
++void DriveStore::enqueueWrite(const QString& path, const QByteArray& data) {
++    m_writer.start([path, data]() {
++        QThread::currentThread()->setPriority(QThread::LowestPriority);
++        writeFileAtomically(path, data);
++    });
++}
++
++void DriveStore::enqueueRemove(const QString& path) {
++    m_writer.start([path]() {
++        QFile::remove(path);
++    });
++}
++
++} // namespace usbimport
++} // namespace mixxx
+diff --git a/src/library/usbimport/drivestore.h b/src/library/usbimport/drivestore.h
+new file mode 100644
+index 00000000..7ba5698f
+--- /dev/null
++++ b/src/library/usbimport/drivestore.h
+@@ -0,0 +1,155 @@
++#pragma once
++
++// DecksmithOS: the DJ's own library data kept on a USB drive, in a folder
++// DECKSMITHOS/ at the root of the drive (part of the USB import,
++// DECKSMITHOS_USB_IMPORT).
++//
++// A drive with this folder is mounted read-write by the system (DecksmithOS:
++// decksmithos-usb-mount; the folder is created from the system menu or by
++// hand). It holds:
++//  - Analysis/<sha1 of the path relative to the drive>.json: the analysis and
++//    the DJ's edits of a track of the drive (beat grid, keys, cues and hot
++//    cues, intro/outro, track structure, replay gain, color, rating,
++//    waveforms). Written whenever the library saves such a track; applied
++//    when the drive appears, and it wins over the rekordbox export.
++//  - Playlists/*.m3u8 and Crates/*.m3u8: the playlists and crates created
++//    while the drive is connected (and those read from the drive), as M3U8
++//    with paths relative to the file for the tracks of the drive and
++//    absolute paths for others. Mixxx, rekordbox, Serato and most players
++//    can import them.
++//  - index.json: the lists in their order, with their kind and name.
++// The lists of a drive are in the library while the drive is connected
++// (listed first, like the rekordbox playlists) and deleted when it is
++// removed. Files are written under a temporary name, synced and renamed;
++// audio files are never touched. flush() writes everything pending (EJECT).
++
++#include <QHash>
++#include <QJsonObject>
++#include <QList>
++#include <QObject>
++#include <QSet>
++#include <QString>
++#include <QStringList>
++#include <QThreadPool>
++#include <QTimer>
++#include <memory>
++
++#include "library/trackset/crate/crateid.h"
++
++#include "track/track_decl.h"
++#include "track/trackid.h"
++
++class TrackCollectionManager;
++
++namespace mixxx {
++namespace usbimport {
++
++extern const QString kStoreDirectory;
++
++/// One list of DECKSMITHOS/index.json (or a list file without an index)
++struct StoreList {
++    bool crate = false;
++    QString name;
++    /// Path relative to DECKSMITHOS/
++    QString file;
++    /// Absolute track locations, in list order
++    QStringList locations;
++};
++
++/// What is read from DECKSMITHOS/ in the worker thread when a drive appears
++struct StoreIndex {
++    bool present = false;
++    bool writable = false;
++    QList<StoreList> lists;
++    /// File names in Analysis/ (sha1 + ".json")
++    QSet<QString> analysisFiles;
++};
++
++/// The file name in Analysis/ for a track of a drive
++QString analysisFileName(const QString& mountPoint, const QString& location);
++/// True if a file system that is mounted at `mountPoint` has DECKSMITHOS/
++bool hasStore(const QString& mountPoint);
++/// Reads DECKSMITHOS/ (worker thread)
++StoreIndex readStoreIndex(const QString& mountPoint);
++/// Reads the analysis file of a track (any thread); empty if none
++QJsonObject readAnalysisFile(const QString& mountPoint, const QString& location);
++
++class DriveStore : public QObject {
++    Q_OBJECT
++  public:
++    DriveStore(QObject* parent, TrackCollectionManager* pTrackCollectionManager);
++    ~DriveStore() override;
++
++    /// Writes everything pending for a drive and waits for it (GUI thread;
++    /// before EJECT). No-op without an instance.
++    static void flush(const QString& mountPoint);
++
++    /// A drive with DECKSMITHOS/ is present (or has become writable)
++    void storeAppeared(const QString& mountPoint, bool writable);
++    /// The drive is gone or has no DECKSMITHOS/ any more: its lists are
++    /// deleted from the library
++    void storeRemoved(const QString& mountPoint);
++    bool isStore(const QString& mountPoint) const;
++
++    /// Creates the lists read from the drive (playlists are recorded in
++    /// kPlaylistTable with `sortOrderBase` + list index; crates in the
++    /// crate table). `trackIds`: library ids of the drive's tracks.
++    /// Returns the ids of the playlists created.
++    QSet<int> importLists(const QString& mountPoint,
++            const QList<StoreList>& lists,
++            int sortOrderBase);
++
++    /// Applies an analysis file to a track (GUI thread)
++    void applyAnalysis(const TrackPointer& pTrack, const QJsonObject& analysis);
++
++    /// Deletes crates of drives left over from an earlier session
++    void deleteStaleCrates();
++
++  private slots:
++    void slotTracksChanged(const QSet<TrackId>& trackIds);
++    void slotPlaylistAdded(int playlistId);
++    void slotPlaylistDeleted(int playlistId);
++    void slotPlaylistChanged(const QSet<int>& playlistIds);
++    void slotPlaylistRenamed(int playlistId, const QString& name);
++    void slotCrateInserted(CrateId crateId);
++    void slotCrateChanged(CrateId crateId);
++    void slotCrateDeleted(CrateId crateId);
++    void slotWritePending();
++
++  private:
++    struct Store;
++    struct ListRef {
++        QString mountPoint;
++        QString file;
++    };
++
++    Store* storeForNewList();
++    Store* storeOf(const QString& mountPoint) const;
++    QString uniqueFile(Store* pStore, bool crate, const QString& name) const;
++    void listChanged(bool crate, int id);
++    void writeListsNow(Store* pStore);
++    void writeTracksNow(int maxMillis);
++    QJsonObject trackToJson(const TrackPointer& pTrack, const QString& mountPoint);
++    QStringList listLocations(bool crate, int id) const;
++    QString listName(bool crate, int id) const;
++    void enqueueWrite(const QString& path, const QByteArray& data);
++    void enqueueRemove(const QString& path);
++    void scheduleWrite();
++
++    static DriveStore* s_pInstance;
++
++    TrackCollectionManager* const m_pTrackCollectionManager;
++    QList<std::shared_ptr<Store>> m_stores;
++    /// Playlists and crates of drives: id -> drive and file
++    QHash<int, ListRef> m_playlists;
++    QHash<CrateId, ListRef> m_crates;
++    /// Tracks of drives to write, by id
++    QSet<TrackId> m_pendingTracks;
++    QTimer m_writeTimer;
++    QThreadPool m_writer;
++    /// Set while lists are created or deleted by the store itself
++    bool m_busy;
++};
++
++} // namespace usbimport
++} // namespace mixxx
+diff --git a/src/library/usbimport/usblibraryimporter.cpp b/src/library/usbimport/usblibraryimporter.cpp
+index 4c109e52..1fe63ff8 100644
+--- a/src/library/usbimport/usblibraryimporter.cpp
++++ b/src/library/usbimport/usblibraryimporter.cpp
+@@ -5,8 +5,10 @@
+ #include <QFile>
+ #include <QFileInfo>
+ #include <QMutex>
++#include <QJsonObject>
+ #include <QSignalBlocker>
+ #include <QSqlQuery>
++#include <QStorageInfo>
+ #include <QThread>
+ #include <QWaitCondition>
+ #include <QtDebug>
+@@ -150,6 +152,13 @@ std::shared_ptr<const DriveIndex> readDriveIndex(const Drive& drive) {
+     auto pIndex = std::make_shared<DriveIndex>();
+     readRekordbox(drive, pIndex.get());
+     readSerato(drive, pIndex.get());
++    pIndex->store = readStoreIndex(drive.mountPoint);
++    if (pIndex->store.present) {
++        qInfo() << "USB import:" << drive.mountPoint << "has DECKSMITHOS/ ("
++                << (pIndex->store.writable ? "writable" : "read-only") << ") with"
++                << pIndex->store.analysisFiles.size() << "analysis files and"
++                << pIndex->store.lists.size() << "lists";
++    }
+     return pIndex;
+ }
+ 
+@@ -210,6 +219,58 @@ struct UsbLibraryImporter::AnalysisJob {
+     }
+ };
+ 
++/// Reads the DECKSMITHOS/ analysis files of the tracks of a drive in a
++/// worker thread, like AnalysisJob
++struct UsbLibraryImporter::StoreJob {
++    struct Result {
++        QString key;
++        QJsonObject analysis;
++    };
++
++    std::atomic<bool> canceled{false};
++    std::atomic<bool> finished{false};
++    QMutex mutex;
++    QWaitCondition notFull;
++    std::deque<Result> results;
++
++    void run(const QString& mountPoint, const QList<QPair<QString, QString>>& tracks) {
++        QThread::currentThread()->setPriority(QThread::LowPriority);
++        for (const auto& [key, location] : tracks) {
++            if (canceled) {
++                break;
++            }
++            Result result;
++            result.key = key;
++            result.analysis = readAnalysisFile(mountPoint, location);
++            if (result.analysis.isEmpty()) {
++                continue;
++            }
++            QMutexLocker lock(&mutex);
++            while (results.size() >= kMaxQueuedResults && !canceled) {
++                notFull.wait(&mutex, 200);
++            }
++            results.push_back(std::move(result));
++        }
++        finished = true;
++    }
++
++    bool takeResult(Result* pResult) {
++        QMutexLocker lock(&mutex);
++        if (results.empty()) {
++            return false;
++        }
++        *pResult = std::move(results.front());
++        results.pop_front();
++        notFull.wakeAll();
++        return true;
++    }
++
++    bool isDone() {
++        QMutexLocker lock(&mutex);
++        return finished && results.empty();
++    }
++};
++
+ struct UsbLibraryImporter::DriveState {
+     enum class Scan {
+         WaitForStart,
+@@ -231,6 +292,8 @@ struct UsbLibraryImporter::DriveState {
+         trackIds.clear();
+         nextPlaylist = -1;
+         appliedCount = 0;
++        storeListsPending = false;
++        storeAppliedCount = 0;
+     }
+ 
+     const Drive drive;
+@@ -253,6 +316,10 @@ struct UsbLibraryImporter::DriveState {
+     int nextPlaylist = -1;
+     int appliedCount = 0;
+     std::shared_ptr<AnalysisJob> pJob;
++    /// DECKSMITHOS/: lists still to import, analysis files being applied
++    bool storeListsPending = false;
++    int storeAppliedCount = 0;
++    std::shared_ptr<StoreJob> pStoreJob;
+ };
+ 
+ UsbLibraryImporter* UsbLibraryImporter::s_pInstance = nullptr;
+@@ -286,7 +353,8 @@ UsbLibraryImporter::UsbLibraryImporter(
+         : QObject(parent),
+           m_pTrackCollectionManager(pTrackCollectionManager),
+           m_watcher(parseDriveList(qEnvironmentVariable(kEnvVar)), isMountedFilesystem),
+-          m_libraryScanRunning(false) {
++          m_libraryScanRunning(false),
++          m_pStore(new DriveStore(this, pTrackCollectionManager)) {
+     for (const auto& drive : m_watcher.drives()) {
+         m_states.append(std::make_shared<DriveState>(drive));
+     }
+@@ -333,6 +401,7 @@ void UsbLibraryImporter::start() {
+     qInfo() << "USB import enabled for" << mountPoints;
+ 
+     ensureSchema(database());
++    m_pStore->deleteStaleCrates();
+     // Forget playlists that were deleted by the user
+     QSqlQuery query(database());
+     if (!query.exec(QStringLiteral(
+@@ -374,6 +443,7 @@ void UsbLibraryImporter::slotPoll() {
+     }
+ 
+     for (int i = 0; i < m_states.size(); ++i) {
++        checkStore(i);
+         DriveState* pState = m_states[i].get();
+         if (pState->present && pState->scan == DriveState::Scan::WaitForStart &&
+                 !m_libraryScanRunning &&
+@@ -432,6 +502,7 @@ void UsbLibraryImporter::driveRemoved(int driveIndex) {
+     pState->reset();
+     pState->present = false;
+     pState->generation++;
++    m_pStore->storeRemoved(pState->drive.mountPoint);
+ 
+     const QSet<int> removed = deletePlaylists(pState->drive.mountPoint);
+     if (!removed.isEmpty()) {
+@@ -448,6 +519,9 @@ void UsbLibraryImporter::driveIndexRead(int driveIndex,
+         return; // the drive was removed in the meantime
+     }
+     pState->pIndex = std::move(pIndex);
++    if (pState->pIndex->store.present) {
++        m_pStore->storeAppeared(pState->drive.mountPoint, pState->pIndex->store.writable);
++    }
+ 
+     // Tracks that were loaded before the index was available
+     const QHash<QString, QString> loaded = pState->loadedBeforeIndex;
+@@ -527,11 +601,13 @@ void UsbLibraryImporter::maybeStartImport(int driveIndex) {
+     const QString prefix =
+             sqlLikeEscaped(pState->drive.mountPoint + QChar('/')) + QChar('%');
+     query.bindValue(QStringLiteral(":prefix"), prefix);
++    QHash<QString, QString> locationsByKey;
+     if (query.exec()) {
+         while (query.next()) {
+             const QString location = query.value(1).toString();
+             if (isOnDrive(location, pState->drive.mountPoint)) {
+                 pState->trackIds.insert(locationKey(location), TrackId(query.value(0)));
++                locationsByKey.insert(locationKey(location), location);
+             }
+         }
+     } else {
+@@ -543,10 +619,29 @@ void UsbLibraryImporter::maybeStartImport(int driveIndex) {
+         pState->nextPlaylist = 0;
+     }
+ 
++    // DECKSMITHOS/ wins over rekordbox: tracks with an analysis file there
++    // get that one
++    QList<QPair<QString, QString>> storeTracks;
++    QSet<QString> storeKeys;
++    if (index.store.present && !index.store.analysisFiles.isEmpty()) {
++        for (auto it = locationsByKey.constBegin(); it != locationsByKey.constEnd(); ++it) {
++            const QString& location = it.value();
++            if (index.store.analysisFiles.contains(
++                        analysisFileName(pState->drive.mountPoint, location))) {
++                storeKeys.insert(it.key());
++                if (!pState->applied.contains(it.key())) {
++                    storeTracks.append(qMakePair(it.key(), location));
++                }
++            }
++        }
++    }
++    pState->storeListsPending = index.store.present && !index.store.lists.isEmpty();
++
+     QList<rekordbox::ExportTrack> tracks;
+     for (const auto& track : index.rekordboxTrackList) {
+         const QString key = locationKey(track.location);
+-        if (pState->trackIds.contains(key) && !pState->applied.contains(key)) {
++        if (pState->trackIds.contains(key) && !pState->applied.contains(key) &&
++                !storeKeys.contains(key)) {
+             tracks.append(track);
+         }
+     }
+@@ -562,6 +657,16 @@ void UsbLibraryImporter::maybeStartImport(int driveIndex) {
+             pJob->run(tracks);
+         });
+     }
++    if (!storeTracks.isEmpty()) {
++        qInfo() << "USB import: applying the DECKSMITHOS/ analysis of" << storeTracks.size()
++                << "tracks of" << pState->drive.mountPoint;
++        auto pStoreJob = std::make_shared<StoreJob>();
++        pState->pStoreJob = pStoreJob;
++        const QString mountPoint = pState->drive.mountPoint;
++        m_threadPool.start([pStoreJob, mountPoint, storeTracks]() {
++            pStoreJob->run(mountPoint, storeTracks);
++        });
++    }
+     updateQueueTimer();
+ }
+ 
+@@ -583,8 +688,19 @@ void UsbLibraryImporter::slotProcessQueue() {
+                         << "playlists of" << pState->drive.mountPoint;
+                 emit playlistsChanged(QSet<int>());
+             }
++        } else if (pState->storeListsPending) {
++            // After the rekordbox and Serato lists
++            pState->storeListsPending = false;
++            m_pStore->importLists(pState->drive.mountPoint,
++                    pState->pIndex->store.lists,
++                    i * kSortOrderPerDrive + static_cast<int>(pState->pIndex->playlists.size()));
++            emit playlistsChanged(QSet<int>());
++        }
++        int remaining = kQueueBudgetMillis - static_cast<int>(timer.elapsed());
++        if (remaining > 0) {
++            applyStoreResults(i, remaining);
+         }
+-        const int remaining = kQueueBudgetMillis - static_cast<int>(timer.elapsed());
++        remaining = kQueueBudgetMillis - static_cast<int>(timer.elapsed());
+         if (remaining > 0) {
+             applyAnalysisResults(i, remaining);
+         }
+@@ -671,6 +787,55 @@ void UsbLibraryImporter::applyAnalysisResults(int driveIndex, int maxMillis) {
+     }
+ }
+ 
++void UsbLibraryImporter::applyStoreResults(int driveIndex, int maxMillis) {
++    DriveState* pState = m_states[driveIndex].get();
++    const std::shared_ptr<StoreJob> pJob = pState->pStoreJob;
++    if (!pJob) {
++        return;
++    }
++    QElapsedTimer timer;
++    timer.start();
++    StoreJob::Result result;
++    while (timer.elapsed() < maxMillis && pJob->takeResult(&result)) {
++        if (pState->applied.contains(result.key)) {
++            continue; // loaded into a player meanwhile
++        }
++        pState->applied.insert(result.key);
++        const TrackId trackId = pState->trackIds.value(result.key);
++        const TrackPointer pTrack =
++                trackId.isValid() ? m_pTrackCollectionManager->getTrackById(trackId) : nullptr;
++        if (!pTrack) {
++            continue;
++        }
++        m_pStore->applyAnalysis(pTrack, result.analysis);
++        pState->storeAppliedCount++;
++    }
++    if (pJob->isDone()) {
++        qInfo() << "USB import: applied the DECKSMITHOS/ analysis of"
++                << pState->storeAppliedCount << "tracks of" << pState->drive.mountPoint;
++        pState->pStoreJob.reset();
++    }
++}
++
++void UsbLibraryImporter::checkStore(int driveIndex) {
++    // A drive prepared (DECKSMITHOS/ created) or remounted while present
++    DriveState* pState = m_states[driveIndex].get();
++    if (!pState->present || !pState->pIndex) {
++        return;
++    }
++    const QString& mountPoint = pState->drive.mountPoint;
++    const bool present = hasStore(mountPoint);
++    const bool writable = present && !QStorageInfo(mountPoint).isReadOnly();
++    if (present && (!m_pStore->isStore(mountPoint) ||
++                           writable != pState->pIndex->store.writable)) {
++        auto pIndex = std::make_shared<DriveIndex>(*pState->pIndex);
++        pIndex->store.present = true;
++        pIndex->store.writable = writable;
++        pState->pIndex = pIndex;
++        m_pStore->storeAppeared(mountPoint, writable);
++    }
++}
++
+ void UsbLibraryImporter::applyBeforeLoad(const TrackPointer& pTrack) {
+     const QString location = pTrack->getLocation();
+     for (const auto& pState : std::as_const(m_states)) {
+@@ -696,6 +861,13 @@ void UsbLibraryImporter::applyBeforeLoad(const TrackPointer& pTrack) {
+ void UsbLibraryImporter::applyNow(
+         DriveState* pState, const TrackPointer& pTrack, const QString& key) {
+     pState->applied.insert(key);
++    if (pState->pIndex->store.analysisFiles.contains(
++                analysisFileName(pState->drive.mountPoint, pTrack->getLocation()))) {
++        qInfo() << "USB import: applying DECKSMITHOS/ data before loading"
++                << pTrack->getLocation();
++        m_pStore->applyAnalysis(pTrack, readAnalysisFile(pState->drive.mountPoint, pTrack->getLocation()));
++        return;
++    }
+     const auto it = pState->pIndex->rekordboxTracks.constFind(key);
+     if (it == pState->pIndex->rekordboxTracks.constEnd()) {
+         return; // not in the rekordbox export
+@@ -778,6 +950,11 @@ QSet<int> UsbLibraryImporter::deletePlaylists(const QString& mountPoint) {
+ }
+ 
+ void UsbLibraryImporter::cancelJob(DriveState* pState) {
++    if (pState->pStoreJob) {
++        pState->pStoreJob->canceled = true;
++        pState->pStoreJob->notFull.wakeAll();
++        pState->pStoreJob.reset();
++    }
+     if (!pState->pJob) {
+         return;
+     }
+@@ -790,7 +967,8 @@ void UsbLibraryImporter::updateQueueTimer() {
+     bool hasWork = false;
+     for (const auto& pState : std::as_const(m_states)) {
+         if (pState->present && pState->importStarted &&
+-                (pState->nextPlaylist >= 0 || pState->pJob)) {
++                (pState->nextPlaylist >= 0 || pState->pJob || pState->pStoreJob ||
++                        pState->storeListsPending)) {
+             hasWork = true;
+             break;
+         }
+diff --git a/src/library/usbimport/usblibraryimporter.h b/src/library/usbimport/usblibraryimporter.h
+index dd69614f..3c041841 100644
+--- a/src/library/usbimport/usblibraryimporter.h
++++ b/src/library/usbimport/usblibraryimporter.h
+@@ -28,7 +28,8 @@
+ // are also deleted at startup and when a drive appears, so they never get
+ // stale.
+ //
+-// Nothing is ever written to the drive.
++// Nothing is written to the drive, except into DECKSMITHOS/ (drivestore.h):
++// the DJ's own analysis, playlists and crates, which win over rekordbox.
+ //
+ // The playlists that belong to a drive are recorded in the table
+ // decksmithos_usb_playlists (playlist id, mount point, sort order), which
+@@ -45,6 +46,7 @@
+ #include <memory>
+ 
+ #include "library/rekordbox/rekordboxanalysis.h"
++#include "library/usbimport/drivestore.h"
+ #include "library/usbimport/usbimportutil.h"
+ #include "track/track_decl.h"
+ #include "track/trackid.h"
+@@ -71,6 +73,8 @@ struct DriveIndex {
+     QList<rekordbox::ExportTrack> rekordboxTrackList;
+     /// rekordbox playlists, then Serato crates, in their order
+     QList<DrivePlaylist> playlists;
++    /// DecksmithOS/ of the drive (drivestore.h)
++    StoreIndex store;
+ };
+ 
+ /// Reads a drive (rekordbox export and Serato crates). Runs in a worker
+@@ -110,6 +114,7 @@ class UsbLibraryImporter : public QObject {
+ 
+   private:
+     struct AnalysisJob;
++    struct StoreJob;
+     struct DriveState;
+ 
+     void driveAppeared(int driveIndex);
+@@ -121,6 +126,8 @@ class UsbLibraryImporter : public QObject {
+     void maybeStartImport(int driveIndex);
+     void createPlaylist(int driveIndex, int listIndex);
+     void applyAnalysisResults(int driveIndex, int maxMillis);
++    void applyStoreResults(int driveIndex, int maxMillis);
++    void checkStore(int driveIndex);
+     void applyBeforeLoad(const TrackPointer& pTrack);
+     void applyNow(DriveState* pState, const TrackPointer& pTrack, const QString& key);
+     void applyToTrack(const TrackPointer& pTrack,
+@@ -141,6 +148,7 @@ class UsbLibraryImporter : public QObject {
+     QTimer m_queueTimer;
+     QThreadPool m_threadPool;
+     bool m_libraryScanRunning;
++    DriveStore* m_pStore;
+ };
+ 
+ } // namespace usbimport
+diff --git a/src/mixer/removabledrives.cpp b/src/mixer/removabledrives.cpp
+index d06cf238..7b634c2a 100644
+--- a/src/mixer/removabledrives.cpp
++++ b/src/mixer/removabledrives.cpp
+@@ -6,6 +6,7 @@
+ #include <QtDebug>
+ 
+ #include "control/controlobject.h"
++#include "library/usbimport/drivestore.h"
+ #include "control/controlpushbutton.h"
+ #include "mixer/basetrackplayer.h"
+ #include "mixer/playermanager.h"
+@@ -150,7 +151,11 @@ void RemovableDrives::eject(Drive* pDrive) {
+                 pProcess->deleteLater();
+             });
+     // The players release their files asynchronously: give them a moment
+-    QTimer::singleShot(500, pProcess, [pProcess, this, arguments]() {
++    const QString path = pDrive->path;
++    QTimer::singleShot(500, pProcess, [pProcess, this, arguments, path]() {
++        // DecksmithOS: the drive's DECKSMITHOS/ data written first (the
++        // tracks unloaded above have been saved by now)
++        mixxx::usbimport::DriveStore::flush(path);
+         pProcess->start(m_ejectCommand.first(), arguments);
+     });
+     qInfo() << "Ejecting" << pDrive->path;
+diff --git a/src/test/usbimporttest.cpp b/src/test/usbimporttest.cpp
+index 5c465271..a8f10e3d 100644
+--- a/src/test/usbimporttest.cpp
++++ b/src/test/usbimporttest.cpp
+@@ -1,10 +1,15 @@
+ #include <gtest/gtest.h>
+ 
+ #include <QBuffer>
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QTemporaryDir>
+ #include <QtEndian>
+ 
+ #include "library/rekordbox/rekordboxanalysis.h"
+ #include "library/serato/seratocrate.h"
++#include "library/usbimport/drivestore.h"
+ #include "library/usbimport/usbimportutil.h"
+ #include "test/mixxxtest.h"
+ #include "track/beats.h"
+@@ -356,3 +361,60 @@ TEST_F(UsbImportApplyTest, NoCuesKeepsCues) {
+             m_pTrack, noCues, mixxx::rekordbox::ApplyMode::Replace);
+     EXPECT_EQ(1, hotCues().size());
+ }
++
++namespace {
++void writeTestFile(const QString& path, const QByteArray& data) {
++    QDir().mkpath(QFileInfo(path).absolutePath());
++    QFile file(path);
++    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
++    file.write(data);
++}
++} // namespace
++
++TEST(UsbImportTest, DriveStoreIndex) {
++    QTemporaryDir drive;
++    ASSERT_TRUE(drive.isValid());
++    const QString mountPoint = QDir::cleanPath(drive.path());
++    EXPECT_FALSE(hasStore(mountPoint));
++    EXPECT_FALSE(readStoreIndex(mountPoint).present);
++
++    const QDir store(QDir(mountPoint).filePath(kStoreDirectory));
++    writeTestFile(store.filePath(QStringLiteral("Playlists/Warm up.m3u8")),
++            QByteArrayLiteral("#EXTM3U\n../../A/one.mp3\n/storage/library/two.mp3\n"));
++    writeTestFile(store.filePath(QStringLiteral("Crates/House.m3u8")),
++            QByteArrayLiteral("../../B/three.mp3\r\n"));
++    writeTestFile(store.filePath(QStringLiteral("Playlists/By hand.m3u")),
++            QByteArrayLiteral("..\\..\\C\\four.mp3\n"));
++    writeTestFile(store.filePath(QStringLiteral("index.json")),
++            QByteArrayLiteral("{\"lists\":["
++                              "{\"kind\":\"crate\",\"name\":\"House\",\"file\":\"Crates/House.m3u8\"},"
++                              "{\"kind\":\"playlist\",\"name\":\"Warm up\","
++                              "\"file\":\"Playlists/Warm up.m3u8\"},"
++                              "{\"kind\":\"playlist\",\"name\":\"Gone\",\"file\":\"Playlists/Gone.m3u8\"}]}"));
++    const QString location = mountPoint + QStringLiteral("/A/one.mp3");
++    writeTestFile(store.filePath(QStringLiteral("Analysis/") +
++                          analysisFileName(mountPoint, location)),
++            QByteArrayLiteral("{\"path\":\"A/one.mp3\",\"bpm\":124}"));
++
++    EXPECT_TRUE(hasStore(mountPoint));
++    const StoreIndex index = readStoreIndex(mountPoint);
++    EXPECT_TRUE(index.present);
++    EXPECT_TRUE(index.writable);
++    ASSERT_EQ(3, index.lists.size());
++    // index.json order (a list whose file is missing is skipped), then the
++    // files without an entry
++    EXPECT_TRUE(index.lists[0].crate);
++    EXPECT_EQ(QStringLiteral("House"), index.lists[0].name);
++    EXPECT_EQ(QStringList{mountPoint + QStringLiteral("/B/three.mp3")}, index.lists[0].locations);
++    EXPECT_FALSE(index.lists[1].crate);
++    EXPECT_EQ((QStringList{location, QStringLiteral("/storage/library/two.mp3")}),
++            index.lists[1].locations);
++    EXPECT_EQ(QStringLiteral("By hand"), index.lists[2].name);
++    EXPECT_EQ(QStringList{mountPoint + QStringLiteral("/C/four.mp3")}, index.lists[2].locations);
++
++    EXPECT_EQ(1, index.analysisFiles.size());
++    EXPECT_EQ(124, readAnalysisFile(mountPoint, location).value(QStringLiteral("bpm")).toInt());
++    // Another track (same hash impossible here: just no file)
++    EXPECT_TRUE(readAnalysisFile(mountPoint, mountPoint + QStringLiteral("/B/three.mp3")).isEmpty());
++    EXPECT_TRUE(analysisFileName(mountPoint, QStringLiteral("/elsewhere/x.mp3")).isEmpty());
++}

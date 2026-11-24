@@ -162,6 +162,14 @@ sudo reboot                    # stays in B
       works, and `findmnt /usb` shows `ro` again afterwards. A track keeps
       playing without audio overloads during a large copy (Auto DJ log:
       "audio overloads").
+- [ ] DECKSMITHOS/ drive: system menu "Prepare USB for DecksmithOS" (or a
+      folder made by hand); `findmnt /usb` shows `rw` after replugging.
+      Analyse a track, set a hot cue, create a playlist and a crate, EJECT:
+      `DECKSMITHOS/Analysis/*.json`, `Playlists/*.m3u8`, `Crates/*.m3u8` and
+      `index.json` are on the drive; plugged in again (or into another
+      console) the cue, playlist and crate are back without analysis.
+- [ ] Auto DJ BRAKE: the incoming track comes up while the outgoing one
+      slows down, no gap (log: "brake: stopped after N ms" near 3000).
 
 ## 6. Controller: Numark Mixtrack Pro 3
 

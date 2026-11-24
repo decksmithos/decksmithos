@@ -11,6 +11,11 @@
 #     unmounts the slot (fails while a file on it is open, e.g. a loaded
 #     track) and removes the disk from the kernel, so it can be pulled out;
 #     it is mounted again only when plugged in again.
+#   decksmithos-usb-mount prepare <slot>
+#     creates DECKSMITHOS/ on the drive (system menu) and leaves it
+#     read-write: a drive with DECKSMITHOS/ keeps the DJ's analysis,
+#     playlists and crates (Mixxx patch 0028) and is mounted read-write
+#     whenever it is plugged in (FAT32, exFAT, NTFS; others stay read-only)
 #   decksmithos-usb-mount write <slot> on|off
 #     remounts the slot read-write (on) or back read-only (off), for the
 #     copy to a drive (Mixxx patch 0025): only FAT32, exFAT and NTFS (ext*
@@ -25,7 +30,15 @@ LOCK="/run/decksmithos-usb.lock"
 
 log() { printf '[decksmithos-usb] %s\n' "$*"; }
 
-USAGE="usage: $0 add|remove <kernel name> | eject <slot> | write <slot> on|off"
+USAGE="usage: $0 add|remove <kernel name> | eject <slot> | write <slot> on|off | prepare <slot>"
+STORE_DIR="DECKSMITHOS"
+
+writable_fs() {
+  case "$1" in
+    vfat|exfat|ntfs3) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 ACTION="${1:?${USAGE}}"
 NAME="${2:?${USAGE}}"
 DEV="/dev/${NAME}"
@@ -77,7 +90,7 @@ do_add() {
   local owner="uid=${uid},gid=${gid},fmask=0133,dmask=0022"
   type="${fstype}"
   case "${fstype}" in
-    vfat)       opts="${common},${owner},utf8,shortname=mixed" ;;
+    vfat)       opts="${common},${owner},utf8,shortname=mixed,flush" ;;
     exfat)      opts="${common},${owner},iocharset=utf8" ;;
     ext3|ext4)  opts="${common},noload" ;;   # noload: never replay a journal on the stick
     ext2)       opts="${common}" ;;
@@ -94,6 +107,14 @@ do_add() {
       mkdir -p "${slot}"
       mount -t "${type}" -o "${opts}" "${DEV}" "${slot}"
       log "${DEV} (${fstype}, $(blkid -p -o value -s LABEL "${DEV}" 2>/dev/null || true)) mounted read-only at ${slot}"
+      # The DJ's own drive: DECKSMITHOS/ is written by Mixxx
+      if [[ -d "${slot}/${STORE_DIR}" ]] && writable_fs "${type}"; then
+        if mount -o remount,rw "${slot}"; then
+          log "${slot} has ${STORE_DIR}/: read-write"
+        else
+          log "${slot} has ${STORE_DIR}/ but cannot be made writable"
+        fi
+      fi
       return 0
     fi
   done
@@ -162,15 +183,39 @@ do_write() {
       ;;
     off)
       sync -f "${slot}" 2>/dev/null || sync
-      mount -o remount,ro "${slot}"
-      log "${src} at ${slot} read-only again"
+      if [[ -d "${slot}/${STORE_DIR}" ]]; then
+        log "${src} at ${slot} stays writable (${STORE_DIR}/)"
+      else
+        mount -o remount,ro "${slot}"
+        log "${src} at ${slot} read-only again"
+      fi
       ;;
     *) log "write: on or off, not '${state}'"; exit 2 ;;
   esac
 }
 
+do_prepare() {
+  exec 9>"${LOCK}"
+  flock 9
+
+  local slot="${NAME}" known="" s src fstype
+  for s in "${SLOTS[@]}"; do
+    [[ "${s}" == "${slot}" ]] && known=1
+  done
+  [[ -n "${known}" ]] || { log "prepare: ${slot} is not a USB slot (${SLOTS[*]})"; exit 2; }
+  src="$(slot_source "${slot}")"
+  [[ -n "${src}" ]] || { log "prepare: nothing mounted at ${slot}"; exit 1; }
+  fstype="$(findmnt -n -o FSTYPE --mountpoint "${slot}")"
+  writable_fs "${fstype}" || { log "prepare: ${slot} (${fstype}) is not written to"; exit 1; }
+  mount -o remount,rw "${slot}"
+  mkdir -p "${slot}/${STORE_DIR}"
+  sync -f "${slot}" 2>/dev/null || sync
+  log "${src} at ${slot} prepared: ${STORE_DIR}/ created, read-write"
+}
+
 case "${ACTION}" in
   add)    do_add ;;
+  prepare) do_prepare ;;
   remove) do_remove ;;
   eject)  do_eject ;;
   write)  do_write "$@" ;;

@@ -262,6 +262,7 @@ class Menu:
 
         actions.append(self.update_action())
         actions.append(self.bootloader_action(bl_cur, bl_lat))
+        actions.extend(self.usb_store_actions())
 
         cols = 2
         for i, (text, cb, color, enabled) in enumerate(actions):
@@ -288,6 +289,36 @@ class Menu:
         text = f"Install update\n{u.get('version', '?')} {u.get('profile', '?')}{note}"
         return (text, lambda b: self.confirm(b, f"Tap again: install into slot {self.inactive_slot()}",
                                              self.install_update), ACCENT, True)
+
+    def usb_store_actions(self):
+        """DECKSMITHOS/ on the USB drives: the DJ's analysis, playlists and
+        crates are kept on a drive that has it (mounted read-write)."""
+        mounts = {}
+        try:
+            with open("/proc/mounts") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        mounts[parts[1]] = (parts[2], "rw" in parts[3].split(","))
+        except OSError:
+            pass
+        actions = []
+        for slot, name in (("/usb", "USB"), ("/usb2", "USB2")):
+            if slot not in mounts:
+                continue
+            fstype, rw = mounts[slot]
+            if os.path.isdir(os.path.join(slot, "DECKSMITHOS")):
+                state = "saves here" if rw else "read-only"
+                actions.append((f"{name}: DecksmithOS drive\n{state}", None, PANEL, False))
+            elif fstype in ("vfat", "exfat", "ntfs3"):
+                actions.append((f"Prepare {name}\nfor DecksmithOS", lambda b, s=slot, n=name: self.confirm(
+                    b, f"Tap again: {n} keeps your analysis, playlists, crates",
+                    lambda: self.prepare_usb(s)), PANEL, True))
+        return actions
+
+    def prepare_usb(self, slot):
+        system("usb-prepare", slot, capture=True, timeout=30)
+        self.close()
 
     def bootloader_action(self, cur, lat):
         if not (cur or "").isdigit() or not (lat or "").isdigit():

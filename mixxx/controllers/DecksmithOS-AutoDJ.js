@@ -84,9 +84,15 @@ DecksmithAutoDJ.CONFIG = {
     brakeEvery: 8,
     // Brake: Mixxx's brake factor (larger: longer), the speed at which the
     // incoming track starts and the beats it takes to come up on its fader
-    brakeFactor: 1.0,
-    brakeCutSpeed: 0.3,
-    brakeFadeInBeats: 4,
+    // Brake: the outgoing deck slows down (engine.brake; a smaller factor
+    // stops later) while the incoming one comes up over brakeMs on the
+    // crossfader, from the start of the brake (a transition on the clock,
+    // [AutoDJ],next_transition_ms, Mixxx patch 0029)
+    // Loop: the fade of the last loop, on the clock
+    loopFadeBeats: 4,
+    brakeFactor: 0.5,
+    brakeMs: 3000,
+    brakeBeats: 8,
     // Effect unit for echo and reverb (effect 1: Echo, effect 2: Reverb;
     // loaded by decksmithos-mixxx-autoconf). Unit 1 is the BEAT FX of the
     // skin and unit 2 that of 4-deck layouts.
@@ -516,6 +522,19 @@ DecksmithAutoDJ.onCountdown = function(seconds) {
 
 // What comes before the transition, "ms" before it starts
 DecksmithAutoDJ.startPre = function(p, ms) {
+    // The tempo of a track can change after it was planned (analysed when
+    // it was loaded): a transition that needs matched tempos becomes a fade
+    if (this.TRANSITIONS[p.name].match && !this.synced(p.from) && !this.synced(p.to)) {
+        var change = this.tempoChangePercent(
+            engine.getValue(p.from, "bpm"), engine.getValue(p.to, "file_bpm"));
+        if (change === null || Math.abs(change) > this.CONFIG.maxTempoChangePercent) {
+            this.log(p.name + " needs matching tempos (" +
+                     (change === null ? "unknown" : change.toFixed(1) + " %") + "): fade instead");
+            p.name = "fade";
+            engine.setValue("[AutoDJ]", "next_transition_beats", this.beatsFor("fade", false));
+            this.showNext();
+        }
+    }
     p.pre = true;
     var beatMs = this.beatMs(p.from);
     switch (p.name) {
@@ -602,13 +621,22 @@ DecksmithAutoDJ.fxOff = function() {
 // Loop of 4 beats, then 2, 1 and 1/2 beats (8 beats in all), then the cut
 DecksmithAutoDJ.LOOP_STEPS = [[4, 1], [2, 1], [1, 1], [0.5, 2]];
 DecksmithAutoDJ.loopRoll = function(group, beatMs) {
+    // The transition starts with the roll and runs on the clock over the
+    // roll and the fade of its last loop (Mixxx patch 0029: the looping
+    // deck's position does not advance): the incoming track comes up while
+    // the loops get shorter; the old track is not heard again
+    var rollBeats = 0;
+    this.LOOP_STEPS.forEach(function(s) {
+        rollBeats += s[0] * s[1];
+    });
+    var beats = rollBeats + this.CONFIG.loopFadeBeats;
+    engine.setValue("[AutoDJ]", "next_transition_beats", beats);
+    engine.setValue("[AutoDJ]", "next_transition_ms", beats * beatMs);
+    this.loopHeld = group;
     var step = 0;
     var next = function() {
         if (step >= DecksmithAutoDJ.LOOP_STEPS.length) {
-            // out of the loop on the beat: the fade (its beats) starts now
-            DecksmithAutoDJ.releaseLoop(group);
-            DecksmithAutoDJ.fadeNow();
-            return;
+            return; // the last loop rolls on until the transition ends
         }
         var s = DecksmithAutoDJ.LOOP_STEPS[step++];
         engine.setValue(group, "beatloop_size", s[0]);
@@ -618,35 +646,35 @@ DecksmithAutoDJ.loopRoll = function(group, beatMs) {
         DecksmithAutoDJ.startTimer("loop", s[0] * s[1] * beatMs, next, true);
     };
     next();
+    this.fadeNow();
 };
 
-// Vinyl brake of the outgoing deck; nearly stopped, the transition starts
-// as a cut and the incoming deck comes up on its own fader
-// (startTransition). Mixxx's Auto DJ fades by the outgoing track's position,
-// so the fade cannot run over the brake; and Mixxx stops the braked deck
-// itself: if that comes first, the incoming deck is started here.
+// Vinyl brake of the outgoing deck; the transition starts with it and runs
+// on the clock (Mixxx patch 0029: the braked deck's position barely moves),
+// so the incoming track comes up while the outgoing one slows down. If the
+// deck stops before Auto DJ started the transition (an older Mixxx), the
+// incoming deck is started here.
 // (Mixxx's spinback is not used: started on a playing deck it ends at once.)
 DecksmithAutoDJ.brake = function(group) {
     var to = this.other(group);
     var started = Date.now();
     engine.brake(this.deckNumber(group), true, this.CONFIG.brakeFactor);
     this.log("brake");
+    // The transition starts with the brake and follows the clock: the
+    // incoming track comes up while the outgoing one slows down
+    engine.setValue("[AutoDJ]", "next_transition_beats", this.CONFIG.brakeBeats);
+    engine.setValue("[AutoDJ]", "next_transition_ms", this.CONFIG.brakeMs);
+    this.fadeNow();
     this.startTimer("brake", 20, function() {
-        if (DecksmithAutoDJ.transition) {
-            DecksmithAutoDJ.stopTimer("brake");
-            return;
-        }
         if (!engine.getValue(group, "play")) {
             DecksmithAutoDJ.stopTimer("brake");
-            DecksmithAutoDJ.startAfterStop(group, to);
-            return;
-        }
-        var speed = Math.abs(engine.getValue(group, "scratch2"));
-        if (speed < DecksmithAutoDJ.CONFIG.brakeCutSpeed || Date.now() - started > 4000) {
+            DecksmithAutoDJ.log("brake: stopped after " + (Date.now() - started) + " ms");
+            if (!DecksmithAutoDJ.transition) {
+                // Auto DJ did not start the transition (an older Mixxx)
+                DecksmithAutoDJ.startAfterStop(group, to);
+            }
+        } else if (Date.now() - started > 4 * DecksmithAutoDJ.CONFIG.brakeMs) {
             DecksmithAutoDJ.stopTimer("brake");
-            DecksmithAutoDJ.rampVolume(to, 0, 0);
-            engine.setValue("[AutoDJ]", "next_transition_beats", 0);
-            DecksmithAutoDJ.fadeNow();
         }
     }, false);
 };
@@ -758,9 +786,13 @@ DecksmithAutoDJ.startTransition = function(from, to) {
     var beatMs = this.beatMs(from);
     switch (name) {
     case "loop":
-        // FADE NOW during the roll: out of the loop now
-        this.stopTimer("loop");
-        this.releaseLoop(from);
+        if (this.loopHeld !== from) {
+            // not started by the roll (an older Mixxx): out of the loop now,
+            // the fade follows the deck's position
+            this.stopTimer("loop");
+            this.releaseLoop(from);
+        }
+        this.loopHeld = null;
         // falls through: the fade of a blend
     case null:
     case "blend":
@@ -798,14 +830,13 @@ DecksmithAutoDJ.startTransition = function(from, to) {
         this.rampVolume(from, 0, fadeBeats * beatMs);
         break;
     case "brake":
-        // near the end of the brake (or FADE NOW before it): the incoming
-        // deck comes up on its own fader
-        this.stopTimer("brake");
+        // started with the brake: the crossfader brings the incoming deck
+        // up (on the clock) while the outgoing one slows down; the brake
+        // timer stays on to log when the deck stopped
         this.transition.swapped = true;
-        if (this.state[to].savedVolume === undefined) {
-            this.rampVolume(to, 0, 0);
+        if (this.state[to].savedVolume !== undefined) {
+            this.rampVolume(to, null, 0);
         }
-        this.rampVolume(to, null, this.CONFIG.brakeFadeInBeats * this.beatMs(to));
         break;
     default:
         this.transition.swapped = true;
@@ -847,6 +878,15 @@ DecksmithAutoDJ.endTransition = function() {
     this.transition = null;
     this.stopTimer("loop");
     this.fxOff();
+    if (t.name === "loop") {
+        this.stopTimer("loop");
+        this.releaseLoop(t.from);
+    }
+    if (t.name === "brake") {
+        // Auto DJ stopped the deck; the brake must not go on into the next
+        // track loaded there
+        engine.brake(this.deckNumber(t.from), false);
+    }
     if (!t.swapped) {
         this.rampLow(t.to, null);
     }

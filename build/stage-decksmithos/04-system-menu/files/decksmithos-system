@@ -18,6 +18,8 @@
 #   bootloader-update  write the included bootloader if it is newer (never older)
 #   timezone-set ZONE  save and apply the time zone (decksmithos-timezone set)
 #   eject SLOT         unmount a USB slot (/usb or /usb2) and detach its disk
+#   usb-prepare SLOT   create DECKSMITHOS/ on a USB drive (the DJ's analysis,
+#                      playlists and crates are kept there), read-write
 #   usb-write SLOT on|off  a USB slot writable while Mixxx copies tracks to
 #                      it (patch 0025), then read-only again
 #                      (Mixxx's EJECT buttons, Mixxx patch 0017)
@@ -187,6 +189,12 @@ case "${1:-}" in
       *) die "eject: unknown slot '${2:-}'" ;;
     esac
     ;;
+  usb-prepare)
+    case "${2:-}" in
+      /usb|/usb2) /usr/local/sbin/decksmithos-usb-mount prepare "$2" ;;
+      *) die "usb-prepare: unknown slot '${2:-}'" ;;
+    esac
+    ;;
   usb-write)
     case "${2:-}:${3:-}" in
       /usb:on|/usb:off|/usb2:on|/usb2:off)
@@ -195,6 +203,6 @@ case "${1:-}" in
     esac
     ;;
   *)
-    die "usage: decksmithos-system poweroff|reboot|reboot-writable|reboot-readonly|restart-mixxx|slots|try-slot|commit-slot|rootfs-status|update-find|update-check PATH|update-install PATH|bootloader-status|bootloader-update|timezone-set ZONE|eject SLOT|usb-write SLOT on|off"
+    die "usage: decksmithos-system poweroff|reboot|reboot-writable|reboot-readonly|restart-mixxx|slots|try-slot|commit-slot|rootfs-status|update-find|update-check PATH|update-install PATH|bootloader-status|bootloader-update|timezone-set ZONE|eject SLOT|usb-write SLOT on|off|usb-prepare SLOT"
     ;;
 esac

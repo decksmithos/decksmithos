@@ -1,0 +1,172 @@
+Description: USB import: PLS playlists of the drive
+ Part of the USB import (patch 0016). The *.pls files in the root of a drive
+ and in a folder "playlists" there (any case) become playlists of the drive,
+ like the rekordbox playlists and Serato crates (locked, listed first,
+ deleted when the drive goes). Paths may be relative to the PLS file,
+ absolute on the drive, file:// URLs or Windows paths with a drive letter
+ (taken as paths on this drive). Test UsbImportTest.Pls.
+Author: DecksmithOS
+Forwarded: not-needed
+Last-Update: 2026-11-24
+---
+diff --git a/src/library/usbimport/usbimportutil.cpp b/src/library/usbimport/usbimportutil.cpp
+index ff27d46e..50bc60b1 100644
+--- a/src/library/usbimport/usbimportutil.cpp
++++ b/src/library/usbimport/usbimportutil.cpp
+@@ -1,5 +1,9 @@
+ #include "library/usbimport/usbimportutil.h"
+ 
++#include <QUrl>
++
++#include <QMap>
++
+ #include <QDir>
+ #include <QHash>
+ #include <QStorageInfo>
+@@ -222,5 +226,42 @@ bool isMountedFilesystem(const QString& path) {
+             storage.rootPath() != QDir::rootPath();
+ }
+ 
++QStringList parsePls(const QByteArray& data,
++        const QString& plsDirectory,
++        const QString& mountPoint) {
++    static const QRegularExpression kFileLine(
++            QStringLiteral("^\\s*File(\\d+)\\s*=\\s*(.*?)\\s*$"),
++            QRegularExpression::CaseInsensitiveOption);
++    static const QRegularExpression kWindowsDrive(QStringLiteral("^[A-Za-z]:/"));
++    QMap<int, QString> files;
++    const QStringList lines = QString::fromUtf8(data).split(QChar('\n'));
++    for (const QString& line : lines) {
++        const QRegularExpressionMatch match = kFileLine.match(line);
++        if (!match.hasMatch()) {
++            continue;
++        }
++        QString path = match.captured(2);
++        if (path.isEmpty()) {
++            continue;
++        }
++        if (path.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive)) {
++            path = QUrl(path).toLocalFile();
++        }
++        path.replace(QChar('\\'), QChar('/'));
++        QString location;
++        if (kWindowsDrive.match(path).hasMatch()) {
++            location = QDir(mountPoint).filePath(path.mid(3));
++        } else if (path.startsWith(QChar('/'))) {
++            location = path.startsWith(mountPoint + QChar('/'))
++                    ? path
++                    : QDir(mountPoint).filePath(path.mid(1));
++        } else {
++            location = QDir(plsDirectory).filePath(path);
++        }
++        files.insert(match.captured(1).toInt(), QDir::cleanPath(location));
++    }
++    return files.values();
++}
++
+ } // namespace usbimport
+ } // namespace mixxx
+diff --git a/src/library/usbimport/usbimportutil.h b/src/library/usbimport/usbimportutil.h
+index 997761f0..6fd51709 100644
+--- a/src/library/usbimport/usbimportutil.h
++++ b/src/library/usbimport/usbimportutil.h
+@@ -88,6 +88,15 @@ QStringList orderSeratoCrates(const QStringList& crateNames, const QStringList&
+ /// "Parent%%Child" -> {"Parent", "Child"}
+ QStringList seratoCratePath(const QString& crateName);
+ 
++/// DecksmithOS: the track locations of a PLS playlist (File1=, File2=, ...
++/// in number order) of a drive mounted at `mountPoint`, the file being in
++/// `plsDirectory`. Paths may be relative to the file, absolute on the
++/// drive, file:// URLs or Windows paths with a drive letter ("E:\Music\a.mp3"
++/// is taken as "Music/a.mp3" on this drive).
++QStringList parsePls(const QByteArray& data,
++        const QString& plsDirectory,
++        const QString& mountPoint);
++
+ /// Detects drives appearing and disappearing. The presence check is
+ /// injectable for tests; in Mixxx it is isMountedFilesystem().
+ class DriveWatcher {
+diff --git a/src/library/usbimport/usblibraryimporter.cpp b/src/library/usbimport/usblibraryimporter.cpp
+index 1fe63ff8..4f502fab 100644
+--- a/src/library/usbimport/usblibraryimporter.cpp
++++ b/src/library/usbimport/usblibraryimporter.cpp
+@@ -139,6 +139,43 @@ void readSerato(const Drive& drive, DriveIndex* pIndex) {
+             << "Serato crates," << newOrder.size() << "listed in neworder.pref";
+ }
+ 
++/// DecksmithOS: PLS playlists in the root of the drive and in a folder
++/// "playlists" there (any case), by name
++void readPls(const Drive& drive, DriveIndex* pIndex) {
++    const QDir root(drive.mountPoint);
++    QList<QDir> directories{root};
++    const QStringList subdirectories = root.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
++    for (const QString& name : subdirectories) {
++        if (name.compare(QStringLiteral("playlists"), Qt::CaseInsensitive) == 0) {
++            directories.append(QDir(root.filePath(name)));
++        }
++    }
++    int count = 0;
++    for (const QDir& directory : std::as_const(directories)) {
++        const QStringList files = directory.entryList(QDir::Files, QDir::Name | QDir::IgnoreCase);
++        for (const QString& fileName : files) {
++            if (!fileName.endsWith(QStringLiteral(".pls"), Qt::CaseInsensitive)) {
++                continue;
++            }
++            QFile file(directory.filePath(fileName));
++            if (!file.open(QIODevice::ReadOnly)) {
++                qWarning() << "USB import: cannot open" << file.fileName();
++                continue;
++            }
++            DrivePlaylist playlist;
++            playlist.name = playlistName(drive.label,
++                    QStringList{QFileInfo(fileName).completeBaseName()});
++            playlist.locations = parsePls(
++                    file.readAll(), directory.absolutePath(), drive.mountPoint);
++            pIndex->playlists.append(playlist);
++            ++count;
++        }
++    }
++    if (count > 0) {
++        qInfo() << "USB import:" << drive.mountPoint << "has" << count << "PLS playlists";
++    }
++}
++
+ QString sqlLikeEscaped(QString text) {
+     text.replace(QChar('\\'), QStringLiteral("\\\\"));
+     text.replace(QChar('%'), QStringLiteral("\\%"));
+@@ -152,6 +189,7 @@ std::shared_ptr<const DriveIndex> readDriveIndex(const Drive& drive) {
+     auto pIndex = std::make_shared<DriveIndex>();
+     readRekordbox(drive, pIndex.get());
+     readSerato(drive, pIndex.get());
++    readPls(drive, pIndex.get());
+     pIndex->store = readStoreIndex(drive.mountPoint);
+     if (pIndex->store.present) {
+         qInfo() << "USB import:" << drive.mountPoint << "has DECKSMITHOS/ ("
+diff --git a/src/test/usbimporttest.cpp b/src/test/usbimporttest.cpp
+index a8f10e3d..4bc1acaf 100644
+--- a/src/test/usbimporttest.cpp
++++ b/src/test/usbimporttest.cpp
+@@ -418,3 +418,23 @@ TEST(UsbImportTest, DriveStoreIndex) {
+     EXPECT_TRUE(readAnalysisFile(mountPoint, mountPoint + QStringLiteral("/B/three.mp3")).isEmpty());
+     EXPECT_TRUE(analysisFileName(mountPoint, QStringLiteral("/elsewhere/x.mp3")).isEmpty());
+ }
++
++TEST(UsbImportTest, Pls) {
++    const QByteArray pls = QByteArrayLiteral(
++            "[playlist]\n"
++            "File2=../B/two.mp3\r\n"
++            "Title2=Two\n"
++            "File1=A/one.mp3\n"
++            "file3=E:\\Music\\three.mp3\n"
++            "File4=/Music/four.mp3\n"
++            "File5=/usb/Music/five.mp3\n"
++            "File10=file:///usb/Music/ten.mp3\n"
++            "NumberOfEntries=6\nVersion=2\n");
++    EXPECT_EQ((QStringList{QStringLiteral("/usb/Playlists/A/one.mp3"),
++                      QStringLiteral("/usb/B/two.mp3"),
++                      QStringLiteral("/usb/Music/three.mp3"),
++                      QStringLiteral("/usb/Music/four.mp3"),
++                      QStringLiteral("/usb/Music/five.mp3"),
++                      QStringLiteral("/usb/Music/ten.mp3")}),
++            parsePls(pls, QStringLiteral("/usb/Playlists"), QStringLiteral("/usb")));
++}

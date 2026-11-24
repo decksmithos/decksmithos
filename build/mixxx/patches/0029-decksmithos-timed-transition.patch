@@ -1,0 +1,103 @@
+Description: Auto DJ transitions that follow the clock ([AutoDJ],next_transition_ms)
+ Auto DJ moves the crossfader with the outgoing deck's play position. A
+ script that brakes the outgoing deck (engine.brake) slows that position
+ down, and the crossfade lagged behind or never ended, so the brake
+ transition had to wait for the end of the brake and cut. With
+ [AutoDJ],next_transition_ms > 0 the next transition (its start and end
+ points as before, e.g. from next_transition_beats) advances on the clock
+ over that many milliseconds, also while the outgoing deck is slow or
+ stopped; the value is reset when the transition starts. Used by the
+ DecksmithOS Auto DJ script: the incoming track comes up from the start of
+ the brake.
+Author: DecksmithOS
+Forwarded: no
+Last-Update: 2026-11-24
+---
+diff --git a/src/library/autodj/autodjprocessor.cpp b/src/library/autodj/autodjprocessor.cpp
+index 4452002a..133ccba3 100644
+--- a/src/library/autodj/autodjprocessor.cpp
++++ b/src/library/autodj/autodjprocessor.cpp
+@@ -151,7 +151,8 @@ AutoDJProcessor::AutoDJProcessor(
+           m_secondsToTransition(ConfigKey(kControlGroup, QStringLiteral("seconds_to_transition"))),
+           m_fadeByScript(ConfigKey(kControlGroup, QStringLiteral("fade_by_script"))),
+           m_fadeRequest(ConfigKey(kControlGroup, QStringLiteral("fade_request"))),
+-          m_randomFill(ConfigKey(kControlGroup, QStringLiteral("random_fill"))) {
++          m_randomFill(ConfigKey(kControlGroup, QStringLiteral("random_fill"))),
++          m_nextTransitionMillis(ConfigKey(kControlGroup, QStringLiteral("next_transition_ms"))) {
+     m_pAutoDJTableModel = make_parented<PlaylistTableModel>(
+             this, pTrackCollectionManager, "mixxx.db.model.autodj");
+     m_pAutoDJTableModel->selectPlaylist(iAutoDJPlaylistId);
+@@ -176,6 +177,20 @@ AutoDJProcessor::AutoDJProcessor(
+     // DecksmithOS: per-transition length and phrase alignment, for scripts
+     // that choose the kind of each transition (see planTransition()).
+     m_nextTransitionBeats.set(-1);
++    // DecksmithOS: a timed transition advances on the clock, also while the
++    // outgoing deck is slow or stopped
++    m_timedFadeTimer.setInterval(20);
++    connect(&m_timedFadeTimer, &QTimer::timeout, this, [this]() {
++        DeckAttributes* pDeck = m_pTimedFadeDeck;
++        if (!pDeck || m_timedFadeMillis <= 0 ||
++                (m_eState != ADJ_LEFT_FADING && m_eState != ADJ_RIGHT_FADING)) {
++            m_timedFadeTimer.stop();
++            m_timedFadeMillis = 0;
++            m_pTimedFadeDeck = nullptr;
++            return;
++        }
++        playerPositionChanged(pDeck, pDeck->playPosition());
++    });
+     connect(&m_nextTransitionBeats,
+             &ControlObject::valueChanged,
+             this,
+@@ -1217,6 +1232,13 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+                 // DecksmithOS: a script sets the length of the next
+                 // transition again when the next track is loaded
+                 m_nextTransitionBeats.set(-1);
++                m_timedFadeMillis = m_nextTransitionMillis.get();
++                m_nextTransitionMillis.set(0);
++                if (m_timedFadeMillis > 0) {
++                    m_pTimedFadeDeck = thisDeck;
++                    m_timedFadeClock.start();
++                    m_timedFadeTimer.start();
++                }
+                 m_secondsToTransition.forceSet(0);
+ 
+                 const double toDeckFadeDistance =
+@@ -1277,6 +1299,10 @@ void AutoDJProcessor::playerPositionChanged(DeckAttributes* pAttributes,
+             // and end position and the step we have taken since the last call
+             double transitionProgress = (thisPlayPosition - thisDeck->fadeBeginPos) /
+                     (thisDeck->fadeEndPos - thisDeck->fadeBeginPos);
++            if (m_timedFadeMillis > 0 && thisDeck == m_pTimedFadeDeck) {
++                transitionProgress = math_min(1.0,
++                        static_cast<double>(m_timedFadeClock.elapsed()) / m_timedFadeMillis);
++            }
+             double transitionStep = transitionProgress - m_transitionProgress;
+             if (transitionStep > 0.0) {
+                 // We have made progress.
+diff --git a/src/library/autodj/autodjprocessor.h b/src/library/autodj/autodjprocessor.h
+index 0e49bfbf..9539d671 100644
+--- a/src/library/autodj/autodjprocessor.h
++++ b/src/library/autodj/autodjprocessor.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
++#include <QElapsedTimer>
+ #include <QObject>
++#include <QTimer>
+ #include <QSet>
+ #include <QString>
+ #include <memory>
+@@ -352,6 +354,14 @@ class AutoDJProcessor : public QObject {
+     ControlObject m_fadeByScript;
+     ControlObject m_fadeRequest;
+     ControlPushButton m_randomFill;
++    /// [AutoDJ],next_transition_ms: the next transition follows the clock
++    /// over this time instead of the outgoing deck's position (a brake
++    /// slows that deck down); reset when it starts
++    ControlObject m_nextTransitionMillis;
++    double m_timedFadeMillis = 0;
++    QElapsedTimer m_timedFadeClock;
++    QTimer m_timedFadeTimer;
++    DeckAttributes* m_pTimedFadeDeck = nullptr;
+ 
+     DISALLOW_COPY_AND_ASSIGN(AutoDJProcessor);
+ };
