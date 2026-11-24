@@ -47,7 +47,7 @@ not yet tested on DecksmithOS hardware unless stated.
 4. Phrase display and a touch beatgrid editor.
 5. Stems (files first; on-device separation only if the CM5 can do it without xruns).
 6. Smart Cue / Gate Cue style cue modes (Mixxx mapping/skin work, controller-agnostic).
-7. Lighting output (DMX/Hue) -- probably out of scope.
+7. Lighting output: chosen direction (2026-11-24) is the console driving DMX itself: two USB-DMX universes, QLC+ headless on the background cores, fed by Mixxx with beat, phrases and mix events (AGENTS.md, gap 28). Not started.
 8. Streaming -- conflicts with the no-network release design.
 9. Boot time and power-loss behaviour: measure and publish.
 
